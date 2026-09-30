@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="ru.evotor.devices.SCANNER_RECEIVER" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:name=".SixthCupApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SixthCup"
+        android:usesCleartextTraffic="true"
+        tools:replace="android:allowBackup">
+
+        <meta-data
+            android:name="app_uuid"
+            android:value="151071e8-88a4-44f6-b71a-b17c559f9b7d" />
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/tile_label"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize">
+
+            <meta-data
+                android:name="ru.evotor.launcher.BACKGROUND_COLOR"
+                android:value="#002FA7" />
+
+            <meta-data
+                android:name="ru.evotor.launcher.GRANTS"
+                android:resource="@array/cashier_grants" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.EVOTOR" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".scanner.ScannerReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="ru.evotor.devices.ScannedCode" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="cashier_grants">
+        <item>CASH_OPERATIONS_SELL</item>
+    </string-array>
+</resources>
