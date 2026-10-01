@@ -27,9 +27,22 @@ import ru.sixthcup.evotor.data.ClientCard
 import ru.sixthcup.evotor.data.LoyaltyRules
 import ru.sixthcup.evotor.data.Prefs
 import ru.sixthcup.evotor.data.Product
+import ru.sixthcup.evotor.data.Modifier
+import ru.sixthcup.evotor.data.ModifierCatalog
+import ru.sixthcup.evotor.data.ModifierGroup
+import android.widget.CheckBox
+import android.widget.ScrollView
 import ru.sixthcup.evotor.domain.EvotorPaymentGateway
+import ru.sixthcup.evotor.domain.LoyaltyReceiptFactory
 import ru.sixthcup.evotor.domain.PaymentResult
 import ru.sixthcup.evotor.scanner.ScannerReceiver
+import ru.sixthcup.evotor.net.ApiClient
+import ru.sixthcup.evotor.net.DeviceKeys
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 
 /**
  * Full cashier: menu → cart + loyalty → OpenSellReceiptCommand + Evotor payment (fiscal print).
@@ -71,6 +84,63 @@ class MainActivity : AppCompatActivity() {
         render()
     }
 
+
+    /** Show syrups/toppings sheet for drinks, then add to cart. */
+    private fun offerModifiersThenAdd(product: Product) {
+        val mods = ModifierCatalog.forProduct(product)
+        if (mods.isEmpty()) {
+            cart.add(product)
+            render()
+            return
+        }
+        val scroll = ScrollView(this)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 24, 40, 16)
+        }
+        box.addView(TextView(this).apply {
+            text = product.name + " — добавки? (сиропы, топпинги)"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 0, 0, 16)
+        })
+        val checks = mutableListOf<Pair<CheckBox, Modifier>>()
+        ModifierGroup.entries.forEach { group ->
+            val groupMods = mods.filter { it.group == group }
+            if (groupMods.isEmpty()) return@forEach
+            box.addView(TextView(this).apply {
+                text = group.title
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                setPadding(0, 12, 0, 6)
+            })
+            groupMods.forEach { m ->
+                val cb = CheckBox(this).apply {
+                    text = m.name + "  +" + (m.priceKopecks / 100) + " ₽"
+                    textSize = 15f
+                    minHeight = 48
+                }
+                box.addView(cb)
+                checks.add(cb to m)
+            }
+        }
+        scroll.addView(box)
+        AlertDialog.Builder(this)
+            .setTitle("Добавки")
+            .setView(scroll)
+            .setPositiveButton("В чек") { _, _ ->
+                val selected = checks.filter { it.first.isChecked }.map { it.second }
+                cart.add(product, selected)
+                render()
+            }
+            .setNeutralButton("Без добавок") { _, _ ->
+                cart.add(product)
+                render()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
     private fun promptCard() {
         val input = EditText(this).apply {
             hint = "Код карты / QR (DEMO / FREE / CB)"
@@ -92,7 +162,13 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         content = findViewById(R.id.content)
         prefs = Prefs(this)
-        step = if (prefs.enrollCode.isBlank()) Step.ENROLL else Step.SALE
+        if (prefs.isEnrolled) {
+            step = Step.SALE
+            loadCatalogCache()
+            refreshCatalogAsync(showToast = false)
+        } else {
+            step = Step.ENROLL
+        }
         render()
     }
 
@@ -127,22 +203,112 @@ class MainActivity : AppCompatActivity() {
     // ---------- ENROLL ----------
     private fun renderEnroll() {
         header("Регистрация кассы")
+        content.addView(label("Код из admin → Кассы. Меню с backend."))
+        val base = EditText(this).apply {
+            hint = "URL backend"
+            setText(prefs.apiBaseUrl)
+            setPadding(24, 24, 24, 24)
+        }
+        content.addView(base)
         val code = EditText(this).apply {
-            hint = "Код (DEMO1234)"
-            setText("DEMO1234")
+            hint = "Код регистрации кассы"
             setPadding(24, 24, 24, 24)
         }
         content.addView(code)
         content.addView(primaryBtn("Зарегистрировать") {
             val c = code.text.toString().trim()
+            val url = base.text.toString().trim().ifBlank { prefs.apiBaseUrl }
             if (c.isEmpty()) {
                 toast("Введите код"); return@primaryBtn
             }
-            prefs.enrollCode = c
-            prefs.deviceName = "Эвотор · $c"
-            step = Step.SALE
-            render()
+            prefs.apiBaseUrl = url
+            enrollAsync(c)
         })
+    }
+
+    private fun enrollAsync(code: String) {
+        toast("Регистрация…")
+        CoroutineScope(Dispatchers.Main).launch {
+            try {
+                val pk = prefs.publicKey.ifBlank {
+                    DeviceKeys.generatePublicKeyPlaceholder().also { prefs.publicKey = it }
+                }
+                val result = withContext(Dispatchers.IO) {
+                    ApiClient(prefs.apiBaseUrl).enroll(code, pk)
+                }
+                prefs.deviceId = result.deviceId
+                prefs.deviceToken = result.deviceToken
+                prefs.storeName = result.storeName
+                prefs.enrollCode = code
+                prefs.deviceName = "Эвотор · ${result.storeName}"
+                val dir = withContext(Dispatchers.IO) {
+                    ApiClient(prefs.apiBaseUrl).fetchDirectory()
+                }
+                applyDirectory(dir)
+                step = Step.SALE
+                render()
+                toast("Касса #${result.deviceId} · ${dir.products.size} товаров")
+            } catch (e: Exception) {
+                toast(e.message ?: "Ошибка регистрации")
+            }
+        }
+    }
+
+    private fun loadCatalogCache() {
+        val json = prefs.catalogJson
+        if (json.isBlank()) return
+        try {
+            applyDirectory(ApiClient.parseDirectory(json))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun applyDirectory(dir: ApiClient.Directory) {
+        Catalog.replaceAll(dir.products)
+        prefs.catalogJson = dir.rawJson
+    }
+
+    private fun refreshCatalogAsync(showToast: Boolean) {
+        CoroutineScope(Dispatchers.Main).launch {
+            try {
+                val dir = withContext(Dispatchers.IO) {
+                    ApiClient(prefs.apiBaseUrl).fetchDirectory()
+                }
+                applyDirectory(dir)
+                if (step == Step.SALE) render()
+                if (showToast) toast("Меню: ${dir.products.size} позиций")
+                flushPendingReceipts()
+            } catch (e: Exception) {
+                if (showToast) toast(e.message ?: "Не удалось обновить меню")
+            }
+        }
+    }
+
+    private fun flushPendingReceipts() {
+        val token = prefs.deviceToken
+        if (token.isBlank()) return
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val arr = JSONArray(prefs.pendingReceipts)
+                if (arr.length() == 0) return@launch
+                val list = (0 until arr.length()).map { arr.getString(it) }
+                if (ApiClient(prefs.apiBaseUrl).syncReceipts(token, list)) {
+                    prefs.pendingReceipts = "[]"
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun queueReceipt(payload: String) {
+        val arr = try {
+            JSONArray(prefs.pendingReceipts)
+        } catch (_: Exception) {
+            JSONArray()
+        }
+        arr.put(payload)
+        prefs.pendingReceipts = arr.toString()
+        flushPendingReceipts()
     }
 
     // ---------- SALE (menu + cart + client) ----------
@@ -157,6 +323,9 @@ class MainActivity : AppCompatActivity() {
 
         // Product grid
         content.addView(sectionTitle(category.title))
+        if (Catalog.isEmpty()) {
+            content.addView(label("Меню пусто. Нажмите «Обновить меню» или добавьте товары в admin."))
+        }
         Catalog.products.filter { it.category == category }.forEach { p ->
             content.addView(productRow(p))
         }
@@ -214,7 +383,7 @@ class MainActivity : AppCompatActivity() {
             })
             box.addView(TextView(this).apply {
                 text = "Сканер QR или код: DEMO / FREE / CB"
-                setTextColor(color(R.color.ink_secondary))
+                setTextColor(color(R.color.ink))
                 textSize = 12f
             })
         } else {
@@ -311,7 +480,7 @@ class MainActivity : AppCompatActivity() {
         })
         col.addView(TextView(this).apply {
             text = "${p.priceRub} ₽" + if (p.isFreeEligible) " · можно 6-й" else ""
-            setTextColor(color(R.color.ink_secondary))
+            setTextColor(color(R.color.ink))
             textSize = 13f
         })
         row.addView(col)
@@ -319,7 +488,7 @@ class MainActivity : AppCompatActivity() {
             text = "+"
             textSize = 20f
             setOnClickListener {
-                cart.add(p)
+                offerModifiersThenAdd(p)
                 render()
             }
         })
@@ -501,6 +670,10 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 when (result) {
                     is PaymentResult.OpenedForPayment -> {
+                        val loyalty = LoyaltyReceiptFactory.create(
+                            c, cart, wantFree, cashbackUseRub, totals.toPayKopecks / 100, "evotor"
+                        )
+                        queueReceipt(loyalty)
                         // Clear local cart — fiscal continues on Evotor payment screen
                         cart.clear()
                         applyFree = false
@@ -560,7 +733,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun hint(t: String) = TextView(this).apply {
         text = t
-        setTextColor(color(R.color.ink_secondary))
+        setTextColor(color(R.color.ink))
         setPadding(20, 8, 20, 8)
         textSize = 14f
     }
@@ -591,6 +764,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun color(id: Int) = ContextCompat.getColor(this, id)
+    private fun label(text: String) = TextView(this).apply {
+        this.text = text
+        setTextColor(color(R.color.ink))
+        textSize = 13f
+        setPadding(24, 8, 24, 8)
+    }
+
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
