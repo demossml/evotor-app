@@ -3,10 +3,14 @@ package ru.sixthcup.evotor.data
 data class Product(
     val id: String,
     val name: String,
-    val priceKopecks: Int,      // store in kopecks to avoid float
+    val priceKopecks: Int,
     val category: Category,
-    val isFreeEligible: Boolean, // can be the "6th cup"
-    val imageUrl: String? = null
+    val isFreeEligible: Boolean,
+    val imageUrl: String? = null,
+    val modifierSchemeId: Int? = null,
+    val recipeText: String? = null,
+    val recipeCostRub: Int? = null,
+    val recipeSeconds: Int? = null
 ) {
     val priceRub: Int get() = priceKopecks / 100
 }

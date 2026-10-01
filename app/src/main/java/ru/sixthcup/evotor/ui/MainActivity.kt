@@ -51,6 +51,8 @@ import org.json.JSONArray
 class MainActivity : AppCompatActivity() {
 
     private lateinit var content: LinearLayout
+    private lateinit var bottomPanel: LinearLayout
+    private lateinit var menuScroll: android.widget.ScrollView
     private lateinit var prefs: Prefs
     private val cart = Cart()
     private val payment = EvotorPaymentGateway()
@@ -86,6 +88,20 @@ class MainActivity : AppCompatActivity() {
 
 
     /** Show syrups/toppings sheet for drinks, then add to cart. */
+    private fun showRecipe(p: Product) {
+        val sb = StringBuilder()
+        sb.append(p.name).append(" · ").append(p.priceRub).append(" ₽\n\n")
+        if (!p.recipeText.isNullOrBlank()) sb.append(p.recipeText).append("\n\n")
+        else sb.append("Рецепт не задан в admin.\n\n")
+        if (p.recipeCostRub != null) sb.append("Себес: ").append(p.recipeCostRub).append(" ₽\n")
+        if (p.recipeSeconds != null) sb.append("Время: ~").append(p.recipeSeconds).append(" сек")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Рецепт")
+            .setMessage(sb.toString())
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
     private fun offerModifiersThenAdd(product: Product) {
         val mods = ModifierCatalog.forProduct(product)
         if (mods.isEmpty()) {
@@ -161,6 +177,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         content = findViewById(R.id.content)
+        bottomPanel = findViewById(R.id.bottomPanel)
+        menuScroll = findViewById(R.id.menuScroll)
         prefs = Prefs(this)
         if (prefs.isEnrolled) {
             step = Step.SALE
@@ -193,10 +211,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun render() {
         content.removeAllViews()
+        bottomPanel.removeAllViews()
         when (step) {
-            Step.ENROLL -> renderEnroll()
-            Step.SALE -> renderSale()
-            Step.RESULT -> renderResult()
+            Step.ENROLL -> {
+                bottomPanel.visibility = android.view.View.GONE
+                renderEnroll()
+            }
+            Step.SALE -> {
+                bottomPanel.visibility = android.view.View.VISIBLE
+                renderSale()
+            }
+            Step.RESULT -> {
+                bottomPanel.visibility = android.view.View.GONE
+                renderResult()
+            }
         }
     }
 
@@ -313,35 +341,238 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- SALE (menu + cart + client) ----------
     private fun renderSale() {
-        headerBar()
-
-        // Client strip
-        content.addView(clientStrip())
-
-        // Categories
+        headerBarCompact()
+        content.addView(clientStripCompact())
         content.addView(categoryTabs())
+        content.addView(productGrid())
 
-        // Product grid
-        content.addView(sectionTitle(category.title))
-        if (Catalog.isEmpty()) {
-            content.addView(label("Меню пусто. Нажмите «Обновить меню» или добавьте товары в admin."))
-        }
-        Catalog.products.filter { it.category == category }.forEach { p ->
-            content.addView(productRow(p))
-        }
-
-        // Cart
-        content.addView(sectionTitle("Чек"))
+        bottomPanel.addView(sectionTitle("Чек"))
         if (cart.isEmpty()) {
-            content.addView(hint("Добавьте позиции из меню"))
+            bottomPanel.addView(hint("Пусто — выберите напиток сверху"))
         } else {
-            cart.snapshot().forEach { line ->
-                content.addView(cartLineRow(line.product, line.qty, line.isFree))
+            val maxLines = 4
+            val lines = cart.snapshot()
+            lines.take(maxLines).forEach { line ->
+                bottomPanel.addView(cartLineRowCompact(line.product, line.qty, line.isFree))
+            }
+            if (lines.size > maxLines) {
+                bottomPanel.addView(hint("+ ещё " + (lines.size - maxLines)))
             }
         }
+        bottomPanel.addView(totalsBlockCompact())
+        bottomPanel.addView(loyaltyStrip())
+        bottomPanel.addView(primaryBtn("Оплатить") { pay() })
+    }
 
-        content.addView(totalsBlock())
-        content.addView(actionButtons())
+    private fun productGrid(): View {
+        val wrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(4, 4, 4, 8)
+        }
+        val products = Catalog.products.filter { it.category == category }
+        if (Catalog.isEmpty()) {
+            wrap.addView(label("Меню пусто. ⋯ → обновить с сервера"))
+            return wrap
+        }
+        if (products.isEmpty()) {
+            wrap.addView(hint("Нет позиций в «" + category.title + "»"))
+            return wrap
+        }
+        var i = 0
+        while (i < products.size) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+            }
+            row.addView(productTile(products[i]).also {
+                it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).also { lp ->
+                    lp.setMargins(4, 4, 4, 4)
+                }
+            })
+            if (i + 1 < products.size) {
+                row.addView(productTile(products[i + 1]).also {
+                    it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).also { lp ->
+                        lp.setMargins(4, 4, 4, 4)
+                    }
+                })
+            } else {
+                row.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                })
+            }
+            wrap.addView(row)
+            i += 2
+        }
+        return wrap
+    }
+
+    private fun productTile(p: Product): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(color(R.color.white))
+            setPadding(dp(10), dp(12), dp(10), dp(12))
+            minimumHeight = dp(72)
+            setOnClickListener { offerModifiersThenAdd(p) }
+            setOnLongClickListener {
+                showRecipe(p)
+                true
+            }
+        }
+        box.addView(TextView(this).apply {
+            text = p.name
+            setTextColor(color(R.color.ink))
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            maxLines = 2
+        })
+        box.addView(TextView(this).apply {
+            text = "" + p.priceRub + " ₽"
+            setTextColor(color(R.color.brand))
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, dp(4), 0, 0)
+        })
+        return box
+    }
+
+    private fun headerBarCompact() {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(color(R.color.brand))
+            setPadding(dp(12), dp(28), dp(8), dp(12))
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        bar.addView(TextView(this).apply {
+            text = prefs.storeName.ifBlank { prefs.deviceName }.ifBlank { "6.7 Coffee" }
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        })
+        bar.addView(smallBtn("⋯") { showCashierMenu() }.also {
+            it.setTextColor(0xFFFFFFFF.toInt())
+            it.setBackgroundColor(0x33FFFFFF)
+        })
+        content.addView(bar)
+    }
+
+    private fun showCashierMenu() {
+        val opts = arrayOf("Обновить меню с сервера", "Сбросить привязку кассы (dev)")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Касса")
+            .setItems(opts) { _, which ->
+                when (which) {
+                    0 -> refreshCatalogAsync(showToast = true)
+                    1 -> {
+                        prefs.deviceToken = ""
+                        prefs.enrollCode = ""
+                        step = Step.ENROLL
+                        render()
+                    }
+                }
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun clientStripCompact(): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(color(R.color.brand_soft))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        val c = card
+        val info = TextView(this).apply {
+            text = if (c != null) {
+                "Гость · " + c.progress + "/" + c.cupsForFree + " · кэшбэк " + c.cashbackRub + " ₽"
+            } else {
+                "Гость не выбран"
+            }
+            setTextColor(color(R.color.ink))
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        }
+        box.addView(info)
+        box.addView(smallBtn(if (c != null) "Сброс" else "QR") {
+            if (c != null) {
+                card = null
+                applyFree = false
+                cashbackUseRub = 0
+                cart.markFree(null)
+                render()
+            } else promptCard()
+        })
+        return box
+    }
+
+    private fun cartLineRowCompact(p: Product, qty: Int, free: Boolean): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(4, 2, 4, 2)
+        }
+        row.addView(TextView(this).apply {
+            text = if (free) p.name + " (6-й)" else p.name
+            setTextColor(color(R.color.ink))
+            textSize = 13f
+            maxLines = 1
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        })
+        row.addView(TextView(this).apply {
+            text = "×" + qty
+            setTextColor(color(R.color.ink_secondary))
+            textSize = 13f
+            setPadding(8, 0, 8, 0)
+        })
+        row.addView(smallBtn("−") {
+            cart.setQty(p.id, qty - 1)
+            if (free && qty - 1 <= 0) {
+                applyFree = false
+                cart.markFree(null)
+            }
+            render()
+        })
+        return row
+    }
+
+    private fun totalsBlockCompact(): View {
+        val c = card
+        val wantFree = applyFree && (c?.freeAvailable ?: 0) > 0 && cart.freeLine() != null
+        val totals = ru.sixthcup.evotor.data.LoyaltyRules.totals(cart, c, wantFree, cashbackUseRub)
+        return TextView(this).apply {
+            text = "К оплате  " + (totals.toPayKopecks / 100) + " ₽"
+            setTextColor(color(R.color.brand))
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(8, 8, 8, 4)
+        }
+    }
+
+    private fun loyaltyStrip(): View {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 4)
+        }
+        val c = card
+        if (c != null && c.freeAvailable > 0) {
+            col.addView(smallBtn(if (applyFree) "6-й: ВКЛ" else "6-й стакан") {
+                toggleFree()
+            }.also { it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) })
+        }
+        if (c != null && c.cashbackRub > 0) {
+            col.addView(smallBtn(
+                if (cashbackUseRub > 0) "−" + cashbackUseRub + " ₽" else "Кэшбэк"
+            ) { askCashback() }.also { it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) })
+        }
+        col.addView(smallBtn("Очистить") {
+            cart.clear()
+            applyFree = false
+            cashbackUseRub = 0
+            cart.markFree(null)
+            render()
+        }.also { it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) })
+        return col
     }
 
     private fun headerBar() {

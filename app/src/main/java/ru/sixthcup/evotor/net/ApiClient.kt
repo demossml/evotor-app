@@ -101,6 +101,10 @@ class ApiClient(baseUrl: String) {
                 val category = mapCategory(catName, name)
                 val imageUrl = p.optString("imageUrl").takeIf { it.isNotBlank() }
                     ?: p.optString("image_url").takeIf { it.isNotBlank() }
+                val schemeId = if (p.has("modifierSchemeId") && !p.isNull("modifierSchemeId")) p.getInt("modifierSchemeId") else null
+                val recipeText = p.optString("recipeText").takeIf { it.isNotBlank() }
+                val recipeCost = if (p.has("recipeCostRub") && !p.isNull("recipeCostRub")) p.getInt("recipeCostRub") else null
+                val recipeSec = if (p.has("recipeSeconds") && !p.isNull("recipeSeconds")) p.getInt("recipeSeconds") else null
                 products.add(
                     Product(
                         id = id,
@@ -108,7 +112,11 @@ class ApiClient(baseUrl: String) {
                         priceKopecks = priceRub * 100,
                         category = category,
                         isFreeEligible = category == Category.DRINKS,
-                        imageUrl = imageUrl
+                        imageUrl = imageUrl,
+                        modifierSchemeId = schemeId,
+                        recipeText = recipeText,
+                        recipeCostRub = recipeCost,
+                        recipeSeconds = recipeSec
                     )
                 )
             }
@@ -118,6 +126,40 @@ class ApiClient(baseUrl: String) {
                     stores.add(s.getJSONObject(i).optString("name"))
                 }
             }
+            val mods = mutableListOf<ru.sixthcup.evotor.data.Modifier>()
+            o.optJSONArray("modifiers")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val m = arr.getJSONObject(i)
+                    mods.add(
+                        ru.sixthcup.evotor.data.Modifier(
+                            id = m.get("id").toString(),
+                            name = m.optString("name"),
+                            priceKopecks = m.optInt("price", 0) * 100,
+                            group = ru.sixthcup.evotor.data.ModifierGroup.fromKey(m.optString("groupKey", "other"))
+                        )
+                    )
+                }
+            }
+            val schemes = mutableListOf<ru.sixthcup.evotor.data.ModifierScheme>()
+            o.optJSONArray("modifierSchemes")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val s = arr.getJSONObject(i)
+                    val ids = mutableListOf<String>()
+                    s.optJSONArray("items")?.let { items ->
+                        for (j in 0 until items.length()) {
+                            ids.add(items.getJSONObject(j).get("modifierId").toString())
+                        }
+                    }
+                    schemes.add(
+                        ru.sixthcup.evotor.data.ModifierScheme(
+                            id = s.getInt("id"),
+                            name = s.optString("name"),
+                            modifierIds = ids
+                        )
+                    )
+                }
+            }
+            ru.sixthcup.evotor.data.ModifierCatalog.replaceFromDirectory(mods, schemes)
             return Directory(products, stores, o.optInt("cupsForFree", 5), text)
         }
 
