@@ -328,7 +328,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val recipes = ApiClient(prefs.apiBaseUrl).fetchStaffRecipes(token)
                 withContext(Dispatchers.Main) {
-                    Catalog.all().forEach { p ->
+                    Catalog.products.forEach { p ->
                         val r = recipes[p.id] ?: return@forEach
                         // Catalog is replace-only; skip mutate if immutable — recipes shown after next fetch merge in refresh
                     }
@@ -985,7 +985,7 @@ class MainActivity : AppCompatActivity() {
         val c = card
         val wantFree = applyFree && (c?.freeAvailable ?: 0) > 0 && cart.freeLine() != null
         val totals = LoyaltyRules.totals(cart, c, wantFree, cashbackUseRub)
-        val items = cart.lines.map { line ->
+        val items = cart.snapshot().map { line ->
             org.json.JSONObject()
                 .put("productId", line.product.id.toIntOrNull() ?: 0)
                 .put("name", line.product.name)
