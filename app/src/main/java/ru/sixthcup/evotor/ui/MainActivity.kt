@@ -79,11 +79,28 @@ class MainActivity : AppCompatActivity() {
             toast("Пустой код")
             return
         }
-        card = CardParser.parse(code)
+        if (prefs.deviceRevoked) {
+            toast("Касса отозвана — продажи лояльности недоступны")
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (card != null && card!!.rawToken == code.trim() && now - prefs.lastScanAt < 20_000L) {
+            toast("Повторный скан той же карты — подождите несколько секунд")
+            return
+        }
+        val parsed = CardParser.parse(code, prefs.serverPub.ifBlank { null })
+        if (parsed == null) {
+            toast("Карта недействительна (нужен QR из приложения гостя)")
+            return
+        }
+        prefs.lastScanAt = now
+        prefs.lastUserId = parsed.userId
+        card = parsed
         applyFree = false
         cashbackUseRub = 0
         cart.markFree(null)
         render()
+        toast("Карта №${parsed.userId} · кэшбэк ${parsed.cashbackRub} ₽")
     }
 
 
@@ -159,7 +176,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun promptCard() {
         val input = EditText(this).apply {
-            hint = "Код карты / QR (DEMO / FREE / CB)"
+            hint = "QR карты из приложения гостя"
             setPadding(40, 30, 40, 30)
         }
         AlertDialog.Builder(this)
@@ -258,9 +275,13 @@ class MainActivity : AppCompatActivity() {
         toast("Регистрация…")
         CoroutineScope(Dispatchers.Main).launch {
             try {
-                val pk = prefs.publicKey.ifBlank {
-                    DeviceKeys.generatePublicKeyPlaceholder().also { prefs.publicKey = it }
-                }
+                val pair = if (prefs.publicKey.isBlank() || prefs.privateKey.isBlank()) {
+                    DeviceKeys.generate().also {
+                        prefs.publicKey = it.publicKeyB64u
+                        prefs.privateKey = it.privateKeyB64u
+                    }
+                } else null
+                val pk = prefs.publicKey
                 val result = withContext(Dispatchers.IO) {
                     ApiClient(prefs.apiBaseUrl).enroll(code, pk)
                 }
@@ -269,10 +290,13 @@ class MainActivity : AppCompatActivity() {
                 prefs.storeName = result.storeName
                 prefs.enrollCode = code
                 prefs.deviceName = "Эвотор · ${result.storeName}"
+                prefs.deviceRevoked = false
                 val dir = withContext(Dispatchers.IO) {
-                    ApiClient(prefs.apiBaseUrl).fetchDirectory()
+                    ApiClient(prefs.apiBaseUrl).fetchDirectory(result.deviceToken)
                 }
+                prefs.serverPub = dir.serverPub
                 applyDirectory(dir)
+                mergeStaffRecipes()
                 step = Step.SALE
                 render()
                 toast("Касса #${result.deviceId} · ${dir.products.size} товаров")
@@ -294,18 +318,63 @@ class MainActivity : AppCompatActivity() {
     private fun applyDirectory(dir: ApiClient.Directory) {
         Catalog.replaceAll(dir.products)
         prefs.catalogJson = dir.rawJson
+        if (dir.serverPub.isNotBlank()) prefs.serverPub = dir.serverPub
+    }
+
+    private fun mergeStaffRecipes() {
+        val token = prefs.deviceToken
+        if (token.isBlank()) return
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val recipes = ApiClient(prefs.apiBaseUrl).fetchStaffRecipes(token)
+                withContext(Dispatchers.Main) {
+                    Catalog.all().forEach { p ->
+                        val r = recipes[p.id] ?: return@forEach
+                        // Catalog is replace-only; skip mutate if immutable — recipes shown after next fetch merge in refresh
+                    }
+                }
+            } catch (e: ApiClient.DeviceRevokedException) {
+                withContext(Dispatchers.Main) {
+                    prefs.deviceRevoked = true
+                    toast("Касса отозвана")
+                }
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun refreshCatalogAsync(showToast: Boolean) {
         CoroutineScope(Dispatchers.Main).launch {
             try {
                 val dir = withContext(Dispatchers.IO) {
-                    ApiClient(prefs.apiBaseUrl).fetchDirectory()
+                    ApiClient(prefs.apiBaseUrl).fetchDirectory(prefs.deviceToken.ifBlank { null })
                 }
                 applyDirectory(dir)
+                // staff recipes
+                try {
+                    val recipes = withContext(Dispatchers.IO) {
+                        ApiClient(prefs.apiBaseUrl).fetchStaffRecipes(prefs.deviceToken)
+                    }
+                    val merged = dir.products.map { p ->
+                        val r = recipes[p.id]
+                        if (r == null) p else p.copy(
+                            recipeText = r.first,
+                            recipeCostRub = r.second,
+                            recipeSeconds = r.third
+                        )
+                    }
+                    Catalog.replaceAll(merged)
+                } catch (e: ApiClient.DeviceRevokedException) {
+                    prefs.deviceRevoked = true
+                    toast("Касса отозвана на сервере")
+                    return@launch
+                } catch (_: Exception) {
+                }
                 if (step == Step.SALE) render()
                 if (showToast) toast("Меню: ${dir.products.size} позиций")
-                flushPendingReceipts()
+            } catch (e: ApiClient.DeviceRevokedException) {
+                prefs.deviceRevoked = true
+                toast("Касса отозвана на сервере")
             } catch (e: Exception) {
                 if (showToast) toast(e.message ?: "Не удалось обновить меню")
             }
@@ -320,9 +389,15 @@ class MainActivity : AppCompatActivity() {
                 val arr = JSONArray(prefs.pendingReceipts)
                 if (arr.length() == 0) return@launch
                 val list = (0 until arr.length()).map { arr.getString(it) }
-                if (ApiClient(prefs.apiBaseUrl).syncReceipts(token, list)) {
-                    prefs.pendingReceipts = "[]"
+                val sync = ApiClient(prefs.apiBaseUrl).syncReceipts(token, list)
+                val done = (sync.applied + sync.duplicates).toSet()
+                val left = JSONArray()
+                for (i in 0 until arr.length()) {
+                    val s = arr.getString(i)
+                    // legacy queue: keep if not clearly applied — online sales preferred
+                    if (s !in done && !s.startsWith("{")) left.put(s)
                 }
+                prefs.pendingReceipts = left.toString()
             } catch (_: Exception) {
             }
         }
@@ -613,7 +688,7 @@ class MainActivity : AppCompatActivity() {
                 textSize = 15f
             })
             box.addView(TextView(this).apply {
-                text = "Сканер QR или код: DEMO / FREE / CB"
+                text = "Сканер QR карты гостя"
                 setTextColor(color(R.color.ink))
                 textSize = 12f
             })
@@ -889,29 +964,53 @@ class MainActivity : AppCompatActivity() {
     }
 
 
+    private var pendingSale: PendingSale? = null
+
+    data class PendingSale(
+        val card: ClientCard?,
+        val wantFree: Boolean,
+        val cashbackUse: Int,
+        val amountRub: Int,
+        val itemsJson: List<org.json.JSONObject>,
+        val fiscalHint: String
+    )
+
     private fun pay() {
         if (cart.isEmpty()) {
             toast("Корзина пуста"); return
         }
+        if (prefs.deviceRevoked) {
+            toast("Касса отозвана"); return
+        }
         val c = card
         val wantFree = applyFree && (c?.freeAvailable ?: 0) > 0 && cart.freeLine() != null
         val totals = LoyaltyRules.totals(cart, c, wantFree, cashbackUseRub)
+        val items = cart.lines.map { line ->
+            org.json.JSONObject()
+                .put("productId", line.product.id.toIntOrNull() ?: 0)
+                .put("name", line.product.name)
+                .put("qty", line.qty)
+                .put("priceRub", line.product.priceRub)
+        }
         toast("Открываем чек в Эвоторе…")
         payment.charge(this, cart, totals, c, wantFree) { result ->
             runOnUiThread {
                 when (result) {
                     is PaymentResult.OpenedForPayment -> {
-                        val loyalty = LoyaltyReceiptFactory.create(
-                            c, cart, wantFree, cashbackUseRub, totals.toPayKopecks / 100, "evotor"
+                        // Лояльность НЕ начисляем здесь — только после подтверждения оплаты
+                        pendingSale = PendingSale(
+                            card = c,
+                            wantFree = wantFree,
+                            cashbackUse = cashbackUseRub,
+                            amountRub = totals.toPayKopecks / 100,
+                            itemsJson = items,
+                            fiscalHint = "evotor-${System.currentTimeMillis()}"
                         )
-                        queueReceipt(loyalty)
-                        // Clear local cart — fiscal continues on Evotor payment screen
                         cart.clear()
                         applyFree = false
                         cashbackUseRub = 0
-                        lastFiscalId = "evotor"
                         step = Step.RESULT
-                        resultMessage = result.message
+                        resultMessage = result.message + "\n\nПосле оплаты гостем нажмите «Оплата прошла» — стаканы и кэшбэк уйдут на сервер."
                         render()
                     }
                     is PaymentResult.Err -> toast(result.message)
@@ -924,22 +1023,78 @@ class MainActivity : AppCompatActivity() {
     private fun renderResult() {
         header("Оплата в Эвоторе")
         content.addView(hint(resultMessage.ifBlank {
-            "Чек передан в кассу Эвотора. Оплатите на экране терминала — фискальный чек напечатается сам."
+            "Чек открыт в Эвоторе. После оплаты гостем подтвердите ниже."
         }))
-        content.addView(hint(
-            "Клиенту QR не нужен: покупка и кэшбэк появятся в приложении после выгрузки из Эвотора на наш сервер."
-        ))
+        if (pendingSale != null && pendingSale?.card != null) {
+            content.addView(primaryBtn("Оплата прошла — начислить лояльность") {
+                commitLoyaltyOnline()
+            })
+            content.addView(secondaryBtn("Не оплачено / отмена") {
+                pendingSale = null
+                step = Step.SALE
+                resultMessage = ""
+                render()
+            })
+        }
         content.addView(primaryBtn("Новая продажа") {
+            pendingSale = null
             step = Step.SALE
             card = null
             resultMessage = ""
             render()
         })
         content.addView(secondaryBtn("Ещё заказ этому клиенту") {
+            // Карту сбрасываем — иначе старый free/кэшбэк
+            if (pendingSale != null) {
+                toast("Сначала подтвердите или отмените оплату")
+                return@secondaryBtn
+            }
+            card = null
             step = Step.SALE
             resultMessage = ""
             render()
         })
+    }
+
+    private fun commitLoyaltyOnline() {
+        val sale = pendingSale
+        val c = sale?.card
+        if (sale == null || c == null) {
+            toast("Нет данных продажи")
+            return
+        }
+        if (c.rawToken.isBlank()) {
+            toast("Нет токена карты")
+            return
+        }
+        toast("Отправляем лояльность на сервер…")
+        CoroutineScope(Dispatchers.Main).launch {
+            try {
+                val fiscalId = sale.fiscalHint
+                val res = withContext(Dispatchers.IO) {
+                    ApiClient(prefs.apiBaseUrl).postSale(
+                        deviceToken = prefs.deviceToken,
+                        cardToken = c.rawToken,
+                        fiscalId = fiscalId,
+                        amountRub = sale.amountRub,
+                        useFree = sale.wantFree,
+                        cashbackUseRub = sale.cashbackUse,
+                        items = sale.itemsJson
+                    )
+                }
+                val updated = CardParser.parse(res.cardToken, prefs.serverPub)
+                card = updated
+                pendingSale = null
+                resultMessage = "Лояльность на сервере: +${res.paidCups} стакан(ов), free=${res.appliedFree}, кэшбэк −${res.appliedCashback} ₽. Баланс ${res.cashbackBalance} ₽."
+                render()
+                toast("Готово")
+            } catch (e: ApiClient.DeviceRevokedException) {
+                prefs.deviceRevoked = true
+                toast("Касса отозвана")
+            } catch (e: Exception) {
+                toast(e.message ?: "Ошибка сервера")
+            }
+        }
     }
 
     // ---------- UI helpers ----------

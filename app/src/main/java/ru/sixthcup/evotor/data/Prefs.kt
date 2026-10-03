@@ -50,5 +50,17 @@ class Prefs(ctx: Context) {
         get() = sp.getLong("last_scan_at", 0L)
         set(v) = sp.edit().putLong("last_scan_at", v).apply()
 
+    var serverPub: String
+        get() = sp.getString("server_pub", "") ?: ""
+        set(v) = sp.edit().putString("server_pub", v).apply()
+
+    var privateKey: String
+        get() = sp.getString("private_key", "") ?: ""
+        set(v) = sp.edit().putString("private_key", v).apply()
+
+    var deviceRevoked: Boolean
+        get() = sp.getBoolean("device_revoked", false)
+        set(v) = sp.edit().putBoolean("device_revoked", v).apply()
+
     val isEnrolled: Boolean get() = deviceToken.isNotBlank()
 }

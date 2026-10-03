@@ -1,50 +1,55 @@
 package ru.sixthcup.evotor.data
 
-import android.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
+import ru.sixthcup.evotor.net.DeviceKeys
 
+/**
+ * Карта клиента: payload.sig (Ed25519, serverPub из /api/directory).
+ * DEMO/FREE/CB и «любой код» — запрещены.
+ */
 object CardParser {
-    /**
-     * Token: base64url(json).sig — same idea as web PWA.
-     * Demo: if parse fails, return demo card so barista can train.
-     */
-    fun parse(token: String): ClientCard {
+    fun parse(token: String, serverPubB64u: String?): ClientCard? {
         val trimmed = token.trim()
-        if (trimmed.isEmpty()) return demo()
+        if (trimmed.isEmpty()) return null
+        if (serverPubB64u.isNullOrBlank()) return null
+
+        val parts = trimmed.split('.')
+        if (parts.size != 2) return null
+        val (payloadB64, sigB64) = parts
         return try {
-            val payload = trimmed.substringBefore('.')
-            val pad = when (payload.length % 4) {
-                2 -> "=="
-                3 -> "="
-                else -> ""
+            val payloadBytes = DeviceKeys.b64uDecode(payloadB64)
+            val sigBytes = DeviceKeys.b64uDecode(sigB64)
+            if (!DeviceKeys.verify(payloadBytes, sigBytes, serverPubB64u)) return null
+            val o = JSONObject(String(payloadBytes, Charsets.UTF_8))
+            if (o.optString("t") != "c") return null
+            val userId = o.optInt("u", -1)
+            if (userId <= 0) return null
+            var couponPercent: Int? = null
+            var couponFixed: Int? = null
+            val v = o.optJSONArray("v")
+            if (v != null) {
+                for (i in 0 until v.length()) {
+                    val row = v.optJSONArray(i) ?: continue
+                    if (row.length() < 3) continue
+                    when (row.optString(1)) {
+                        "p" -> couponPercent = row.optInt(2)
+                        "f" -> couponFixed = row.optInt(2)
+                    }
+                }
             }
-            val json = String(
-                Base64.decode(
-                    payload.replace('-', '+').replace('_', '/') + pad,
-                    Base64.DEFAULT
-                )
-            )
-            val o = JSONObject(json)
             ClientCard(
-                userId = o.optInt("u", o.optInt("userId", 1)),
-                paidTotal = o.optInt("p", o.optInt("paid_total", 0)),
-                freeUsed = o.optInt("f", o.optInt("free_used", 0)),
-                cashbackRub = o.optInt("cb", o.optInt("cashback", 0)),
-                cupsForFree = o.optInt("n", 5),
-                couponPercent = o.optInt("cp", -1).takeIf { it >= 0 },
-                couponFixedRub = o.optInt("cf", -1).takeIf { it >= 0 },
+                userId = userId,
+                paidTotal = o.optInt("p", 0),
+                freeUsed = o.optInt("f", 0),
+                cashbackRub = o.optInt("cb", 0),
+                cupsForFree = 5,
+                couponPercent = couponPercent,
+                couponFixedRub = couponFixed,
                 rawToken = trimmed
             )
         } catch (_: Exception) {
-            // Manual short codes for training on terminal without backend
-            when {
-                trimmed.equals("DEMO", true) -> ClientCard(1, 5, 0, 50, couponPercent = 10, rawToken = trimmed)
-                trimmed.equals("FREE", true) -> ClientCard(2, 5, 0, 0, rawToken = trimmed)
-                trimmed.equals("CB", true) -> ClientCard(3, 2, 0, 150, rawToken = trimmed)
-                else -> ClientCard(9, 2, 0, 0, rawToken = trimmed)
-            }
+            null
         }
     }
-
-    fun demo() = ClientCard(1, 4, 0, 30, couponPercent = null, rawToken = "")
 }

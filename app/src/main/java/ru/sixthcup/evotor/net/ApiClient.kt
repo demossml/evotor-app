@@ -6,7 +6,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.Category
 import ru.sixthcup.evotor.data.Product
 import java.util.concurrent.TimeUnit
@@ -19,13 +18,29 @@ class ApiClient(baseUrl: String) {
         .build()
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
+    class ApiException(message: String, val code: Int = 0) : Exception(message)
+    class DeviceRevokedException : Exception("Касса отозвана на сервере")
+
     data class EnrollResult(val deviceId: Int, val deviceToken: String, val storeName: String)
     data class Directory(
         val products: List<Product>,
         val storeNames: List<String>,
         val cupsForFree: Int,
+        val serverPub: String,
         val rawJson: String
     )
+    data class SaleResult(
+        val cardToken: String,
+        val paidTotal: Int,
+        val freeUsed: Int,
+        val freeAvailable: Int,
+        val cashbackBalance: Int,
+        val cupsForFree: Int,
+        val appliedFree: Int,
+        val appliedCashback: Int,
+        val paidCups: Int
+    )
+    data class SyncResult(val applied: List<String>, val duplicates: List<String>, val rejected: Int)
 
     fun enroll(code: String, publicKey: String): EnrollResult {
         val body = JSONObject()
@@ -40,7 +55,7 @@ class ApiClient(baseUrl: String) {
             val text = res.body?.string().orEmpty()
             if (!res.isSuccessful) {
                 val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()
-                throw ApiException(msg?.takeIf { it.isNotBlank() } ?: "Ошибка регистрации (${res.code})")
+                throw ApiException(msg?.takeIf { it.isNotBlank() } ?: "Ошибка регистрации (${res.code})", res.code)
             }
             val o = JSONObject(text)
             return EnrollResult(
@@ -51,128 +66,165 @@ class ApiClient(baseUrl: String) {
         }
     }
 
-    fun fetchDirectory(): Directory {
-        val req = Request.Builder().url("$root/api/directory").get().build()
-        http.newCall(req).execute().use { res ->
+    fun fetchDirectory(deviceToken: String? = null): Directory {
+        val b = Request.Builder().url("$root/api/directory").get()
+        if (!deviceToken.isNullOrBlank()) b.header("X-Device-Token", deviceToken)
+        http.newCall(b.build()).execute().use { res ->
             val text = res.body?.string().orEmpty()
-            if (!res.isSuccessful) throw ApiException("Каталог недоступен (${res.code})")
+            if (res.code == 401 && !deviceToken.isNullOrBlank()) throw DeviceRevokedException()
+            if (!res.isSuccessful) throw ApiException("Каталог недоступен (${res.code})", res.code)
             return parseDirectory(text)
         }
     }
 
-    fun syncReceipts(deviceToken: String, receipts: List<String>): Boolean {
-        if (receipts.isEmpty()) return true
+    /** Рецепты — только с токеном кассы. */
+    fun fetchStaffRecipes(deviceToken: String): Map<String, Triple<String?, Int?, Int?>> {
+        val req = Request.Builder()
+            .url("$root/api/directory/staff")
+            .header("X-Device-Token", deviceToken)
+            .get()
+            .build()
+        http.newCall(req).execute().use { res ->
+            if (res.code == 401) throw DeviceRevokedException()
+            val text = res.body?.string().orEmpty()
+            if (!res.isSuccessful) return emptyMap()
+            val arr = JSONObject(text).optJSONArray("products") ?: return emptyMap()
+            val map = mutableMapOf<String, Triple<String?, Int?, Int?>>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val id = o.optInt("id").toString()
+                map[id] = Triple(
+                    o.optString("recipeText").ifBlank { null },
+                    if (o.has("recipeCostRub") && !o.isNull("recipeCostRub")) o.optInt("recipeCostRub") else null,
+                    if (o.has("recipeSeconds") && !o.isNull("recipeSeconds")) o.optInt("recipeSeconds") else null
+                )
+            }
+            return map
+        }
+    }
+
+    fun postSale(
+        deviceToken: String,
+        cardToken: String,
+        fiscalId: String,
+        amountRub: Int,
+        useFree: Boolean,
+        cashbackUseRub: Int,
+        items: List<JSONObject>
+    ): SaleResult {
+        val arr = JSONArray()
+        items.forEach { arr.put(it) }
+        val body = JSONObject()
+            .put("cardToken", cardToken)
+            .put("fiscalId", fiscalId)
+            .put("amountRub", amountRub)
+            .put("useFree", useFree)
+            .put("cashbackUseRub", cashbackUseRub)
+            .put("items", arr)
+            .toString()
+        val req = Request.Builder()
+            .url("$root/api/devices/sales")
+            .header("X-Device-Token", deviceToken)
+            .post(body.toRequestBody(jsonMedia))
+            .build()
+        http.newCall(req).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            if (res.code == 401) throw DeviceRevokedException()
+            if (!res.isSuccessful) {
+                val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                throw ApiException(msg?.takeIf { it.isNotBlank() } ?: "Ошибка лояльности (${res.code})", res.code)
+            }
+            val o = JSONObject(text)
+            return SaleResult(
+                cardToken = o.getString("card"),
+                paidTotal = o.optInt("paidTotal"),
+                freeUsed = o.optInt("freeUsed"),
+                freeAvailable = o.optInt("freeAvailable"),
+                cashbackBalance = o.optInt("cashbackBalance"),
+                cupsForFree = o.optInt("cupsForFree", 5),
+                appliedFree = o.optInt("appliedFree"),
+                appliedCashback = o.optInt("appliedCashback"),
+                paidCups = o.optInt("paidCups")
+            )
+        }
+    }
+
+    fun syncReceipts(deviceToken: String, receipts: List<String>): SyncResult {
+        if (receipts.isEmpty()) return SyncResult(emptyList(), emptyList(), 0)
         val arr = JSONArray()
         receipts.forEach { arr.put(it) }
         val body = JSONObject().put("receipts", arr).toString()
         val req = Request.Builder()
             .url("$root/api/devices/sync")
-            .header("Authorization", "Bearer $deviceToken")
+            .header("X-Device-Token", deviceToken)
             .post(body.toRequestBody(jsonMedia))
             .build()
-        return try {
-            http.newCall(req).execute().use { it.isSuccessful }
-        } catch (_: Exception) {
-            false
+        http.newCall(req).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            if (res.code == 401) throw DeviceRevokedException()
+            if (!res.isSuccessful) throw ApiException("Синк ${res.code}", res.code)
+            val result = JSONObject(text).optJSONObject("result") ?: return SyncResult(emptyList(), emptyList(), 0)
+            val applied = result.optJSONArray("applied") ?: JSONArray()
+            val duplicates = result.optJSONArray("duplicates") ?: JSONArray()
+            val rejected = result.optJSONArray("rejected") ?: JSONArray()
+            return SyncResult(
+                applied = (0 until applied.length()).map { applied.getString(it) },
+                duplicates = (0 until duplicates.length()).map { duplicates.getString(it) },
+                rejected = rejected.length()
+            )
         }
     }
 
     companion object {
-        fun defaultBase(): String = BuildConfig.API_BASE_URL
-
         fun parseDirectory(text: String): Directory {
             val o = JSONObject(text)
-            val catMap = mutableMapOf<Int, String>()
-            o.optJSONArray("categories")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val c = arr.getJSONObject(i)
-                    catMap[c.getInt("id")] = c.optString("name")
+            val serverPub = o.optString("serverPub", "")
+            val cups = o.optInt("cupsForFree", 5)
+            val products = mutableListOf<Product>()
+            val parr = o.optJSONArray("products") ?: JSONArray()
+            val cats = mutableMapOf<Int, String>()
+            o.optJSONArray("categories")?.let { ca ->
+                for (i in 0 until ca.length()) {
+                    val c = ca.getJSONObject(i)
+                    cats[c.optInt("id")] = c.optString("name")
                 }
             }
-            val products = mutableListOf<Product>()
-            val arr = o.optJSONArray("products") ?: JSONArray()
-            for (i in 0 until arr.length()) {
-                val p = arr.getJSONObject(i)
-                val id = p.opt("id")?.toString() ?: continue
-                val name = p.optString("name")
-                val priceRub = if (p.has("price")) p.getInt("price") else 0
-                val catId = if (p.has("categoryId") && !p.isNull("categoryId")) p.getInt("categoryId") else null
-                val catName = catId?.let { catMap[it] }.orEmpty()
-                val category = mapCategory(catName, name)
-                val imageUrl = p.optString("imageUrl").takeIf { it.isNotBlank() }
-                    ?: p.optString("image_url").takeIf { it.isNotBlank() }
-                val schemeId = if (p.has("modifierSchemeId") && !p.isNull("modifierSchemeId")) p.getInt("modifierSchemeId") else null
-                val recipeText = p.optString("recipeText").takeIf { it.isNotBlank() }
-                val recipeCost = if (p.has("recipeCostRub") && !p.isNull("recipeCostRub")) p.getInt("recipeCostRub") else null
-                val recipeSec = if (p.has("recipeSeconds") && !p.isNull("recipeSeconds")) p.getInt("recipeSeconds") else null
+            for (i in 0 until parr.length()) {
+                val p = parr.getJSONObject(i)
+                val id = p.optInt("id", i + 1).toString()
+                val name = p.optString("name", "Товар")
+                val priceRub = p.optInt("price", 0)
+                val catName = cats[p.optInt("categoryId")] ?: ""
+                val category = when {
+                    catName.contains("нап", true) || catName.contains("drink", true) -> Category.DRINKS
+                    catName.contains("ед", true) || catName.contains("food", true) -> Category.FOOD
+                    else -> Category.OTHER
+                }
+                val countsCup = p.optBoolean("countsAsCup", false) ||
+                    p.optInt("countsAsCup", 0) == 1
                 products.add(
                     Product(
                         id = id,
                         name = name,
                         priceKopecks = priceRub * 100,
                         category = category,
-                        isFreeEligible = category == Category.DRINKS,
-                        imageUrl = imageUrl,
-                        modifierSchemeId = schemeId,
-                        recipeText = recipeText,
-                        recipeCostRub = recipeCost,
-                        recipeSeconds = recipeSec
+                        isFreeEligible = countsCup,
+                        imageUrl = p.optString("imageUrl").ifBlank { null },
+                        modifierSchemeId = if (p.has("modifierSchemeId") && !p.isNull("modifierSchemeId"))
+                            p.optInt("modifierSchemeId") else null,
+                        recipeText = null,
+                        recipeCostRub = null,
+                        recipeSeconds = null
                     )
                 )
             }
             val stores = mutableListOf<String>()
-            o.optJSONArray("stores")?.let { s ->
-                for (i in 0 until s.length()) {
-                    stores.add(s.getJSONObject(i).optString("name"))
+            o.optJSONArray("stores")?.let { sa ->
+                for (i in 0 until sa.length()) {
+                    stores.add(sa.getJSONObject(i).optString("name"))
                 }
             }
-            val mods = mutableListOf<ru.sixthcup.evotor.data.Modifier>()
-            o.optJSONArray("modifiers")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val m = arr.getJSONObject(i)
-                    mods.add(
-                        ru.sixthcup.evotor.data.Modifier(
-                            id = m.get("id").toString(),
-                            name = m.optString("name"),
-                            priceKopecks = m.optInt("price", 0) * 100,
-                            group = ru.sixthcup.evotor.data.ModifierGroup.fromKey(m.optString("groupKey", "other"))
-                        )
-                    )
-                }
-            }
-            val schemes = mutableListOf<ru.sixthcup.evotor.data.ModifierScheme>()
-            o.optJSONArray("modifierSchemes")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val s = arr.getJSONObject(i)
-                    val ids = mutableListOf<String>()
-                    s.optJSONArray("items")?.let { items ->
-                        for (j in 0 until items.length()) {
-                            ids.add(items.getJSONObject(j).get("modifierId").toString())
-                        }
-                    }
-                    schemes.add(
-                        ru.sixthcup.evotor.data.ModifierScheme(
-                            id = s.getInt("id"),
-                            name = s.optString("name"),
-                            modifierIds = ids
-                        )
-                    )
-                }
-            }
-            ru.sixthcup.evotor.data.ModifierCatalog.replaceFromDirectory(mods, schemes)
-            return Directory(products, stores, o.optInt("cupsForFree", 5), text)
-        }
-
-        private fun mapCategory(catName: String, productName: String): Category {
-            val n = (catName + " " + productName).lowercase()
-            return when {
-                listOf("напит", "кофе", "чай", "латте", "капуч", "амер", "drink", "coffee")
-                    .any { n.contains(it) } -> Category.DRINKS
-                listOf("еда", "выпеч", "food", "круасс", "сэндв").any { n.contains(it) } -> Category.FOOD
-                else -> Category.OTHER
-            }
+            return Directory(products, stores, cups, serverPub, text)
         }
     }
 }
-
-class ApiException(message: String) : Exception(message)

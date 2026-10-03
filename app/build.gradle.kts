@@ -11,8 +11,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 22
-        versionName = "1.5.1"
+        versionCode = 30
+        versionName = "2.0.0"
         buildConfigField("String", "APP_UUID", "\"${project.findProperty("APP_UUID") ?: "00000000-0000-0000-0000-000000000000"}\"")
         buildConfigField("String", "API_BASE_URL", "\"https://app.67coffee.ru\"")
     }
@@ -53,4 +53,5 @@ dependencies {
 
     // QR display for loyalty receipt
     implementation("com.google.zxing:core:3.5.3")
+    implementation("org.bouncycastle:bcprov-jdk15to18:1.78.1")
 }
