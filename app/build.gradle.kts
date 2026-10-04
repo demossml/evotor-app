@@ -11,8 +11,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 30
-        versionName = "2.0.0"
+        versionCode = 31
+        versionName = "2.1.0-stage1"
         buildConfigField("String", "APP_UUID", "\"${project.findProperty("APP_UUID") ?: "00000000-0000-0000-0000-000000000000"}\"")
         buildConfigField("String", "API_BASE_URL", "\"https://app.67coffee.ru\"")
     }

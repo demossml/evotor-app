@@ -31,8 +31,13 @@ class Prefs(ctx: Context) {
         set(v) = sp.edit().putString("store_name", v).apply()
 
     var apiBaseUrl: String
-        get() = sp.getString("api_base", null) ?: BuildConfig.API_BASE_URL
-        set(v) = sp.edit().putString("api_base", v.trimEnd('/')).apply()
+        get() {
+            if (!BuildConfig.DEBUG) return BuildConfig.API_BASE_URL
+            return sp.getString("api_base", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.API_BASE_URL
+        }
+        set(v) {
+            if (BuildConfig.DEBUG) sp.edit().putString("api_base", v.trimEnd('/')).apply()
+        }
 
     var catalogJson: String
         get() = sp.getString("catalog_json", "") ?: ""

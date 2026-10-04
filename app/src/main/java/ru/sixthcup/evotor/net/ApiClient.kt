@@ -13,8 +13,10 @@ import java.util.concurrent.TimeUnit
 class ApiClient(baseUrl: String) {
     private val root = baseUrl.trimEnd('/')
     private val http = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(9, TimeUnit.SECONDS)
         .build()
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
@@ -43,10 +45,9 @@ class ApiClient(baseUrl: String) {
     data class SyncResult(val applied: List<String>, val duplicates: List<String>, val rejected: Int)
 
     fun enroll(code: String, publicKey: String): EnrollResult {
-        val body = JSONObject()
-            .put("code", code.trim().uppercase())
-            .put("publicKey", publicKey)
-            .toString()
+        val jo = JSONObject().put("code", code.trim().uppercase())
+        if (publicKey.isNotBlank()) jo.put("publicKey", publicKey)
+        val body = jo.toString()
         val req = Request.Builder()
             .url("$root/api/devices/enroll")
             .post(body.toRequestBody(jsonMedia))
