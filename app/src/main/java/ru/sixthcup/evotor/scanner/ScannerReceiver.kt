@@ -1,36 +1,20 @@
 package ru.sixthcup.evotor.scanner
-
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.util.Log
-
-/**
- * Receives barcode/QR from Evotor terminal scanner.
- * Official action: ru.evotor.devices.ScannedCode
- * Docs: https://developer.evotor.ru/docs/doc_java_barcode_scanner.html
- *
- * On real terminal prefer extending ru.evotor.devices.Scanners.ScannerBroadcastReceiver
- * from integration-library when available on device classpath.
- */
+import ru.sixthcup.evotor.data.CardSession
 class ScannerReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val code = intent.getStringExtra("barcode")
-            ?: intent.getStringExtra("EXTRA_SCANNED_CODE")
-            ?: intent.getStringExtra("ru.evotor.devices.extra.BARCODE")
-            ?: intent.extras?.keySet()?.firstNotNullOfOrNull { k ->
-                intent.extras?.get(k)?.toString()?.takeIf { it.length > 8 }
-            }
-        if (!code.isNullOrBlank()) {
-            Log.d(TAG, "scanned len=${code.length}")
-            context.sendBroadcast(
-                Intent(ACTION_INTERNAL_SCAN).setPackage(context.packageName).putExtra(EXTRA_CODE, code)
-            )
-        }
+        val code = intent.getStringExtra("ru.evotor.devices.extra.SCANNED_CODE")
+            ?: intent.getStringExtra("SCANNED_CODE")
+            ?: intent.getStringExtra("code")
+            ?: return
+        CardSession.set(context, code)
+        context.sendBroadcast(
+            Intent(ACTION_INTERNAL_SCAN).putExtra(EXTRA_CODE, code).setPackage(context.packageName)
+        )
     }
-
     companion object {
-        private const val TAG = "SixthCupScan"
         const val ACTION_INTERNAL_SCAN = "ru.sixthcup.evotor.INTERNAL_SCAN"
         const val EXTRA_CODE = "code"
     }
