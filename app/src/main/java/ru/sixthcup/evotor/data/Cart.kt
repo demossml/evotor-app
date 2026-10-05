@@ -3,9 +3,8 @@ package ru.sixthcup.evotor.data
 data class CartLine(
     val product: Product,
     var qty: Int,
-    var isFree: Boolean = false,
-    /** selected modifier ids (for display / future fiscal) */
-    val modifierIds: List<String> = emptyList()
+    /** this line is the free 6th cup (price 0 in fiscal) */
+    var isFree: Boolean = false
 ) {
     fun lineSumKopecks(): Int =
         if (isFree) 0 else product.priceKopecks * qty
@@ -24,21 +23,10 @@ class Cart {
 
     fun snapshot(): List<CartLine> = lines.values.map { it.copy() }
 
-    fun add(product: Product, modifiers: List<Modifier> = emptyList()) {
-        val modIds = modifiers.map { it.id }.sorted()
-        val key = if (modIds.isEmpty()) product.id
-        else product.id + "|" + modIds.joinToString(",")
-        val extra = modifiers.sumOf { it.priceKopecks }
-        val displayName = if (modifiers.isEmpty()) product.name
-        else product.name + " · " + modifiers.joinToString(", ") { it.name }
-        val lineProduct = product.copy(
-            id = key,
-            name = displayName,
-            priceKopecks = product.priceKopecks + extra
-        )
-        val existing = lines[key]
+    fun add(product: Product) {
+        val existing = lines[product.id]
         if (existing != null) existing.qty += 1
-        else lines[key] = CartLine(lineProduct, 1, modifierIds = modIds)
+        else lines[product.id] = CartLine(product, 1)
     }
 
     fun setQty(productId: String, qty: Int) {
@@ -59,6 +47,7 @@ class Cart {
             lines[productId]?.let {
                 if (it.product.isFreeEligible) {
                     it.isFree = true
+                    // free applies to one unit conceptually
                     if (it.qty < 1) it.qty = 1
                 }
             }

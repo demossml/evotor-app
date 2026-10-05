@@ -1,17 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 5" vertical POS: scrollable menu + fixed bottom cart/pay -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/page"
-    android:orientation="vertical">
+    android:background="@color/page">
 
     <ScrollView
-        android:id="@+id/menuScroll"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
+        android:layout_height="match_parent"
         android:fillViewport="true">
 
         <LinearLayout
@@ -19,17 +15,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="8dp" />
+            android:padding="16dp" />
     </ScrollView>
-
-    <!-- ~35–40% on 5": cart + pay always visible -->
-    <LinearLayout
-        android:id="@+id/bottomPanel"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:background="@color/white"
-        android:elevation="8dp"
-        android:padding="8dp"
-        android:visibility="gone" />
-</LinearLayout>
+</FrameLayout>

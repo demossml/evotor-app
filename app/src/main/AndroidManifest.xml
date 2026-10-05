@@ -42,6 +42,15 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".integration.DiscountIntegrationService"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="evo.v2.receipt.sell.receiptDiscount" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".scanner.ScannerReceiver"
             android:enabled="true"

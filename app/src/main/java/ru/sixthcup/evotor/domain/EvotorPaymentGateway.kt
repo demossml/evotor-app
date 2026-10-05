@@ -177,8 +177,8 @@ class EvotorPaymentGateway : PaymentGateway {
     ): PositionAdd {
         val position = Position.Builder.newInstance(
             UUID.randomUUID().toString(),
+            null,
             name,
-            "шт",
             Measure("шт", 0, 0),
             priceRub,
             BigDecimal(qty)

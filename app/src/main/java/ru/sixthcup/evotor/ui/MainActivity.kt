@@ -27,22 +27,9 @@ import ru.sixthcup.evotor.data.ClientCard
 import ru.sixthcup.evotor.data.LoyaltyRules
 import ru.sixthcup.evotor.data.Prefs
 import ru.sixthcup.evotor.data.Product
-import ru.sixthcup.evotor.data.Modifier
-import ru.sixthcup.evotor.data.ModifierCatalog
-import ru.sixthcup.evotor.data.ModifierGroup
-import android.widget.CheckBox
-import android.widget.ScrollView
 import ru.sixthcup.evotor.domain.EvotorPaymentGateway
-import ru.sixthcup.evotor.domain.LoyaltyReceiptFactory
 import ru.sixthcup.evotor.domain.PaymentResult
 import ru.sixthcup.evotor.scanner.ScannerReceiver
-import ru.sixthcup.evotor.net.ApiClient
-import ru.sixthcup.evotor.net.DeviceKeys
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
 
 /**
  * Full cashier: menu → cart + loyalty → OpenSellReceiptCommand + Evotor payment (fiscal print).
@@ -51,8 +38,6 @@ import org.json.JSONArray
 class MainActivity : AppCompatActivity() {
 
     private lateinit var content: LinearLayout
-    private lateinit var bottomPanel: LinearLayout
-    private lateinit var menuScroll: android.widget.ScrollView
     private lateinit var prefs: Prefs
     private val cart = Cart()
     private val payment = EvotorPaymentGateway()
@@ -74,136 +59,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun attachCard(code: String) {
-        if (code.isBlank()) {
-            toast("Пустой код")
-            return
-        }
-        if (prefs.deviceRevoked) {
-            toast("Касса отозвана — продажи лояльности недоступны")
-            return
-        }
-        val now = System.currentTimeMillis()
-        if (card != null && card!!.rawToken == code.trim() && now - prefs.lastScanAt < 20_000L) {
-            toast("Повторный скан той же карты — подождите несколько секунд")
-            return
-        }
-        val parsed = CardParser.parse(code, prefs.serverPub.ifBlank { null })
-        if (parsed == null) {
-            toast("Карта недействительна (нужен QR из приложения гостя)")
-            return
-        }
-        prefs.lastScanAt = now
-        prefs.lastUserId = parsed.userId
-        card = parsed
-        applyFree = false
-        cashbackUseRub = 0
-        cart.markFree(null)
-        render()
-        toast("Карта №${parsed.userId} · кэшбэк ${parsed.cashbackRub} ₽")
-    }
-
-
-    /** Show syrups/toppings sheet for drinks, then add to cart. */
-    private fun showRecipe(p: Product) {
-        val sb = StringBuilder()
-        sb.append(p.name).append(" · ").append(p.priceRub).append(" ₽\n\n")
-        if (!p.recipeText.isNullOrBlank()) sb.append(p.recipeText).append("\n\n")
-        else sb.append("Рецепт не задан в admin.\n\n")
-        if (p.recipeCostRub != null) sb.append("Себес: ").append(p.recipeCostRub).append(" ₽\n")
-        if (p.recipeSeconds != null) sb.append("Время: ~").append(p.recipeSeconds).append(" сек")
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Рецепт")
-            .setMessage(sb.toString())
-            .setPositiveButton("OK", null)
-            .show()
-    }
-
-    private fun offerModifiersThenAdd(product: Product) {
-        val mods = ModifierCatalog.forProduct(product)
-        if (mods.isEmpty()) {
-            cart.add(product)
-            render()
-            return
-        }
-        val scroll = ScrollView(this)
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 24, 40, 16)
-        }
-        box.addView(TextView(this).apply {
-            text = product.name + " — добавки? (сиропы, топпинги)"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 0, 0, 16)
-        })
-        val checks = mutableListOf<Pair<CheckBox, Modifier>>()
-        ModifierGroup.entries.forEach { group ->
-            val groupMods = mods.filter { it.group == group }
-            if (groupMods.isEmpty()) return@forEach
-            box.addView(TextView(this).apply {
-                text = group.title
-                textSize = 13f
-                setTypeface(null, Typeface.BOLD)
-                setPadding(0, 12, 0, 6)
-            })
-            groupMods.forEach { m ->
-                val cb = CheckBox(this).apply {
-                    text = m.name + "  +" + (m.priceKopecks / 100) + " ₽"
-                    textSize = 15f
-                    minHeight = 48
-                }
-                box.addView(cb)
-                checks.add(cb to m)
-            }
-        }
-        scroll.addView(box)
-        AlertDialog.Builder(this)
-            .setTitle("Добавки")
-            .setView(scroll)
-            .setPositiveButton("В чек") { _, _ ->
-                val selected = checks.filter { it.first.isChecked }.map { it.second }
-                cart.add(product, selected)
-                render()
-            }
-            .setNeutralButton("Без добавок") { _, _ ->
-                cart.add(product)
-                render()
-            }
-            .setNegativeButton("Отмена", null)
-            .show()
-    }
-
-    private fun promptCard() {
-        val input = EditText(this).apply {
-            hint = "QR карты из приложения гостя"
-            setPadding(40, 30, 40, 30)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Карта / QR")
-            .setMessage("Отсканируйте QR или введите код вручную")
-            .setView(input)
-            .setPositiveButton("Применить") { _, _ ->
-                attachCard(input.text.toString().trim())
-            }
-            .setNegativeButton("Отмена", null)
-            .show()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         content = findViewById(R.id.content)
-        bottomPanel = findViewById(R.id.bottomPanel)
-        menuScroll = findViewById(R.id.menuScroll)
         prefs = Prefs(this)
-        if (prefs.isEnrolled) {
-            step = Step.SALE
-            loadCatalogCache()
-            refreshCatalogAsync(showToast = false)
-        } else {
-            step = Step.ENROLL
-        }
+        step = if (prefs.enrollCode.isBlank()) Step.ENROLL else Step.SALE
         render()
     }
 
@@ -228,426 +89,99 @@ class MainActivity : AppCompatActivity() {
 
     private fun render() {
         content.removeAllViews()
-        bottomPanel.removeAllViews()
         when (step) {
-            Step.ENROLL -> {
-                bottomPanel.visibility = android.view.View.GONE
-                renderEnroll()
-            }
-            Step.SALE -> {
-                bottomPanel.visibility = android.view.View.VISIBLE
-                renderSale()
-            }
-            Step.RESULT -> {
-                bottomPanel.visibility = android.view.View.GONE
-                renderResult()
-            }
+            Step.ENROLL -> renderEnroll()
+            Step.SALE -> renderSale()
+            Step.RESULT -> renderResult()
         }
+    }
+
+    private fun attachCard(code: String) {
+        if (code.isBlank()) {
+            toast("Пустой код")
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (card != null && card!!.rawToken == code.trim() && now - prefs.lastScanAt < 20_000L) {
+            toast("Повторный скан той же карты — подождите несколько секунд")
+            return
+        }
+        val parsed = CardParser.parse(code.trim())
+        prefs.lastScanAt = now
+        prefs.lastUserId = parsed.userId
+        card = parsed
+        applyFree = false
+        cashbackUseRub = 0
+        cart.markFree(null)
+        render()
+        toast("Карта №${parsed.userId} · кэшбэк ${parsed.cashbackRub} ₽")
+    }
+
+    private fun promptCard() {
+        val input = EditText(this).apply {
+            hint = "QR карты из приложения гостя"
+            setPadding(40, 30, 40, 30)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Карта / QR")
+            .setMessage("Отсканируйте QR или введите код вручную")
+            .setView(input)
+            .setPositiveButton("Применить") { _, _ ->
+                attachCard(input.text.toString().trim())
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     // ---------- ENROLL ----------
     private fun renderEnroll() {
         header("Регистрация кассы")
-        content.addView(label("Код из admin → Кассы. Меню с backend."))
-        val base = EditText(this).apply {
-            hint = "URL backend"
-            setText(prefs.apiBaseUrl)
-            setPadding(24, 24, 24, 24)
-        }
-        content.addView(base)
         val code = EditText(this).apply {
-            hint = "Код регистрации кассы"
+            hint = "Код (DEMO1234)"
+            setText("DEMO1234")
             setPadding(24, 24, 24, 24)
         }
         content.addView(code)
         content.addView(primaryBtn("Зарегистрировать") {
             val c = code.text.toString().trim()
-            val url = base.text.toString().trim().ifBlank { prefs.apiBaseUrl }
             if (c.isEmpty()) {
                 toast("Введите код"); return@primaryBtn
             }
-            prefs.apiBaseUrl = url
-            enrollAsync(c)
+            prefs.enrollCode = c
+            prefs.deviceName = "Эвотор · $c"
+            step = Step.SALE
+            render()
         })
-    }
-
-    private fun enrollAsync(code: String) {
-        toast("Регистрация…")
-        CoroutineScope(Dispatchers.Main).launch {
-            try {
-                val pair = if (prefs.publicKey.isBlank() || prefs.privateKey.isBlank()) {
-                    DeviceKeys.generate().also {
-                        prefs.publicKey = it.publicKeyB64u
-                        prefs.privateKey = it.privateKeyB64u
-                    }
-                } else null
-                val pk = prefs.publicKey
-                val result = withContext(Dispatchers.IO) {
-                    ApiClient(prefs.apiBaseUrl).enroll(code, pk)
-                }
-                prefs.deviceId = result.deviceId
-                prefs.deviceToken = result.deviceToken
-                prefs.storeName = result.storeName
-                prefs.enrollCode = code
-                prefs.deviceName = "Эвотор · ${result.storeName}"
-                prefs.deviceRevoked = false
-                val dir = withContext(Dispatchers.IO) {
-                    ApiClient(prefs.apiBaseUrl).fetchDirectory(result.deviceToken)
-                }
-                prefs.serverPub = dir.serverPub
-                applyDirectory(dir)
-                mergeStaffRecipes()
-                step = Step.SALE
-                render()
-                toast("Касса #${result.deviceId} · ${dir.products.size} товаров")
-            } catch (e: Exception) {
-                toast(e.message ?: "Ошибка регистрации")
-            }
-        }
-    }
-
-    private fun loadCatalogCache() {
-        val json = prefs.catalogJson
-        if (json.isBlank()) return
-        try {
-            applyDirectory(ApiClient.parseDirectory(json))
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun applyDirectory(dir: ApiClient.Directory) {
-        Catalog.replaceAll(dir.products)
-        prefs.catalogJson = dir.rawJson
-        if (dir.serverPub.isNotBlank()) prefs.serverPub = dir.serverPub
-    }
-
-    private fun mergeStaffRecipes() {
-        val token = prefs.deviceToken
-        if (token.isBlank()) return
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val recipes = ApiClient(prefs.apiBaseUrl).fetchStaffRecipes(token)
-                withContext(Dispatchers.Main) {
-                    Catalog.products.forEach { p ->
-                        val r = recipes[p.id] ?: return@forEach
-                        // Catalog is replace-only; skip mutate if immutable — recipes shown after next fetch merge in refresh
-                    }
-                }
-            } catch (e: ApiClient.DeviceRevokedException) {
-                withContext(Dispatchers.Main) {
-                    prefs.deviceRevoked = true
-                    toast("Касса отозвана")
-                }
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    private fun refreshCatalogAsync(showToast: Boolean) {
-        CoroutineScope(Dispatchers.Main).launch {
-            try {
-                val dir = withContext(Dispatchers.IO) {
-                    ApiClient(prefs.apiBaseUrl).fetchDirectory(prefs.deviceToken.ifBlank { null })
-                }
-                applyDirectory(dir)
-                // staff recipes
-                try {
-                    val recipes = withContext(Dispatchers.IO) {
-                        ApiClient(prefs.apiBaseUrl).fetchStaffRecipes(prefs.deviceToken)
-                    }
-                    val merged = dir.products.map { p ->
-                        val r = recipes[p.id]
-                        if (r == null) p else p.copy(
-                            recipeText = r.first,
-                            recipeCostRub = r.second,
-                            recipeSeconds = r.third
-                        )
-                    }
-                    Catalog.replaceAll(merged)
-                } catch (e: ApiClient.DeviceRevokedException) {
-                    prefs.deviceRevoked = true
-                    toast("Касса отозвана на сервере")
-                    return@launch
-                } catch (_: Exception) {
-                }
-                if (step == Step.SALE) render()
-                if (showToast) toast("Меню: ${dir.products.size} позиций")
-            } catch (e: ApiClient.DeviceRevokedException) {
-                prefs.deviceRevoked = true
-                toast("Касса отозвана на сервере")
-            } catch (e: Exception) {
-                if (showToast) toast(e.message ?: "Не удалось обновить меню")
-            }
-        }
-    }
-
-    private fun flushPendingReceipts() {
-        val token = prefs.deviceToken
-        if (token.isBlank()) return
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val arr = JSONArray(prefs.pendingReceipts)
-                if (arr.length() == 0) return@launch
-                val list = (0 until arr.length()).map { arr.getString(it) }
-                val sync = ApiClient(prefs.apiBaseUrl).syncReceipts(token, list)
-                val done = (sync.applied + sync.duplicates).toSet()
-                val left = JSONArray()
-                for (i in 0 until arr.length()) {
-                    val s = arr.getString(i)
-                    // legacy queue: keep if not clearly applied — online sales preferred
-                    if (s !in done && !s.startsWith("{")) left.put(s)
-                }
-                prefs.pendingReceipts = left.toString()
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    private fun queueReceipt(payload: String) {
-        val arr = try {
-            JSONArray(prefs.pendingReceipts)
-        } catch (_: Exception) {
-            JSONArray()
-        }
-        arr.put(payload)
-        prefs.pendingReceipts = arr.toString()
-        flushPendingReceipts()
     }
 
     // ---------- SALE (menu + cart + client) ----------
     private fun renderSale() {
-        headerBarCompact()
-        content.addView(clientStripCompact())
+        headerBar()
+
+        // Client strip
+        content.addView(clientStrip())
+
+        // Categories
         content.addView(categoryTabs())
-        content.addView(productGrid())
 
-        bottomPanel.addView(sectionTitle("Чек"))
+        // Product grid
+        content.addView(sectionTitle(category.title))
+        Catalog.products.filter { it.category == category }.forEach { p ->
+            content.addView(productRow(p))
+        }
+
+        // Cart
+        content.addView(sectionTitle("Чек"))
         if (cart.isEmpty()) {
-            bottomPanel.addView(hint("Пусто — выберите напиток сверху"))
+            content.addView(hint("Добавьте позиции из меню"))
         } else {
-            val maxLines = 4
-            val lines = cart.snapshot()
-            lines.take(maxLines).forEach { line ->
-                bottomPanel.addView(cartLineRowCompact(line.product, line.qty, line.isFree))
-            }
-            if (lines.size > maxLines) {
-                bottomPanel.addView(hint("+ ещё " + (lines.size - maxLines)))
+            cart.snapshot().forEach { line ->
+                content.addView(cartLineRow(line.product, line.qty, line.isFree))
             }
         }
-        bottomPanel.addView(totalsBlockCompact())
-        bottomPanel.addView(loyaltyStrip())
-        bottomPanel.addView(primaryBtn("Оплатить") { pay() })
-    }
 
-    private fun productGrid(): View {
-        val wrap = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(4, 4, 4, 8)
-        }
-        val products = Catalog.products.filter { it.category == category }
-        if (Catalog.isEmpty()) {
-            wrap.addView(label("Меню пусто. ⋯ → обновить с сервера"))
-            return wrap
-        }
-        if (products.isEmpty()) {
-            wrap.addView(hint("Нет позиций в «" + category.title + "»"))
-            return wrap
-        }
-        var i = 0
-        while (i < products.size) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
-            }
-            row.addView(productTile(products[i]).also {
-                it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).also { lp ->
-                    lp.setMargins(4, 4, 4, 4)
-                }
-            })
-            if (i + 1 < products.size) {
-                row.addView(productTile(products[i + 1]).also {
-                    it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).also { lp ->
-                        lp.setMargins(4, 4, 4, 4)
-                    }
-                })
-            } else {
-                row.addView(View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
-                })
-            }
-            wrap.addView(row)
-            i += 2
-        }
-        return wrap
-    }
-
-    private fun productTile(p: Product): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(color(R.color.white))
-            setPadding(dp(10), dp(12), dp(10), dp(12))
-            minimumHeight = dp(72)
-            setOnClickListener { offerModifiersThenAdd(p) }
-            setOnLongClickListener {
-                showRecipe(p)
-                true
-            }
-        }
-        box.addView(TextView(this).apply {
-            text = p.name
-            setTextColor(color(R.color.ink))
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            maxLines = 2
-        })
-        box.addView(TextView(this).apply {
-            text = "" + p.priceRub + " ₽"
-            setTextColor(color(R.color.brand))
-            textSize = 15f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, dp(4), 0, 0)
-        })
-        return box
-    }
-
-    private fun headerBarCompact() {
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(color(R.color.brand))
-            setPadding(dp(12), dp(28), dp(8), dp(12))
-            gravity = android.view.Gravity.CENTER_VERTICAL
-        }
-        bar.addView(TextView(this).apply {
-            text = prefs.storeName.ifBlank { prefs.deviceName }.ifBlank { "6.7 Coffee" }
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 15f
-            setTypeface(null, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
-        })
-        bar.addView(smallBtn("⋯") { showCashierMenu() }.also {
-            it.setTextColor(0xFFFFFFFF.toInt())
-            it.setBackgroundColor(0x33FFFFFF)
-        })
-        content.addView(bar)
-    }
-
-    private fun showCashierMenu() {
-        val opts = arrayOf("Обновить меню с сервера", "Сбросить привязку кассы (dev)")
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Касса")
-            .setItems(opts) { _, which ->
-                when (which) {
-                    0 -> refreshCatalogAsync(showToast = true)
-                    1 -> {
-                        prefs.deviceToken = ""
-                        prefs.enrollCode = ""
-                        step = Step.ENROLL
-                        render()
-                    }
-                }
-            }
-            .setNegativeButton("Закрыть", null)
-            .show()
-    }
-
-    private fun clientStripCompact(): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(color(R.color.brand_soft))
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            gravity = android.view.Gravity.CENTER_VERTICAL
-        }
-        val c = card
-        val info = TextView(this).apply {
-            text = if (c != null) {
-                "Гость · " + c.progress + "/" + c.cupsForFree + " · кэшбэк " + c.cashbackRub + " ₽"
-            } else {
-                "Гость не выбран"
-            }
-            setTextColor(color(R.color.ink))
-            textSize = 13f
-            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
-        }
-        box.addView(info)
-        box.addView(smallBtn(if (c != null) "Сброс" else "QR") {
-            if (c != null) {
-                card = null
-                applyFree = false
-                cashbackUseRub = 0
-                cart.markFree(null)
-                render()
-            } else promptCard()
-        })
-        return box
-    }
-
-    private fun cartLineRowCompact(p: Product, qty: Int, free: Boolean): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(4, 2, 4, 2)
-        }
-        row.addView(TextView(this).apply {
-            text = if (free) p.name + " (6-й)" else p.name
-            setTextColor(color(R.color.ink))
-            textSize = 13f
-            maxLines = 1
-            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
-        })
-        row.addView(TextView(this).apply {
-            text = "×" + qty
-            setTextColor(color(R.color.ink_secondary))
-            textSize = 13f
-            setPadding(8, 0, 8, 0)
-        })
-        row.addView(smallBtn("−") {
-            cart.setQty(p.id, qty - 1)
-            if (free && qty - 1 <= 0) {
-                applyFree = false
-                cart.markFree(null)
-            }
-            render()
-        })
-        return row
-    }
-
-    private fun totalsBlockCompact(): View {
-        val c = card
-        val wantFree = applyFree && (c?.freeAvailable ?: 0) > 0 && cart.freeLine() != null
-        val totals = ru.sixthcup.evotor.data.LoyaltyRules.totals(cart, c, wantFree, cashbackUseRub)
-        return TextView(this).apply {
-            text = "К оплате  " + (totals.toPayKopecks / 100) + " ₽"
-            setTextColor(color(R.color.brand))
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(8, 8, 8, 4)
-        }
-    }
-
-    private fun loyaltyStrip(): View {
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 4, 0, 4)
-        }
-        val c = card
-        if (c != null && c.freeAvailable > 0) {
-            col.addView(smallBtn(if (applyFree) "6-й: ВКЛ" else "6-й стакан") {
-                toggleFree()
-            }.also { it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) })
-        }
-        if (c != null && c.cashbackRub > 0) {
-            col.addView(smallBtn(
-                if (cashbackUseRub > 0) "−" + cashbackUseRub + " ₽" else "Кэшбэк"
-            ) { askCashback() }.also { it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) })
-        }
-        col.addView(smallBtn("Очистить") {
-            cart.clear()
-            applyFree = false
-            cashbackUseRub = 0
-            cart.markFree(null)
-            render()
-        }.also { it.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) })
-        return col
+        content.addView(totalsBlock())
+        content.addView(actionButtons())
     }
 
     private fun headerBar() {
@@ -688,8 +222,8 @@ class MainActivity : AppCompatActivity() {
                 textSize = 15f
             })
             box.addView(TextView(this).apply {
-                text = "Сканер QR карты гостя"
-                setTextColor(color(R.color.ink))
+                text = "Сканер QR или код: DEMO / FREE / CB"
+                setTextColor(color(R.color.ink_secondary))
                 textSize = 12f
             })
         } else {
@@ -786,7 +320,7 @@ class MainActivity : AppCompatActivity() {
         })
         col.addView(TextView(this).apply {
             text = "${p.priceRub} ₽" + if (p.isFreeEligible) " · можно 6-й" else ""
-            setTextColor(color(R.color.ink))
+            setTextColor(color(R.color.ink_secondary))
             textSize = 13f
         })
         row.addView(col)
@@ -794,7 +328,7 @@ class MainActivity : AppCompatActivity() {
             text = "+"
             textSize = 20f
             setOnClickListener {
-                offerModifiersThenAdd(p)
+                cart.add(p)
                 render()
             }
         })
@@ -964,53 +498,25 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private var pendingSale: PendingSale? = null
-
-    data class PendingSale(
-        val card: ClientCard?,
-        val wantFree: Boolean,
-        val cashbackUse: Int,
-        val amountRub: Int,
-        val itemsJson: List<org.json.JSONObject>,
-        val fiscalHint: String
-    )
-
     private fun pay() {
         if (cart.isEmpty()) {
             toast("Корзина пуста"); return
         }
-        if (prefs.deviceRevoked) {
-            toast("Касса отозвана"); return
-        }
         val c = card
         val wantFree = applyFree && (c?.freeAvailable ?: 0) > 0 && cart.freeLine() != null
         val totals = LoyaltyRules.totals(cart, c, wantFree, cashbackUseRub)
-        val items = cart.snapshot().map { line ->
-            org.json.JSONObject()
-                .put("productId", line.product.id.toIntOrNull() ?: 0)
-                .put("name", line.product.name)
-                .put("qty", line.qty)
-                .put("priceRub", line.product.priceRub)
-        }
         toast("Открываем чек в Эвоторе…")
         payment.charge(this, cart, totals, c, wantFree) { result ->
             runOnUiThread {
                 when (result) {
                     is PaymentResult.OpenedForPayment -> {
-                        // Лояльность НЕ начисляем здесь — только после подтверждения оплаты
-                        pendingSale = PendingSale(
-                            card = c,
-                            wantFree = wantFree,
-                            cashbackUse = cashbackUseRub,
-                            amountRub = totals.toPayKopecks / 100,
-                            itemsJson = items,
-                            fiscalHint = "evotor-${System.currentTimeMillis()}"
-                        )
+                        // Clear local cart — fiscal continues on Evotor payment screen
                         cart.clear()
                         applyFree = false
                         cashbackUseRub = 0
+                        lastFiscalId = "evotor"
                         step = Step.RESULT
-                        resultMessage = result.message + "\n\nПосле оплаты гостем нажмите «Оплата прошла» — стаканы и кэшбэк уйдут на сервер."
+                        resultMessage = result.message
                         render()
                     }
                     is PaymentResult.Err -> toast(result.message)
@@ -1023,78 +529,22 @@ class MainActivity : AppCompatActivity() {
     private fun renderResult() {
         header("Оплата в Эвоторе")
         content.addView(hint(resultMessage.ifBlank {
-            "Чек открыт в Эвоторе. После оплаты гостем подтвердите ниже."
+            "Чек передан в кассу Эвотора. Оплатите на экране терминала — фискальный чек напечатается сам."
         }))
-        if (pendingSale != null && pendingSale?.card != null) {
-            content.addView(primaryBtn("Оплата прошла — начислить лояльность") {
-                commitLoyaltyOnline()
-            })
-            content.addView(secondaryBtn("Не оплачено / отмена") {
-                pendingSale = null
-                step = Step.SALE
-                resultMessage = ""
-                render()
-            })
-        }
+        content.addView(hint(
+            "Клиенту QR не нужен: покупка и кэшбэк появятся в приложении после выгрузки из Эвотора на наш сервер."
+        ))
         content.addView(primaryBtn("Новая продажа") {
-            pendingSale = null
             step = Step.SALE
             card = null
             resultMessage = ""
             render()
         })
         content.addView(secondaryBtn("Ещё заказ этому клиенту") {
-            // Карту сбрасываем — иначе старый free/кэшбэк
-            if (pendingSale != null) {
-                toast("Сначала подтвердите или отмените оплату")
-                return@secondaryBtn
-            }
-            card = null
             step = Step.SALE
             resultMessage = ""
             render()
         })
-    }
-
-    private fun commitLoyaltyOnline() {
-        val sale = pendingSale
-        val c = sale?.card
-        if (sale == null || c == null) {
-            toast("Нет данных продажи")
-            return
-        }
-        if (c.rawToken.isBlank()) {
-            toast("Нет токена карты")
-            return
-        }
-        toast("Отправляем лояльность на сервер…")
-        CoroutineScope(Dispatchers.Main).launch {
-            try {
-                val fiscalId = sale.fiscalHint
-                val res = withContext(Dispatchers.IO) {
-                    ApiClient(prefs.apiBaseUrl).postSale(
-                        deviceToken = prefs.deviceToken,
-                        cardToken = c.rawToken,
-                        fiscalId = fiscalId,
-                        amountRub = sale.amountRub,
-                        useFree = sale.wantFree,
-                        cashbackUseRub = sale.cashbackUse,
-                        items = sale.itemsJson
-                    )
-                }
-                val updated = CardParser.parse(res.cardToken, prefs.serverPub)
-                card = updated
-                pendingSale = null
-                resultMessage = "Лояльность на сервере: +${res.paidCups} стакан(ов), free=${res.appliedFree}, кэшбэк −${res.appliedCashback} ₽. Баланс ${res.cashbackBalance} ₽."
-                render()
-                toast("Готово")
-            } catch (e: ApiClient.DeviceRevokedException) {
-                prefs.deviceRevoked = true
-                toast("Касса отозвана")
-            } catch (e: Exception) {
-                toast(e.message ?: "Ошибка сервера")
-            }
-        }
     }
 
     // ---------- UI helpers ----------
@@ -1119,7 +569,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun hint(t: String) = TextView(this).apply {
         text = t
-        setTextColor(color(R.color.ink))
+        setTextColor(color(R.color.ink_secondary))
         setPadding(20, 8, 20, 8)
         textSize = 14f
     }
@@ -1150,13 +600,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun color(id: Int) = ContextCompat.getColor(this, id)
-    private fun label(text: String) = TextView(this).apply {
-        this.text = text
-        setTextColor(color(R.color.ink))
-        textSize = 13f
-        setPadding(24, 8, 24, 8)
-    }
-
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
