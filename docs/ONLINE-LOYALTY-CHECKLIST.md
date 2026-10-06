@@ -1,3 +1,7 @@
+# HISTORICAL
+
+Этот чеклист относится к старому standalone-cashier/enroll прототипу. Актуальный сценарий описан в `README.md` и `INSTALL.md`: Evotor Cloud catalog + local InventoryApi + signed QR/manual card code + server-side SELL loyalty.
+
 # Касса онлайн — чеклист самопроверки
 
 1. Enroll: publicKey 43 chars base64url Ed25519 (не placeholder).

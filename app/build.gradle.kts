@@ -9,8 +9,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 52
-        versionName = "2.3.1-card-manual"
+        versionCode = 53
+        versionName = "2.3.2-evotor-catalog"
         val serverPublicKey = (project.findProperty("SERVER_PUBLIC_KEY") as String?)?.trim()?.replace("\"", "\\\"") ?: ""
     val serverKeyId = (project.findProperty("SERVER_KEY_ID") as String?)?.trim()?.replace("\"", "\\\"") ?: ""
     val cupsForFree = (project.findProperty("CUPS_FOR_FREE") as String?)?.trim()?.toIntOrNull() ?: 5

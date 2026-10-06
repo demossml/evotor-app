@@ -1,49 +1,43 @@
-# 6.7 Coffee — касса Эвотор v1.3
+# 6.7 Coffee — кассовое приложение Эвотор
 
-versionCode **18** · package `ru.sixthcup.evotor`  
-app_uuid `151071e8-88a4-44f6-b71a-b17c559f9b7d`
+Package: `ru.sixthcup.evotor`  
+VersionCode: **53**  
+VersionName: **2.3.2-evotor-catalog**  
+App UUID: `151071e8-88a4-44f6-b71a-b17c559f9b7d`
 
-## Что в этой версии (логика, без редизайна)
+## Архитектура
 
-1. **Меню с backend** — `GET /api/directory` (товары владельца из admin). Хардкод каталога убран.
-2. **Регистрация кассы** — `POST /api/devices/enroll` с кодом из admin → Кассы.
-3. **Кэш каталога** офлайн + кнопка «Обновить меню с сервера».
-4. **Очередь loyalty-чеков** → `POST /api/devices/sync` с device token.
-5. Фискальная пробивка через Эвотор SDK — как в 1.2.
+APK не содержит собственного хардкод-каталога и не заменяет кассовый движок Эвотора.
 
-## Настройка
+- Эвотор Cloud хранит базовую номенклатуру и доставляет её на терминал.
+- Backend 6.7 создаёт/обновляет товары через Cloud API и сохраняет выданный Эвотор UUID.
+- Рецепт, топпинги и бизнес-метаданные 6.7 передаются как `ProductExtra`.
+- `EvotorCatalogActivity` читает локальный inventory Эвотора через `InventoryApi`, показывает рецепт/топпинги и возвращает выбранный товар в чек через `ru.evotor.createPosition`.
+- Фискализация и закрытие чека остаются за Эвотором.
+- Loyalty: signed QR или короткий номер карты; итоговое начисление выполняется сервером после `SELL` через poll/SellHandler.
 
-При enroll укажите URL API, например:
+## Клиент
 
-- `https://app.67coffee.ru`
-- или IP Mac mini в LAN
+На главном экране доступен ручной ввод короткого номера карты. Сканер принимает либо signed QR, либо цифровой short code.
 
-Код кассы: **admin.*** → вкладка «Кассы» → код enroll.
+Пользовательский сценарий:
+
+1. Сканировать QR гостя **или** ввести номер карты.
+2. Открыть меню товаров Эвотора.
+3. Выбрать товар; APK показывает рецепт и доступные для этого товара добавки.
+4. APK возвращает существующий Evotor product UUID в текущий чек.
+5. Эвотор фискализирует чек.
+6. Backend после polling обрабатывает `extras.sc` и начисляет loyalty.
 
 ## Сборка
 
 ```bash
-export JAVA_HOME=...
-export ANDROID_HOME=$HOME/Library/Android/sdk
-cd evotor-app-main
-./gradlew :app:assembleDebug
+./gradlew :app:assembleDebug \
+  -PSERVER_PUBLIC_KEY=<base64url-ed25519-public-key> \
+  -PSERVER_KEY_ID=<key-id> \
+  -PCUPS_FOR_FREE=5
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`  
-Перед заливкой: **versionCode >** последнего на portal.
+APK: `app/build/outputs/apk/debug/app-debug.apk`
 
-## Проверка
-
-1. В admin создайте товары и код кассы.
-2. На Эвоторе: код + URL → регистрация.
-3. Меню = товары с сервера.
-4. Оплатить → экран оплаты Эвотора → чек.
-
-## Добавки (сиропы / топпинги)
-При + к напитку — диалог добавок. Настройка с admin/backend — см. docs/PLAN-MODIFIERS.md
-
-## UI 1.4 (5″ vertical)
-
-- Меню сверху (scroll), сетка 2 колонки
-- Низ закреплён: чек + сумма + Оплатить
-- Гость — одна строка; ⋯ — обновить меню
+Перед выпуском увеличивай `versionCode`.

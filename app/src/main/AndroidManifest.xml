@@ -11,6 +11,17 @@
         android:usesCleartextTraffic="false"
         tools:replace="android:allowBackup">
         <meta-data android:name="app_uuid" android:value="151071e8-88a4-44f6-b71a-b17c559f9b7d" />
+        <activity
+            android:name=".ui.EvotorCatalogActivity"
+            android:exported="true"
+            android:label="6.7 Coffee"
+            android:windowSoftInputMode="adjustUnspecified">
+            <meta-data android:name="ru.evotor.createPosition.background" android:value="#002FA7" />
+            <intent-filter>
+                <action android:name="ru.evotor.createPosition" />
+                <category android:name="android.intent.category.EVOTOR" />
+            </intent-filter>
+        </activity>
         <activity android:name=".ui.MainActivity" android:exported="true">
             <meta-data android:name="ru.evotor.launcher.BACKGROUND_COLOR" android:value="#002FA7" />
             <meta-data android:name="ru.evotor.launcher.GRANTS" android:resource="@array/cashier_grants" />

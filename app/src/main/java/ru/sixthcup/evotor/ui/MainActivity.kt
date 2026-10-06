@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val hint = TextView(this).apply {
-            text = "Сканируйте QR гостя или введите номер карты"
+            text = "Сканируйте QR гостя или введите номер карты\nТовары выбираются через меню Эвотора — APK использует его номенклатуру"
             textSize = 14f
         }
         listOf(
