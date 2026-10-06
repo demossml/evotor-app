@@ -9,6 +9,7 @@ import ru.evotor.framework.core.action.event.receipt.discount.ReceiptDiscountEve
 import ru.evotor.framework.core.action.event.receipt.discount.ReceiptDiscountEventProcessor
 import ru.evotor.framework.core.action.event.receipt.discount.ReceiptDiscountEventResult
 import ru.evotor.framework.core.action.processor.ActionProcessor
+import ru.evotor.framework.receipt.Receipt
 import ru.evotor.framework.receipt.ReceiptApi
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.CardSession
@@ -16,6 +17,11 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.util.UUID
 
+/**
+ * Applies offline discount from signed QR token; always writes extras.sc for backend poll.
+ * Short numeric code → kind=code, discount 0 (server accrues after SELL).
+ * No call to 6.7 HTTPS from the terminal (TLS avoided).
+ */
 class DiscountIntegrationService : IntegrationService() {
     override fun createProcessors(): MutableMap<String, ActionProcessor>? {
         val map = HashMap<String, ActionProcessor>()
@@ -30,20 +36,17 @@ class DiscountIntegrationService : IntegrationService() {
                     val isShortCode = cardValue.matches(Regex("\\d{1,18}"))
                     val card = if (isShortCode) null else CardTokenVerifier.verify(cardValue)
                     if (!isShortCode && card == null) {
+                        // invalid token — do not apply fake discount
                         callback.skip()
+                        CardSession.clear(applicationContext)
                         return
                     }
-
-                    val receipt = ReceiptApi.getReceipt(applicationContext, event.receiptUuid)
-                    val gross = receipt?.getPositions()?.fold(BigDecimal.ZERO) { acc, p ->
-                        acc.add(p.getTotalWithoutDiscounts())
-                    } ?: BigDecimal.ZERO
-
-                    // Manual short-code mode deliberately does not calculate offline loyalty discounts.
-                    // The server resolves the code after fiscal SELL and is the source of truth.
+                    val gross = receiptGross()
                     val voucherDiscount = card?.let { bestVoucherDiscount(it.vouchers, gross) } ?: BigDecimal.ZERO
                     val cashbackDiscount = card?.let {
-                        BigDecimal(it.cashbackKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN).min(gross)
+                        BigDecimal(it.cashbackKopecks)
+                            .divide(BigDecimal(100), 2, RoundingMode.DOWN)
+                            .min(gross)
                     } ?: BigDecimal.ZERO
                     val totalDiscount = voucherDiscount.add(cashbackDiscount).min(gross).setScale(2, RoundingMode.DOWN)
                     val sc = JSONObject()
@@ -53,29 +56,39 @@ class DiscountIntegrationService : IntegrationService() {
                         .put("kind", if (isShortCode) "code" else "token")
                         .put("op", UUID.randomUUID().toString())
                         .put("free", 0)
-                        .put("cb", cashbackDiscount.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).longValueExact())
+                        .put("cb", cashbackDiscount.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong())
                         .put("disc", totalDiscount.toPlainString())
                         .put("ts", System.currentTimeMillis() / 1000)
-
                     callback.onResult(
                         ReceiptDiscountEventResult(
                             totalDiscount,
                             SetExtra(JSONObject().put("sc", sc)),
                             emptyList(),
                             null,
-                        )
+                        ),
                     )
                 } catch (_: RemoteException) {
                     try { callback.skip() } catch (_: Exception) {}
                 } catch (_: Throwable) {
                     try { callback.skip() } catch (_: Exception) {}
                 } finally {
-                    // A scan belongs to one attempted discount operation only.
                     CardSession.clear(applicationContext)
                 }
             }
         }
         return map
+    }
+
+    private fun receiptGross(): BigDecimal {
+        return try {
+            val receipt = ReceiptApi.getReceipt(this, Receipt.Type.SELL) ?: return BigDecimal.ZERO
+            val positions = receipt.getPositions() ?: return BigDecimal.ZERO
+            positions.fold(BigDecimal.ZERO) { acc, p ->
+                acc.add(p.getTotalWithoutDiscounts() ?: BigDecimal.ZERO)
+            }
+        } catch (_: Throwable) {
+            BigDecimal.ZERO
+        }
     }
 
     private fun bestVoucherDiscount(vouchers: JSONArray, gross: BigDecimal): BigDecimal {
@@ -89,8 +102,8 @@ class DiscountIntegrationService : IntegrationService() {
             val expDay = v.optLong(3, 0)
             if (expDay < today || value <= 0) continue
             val candidate = when (kind) {
-                "p" -> gross.multiply(BigDecimal(value)).divide(BigDecimal(100), 2, RoundingMode.DOWN)
-                "f" -> BigDecimal(value).min(gross)
+                "percent" -> gross.multiply(BigDecimal(value)).divide(BigDecimal(100), 2, RoundingMode.DOWN)
+                "fixed", "rub" -> BigDecimal(value).divide(BigDecimal(100), 2, RoundingMode.DOWN).min(gross)
                 else -> BigDecimal.ZERO
             }
             if (candidate > best) best = candidate

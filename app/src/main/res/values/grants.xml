@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string-array name="cashier_grants">
-        <item>CASH_OPERATIONS_SELL</item>
+        <item>ru.evotor.permission.receipt.print.RECEIPT_DIGITAL</item>
+        <item>ru.evotor.permission.receipt.open</item>
+        <item>ru.evotor.permission.receipt.sell</item>
     </string-array>
 </resources>

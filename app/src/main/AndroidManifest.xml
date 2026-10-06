@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="ru.evotor.devices.SCANNER_RECEIVER" />
+    <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:name=".SixthCupApp"
         android:allowBackup="false"
@@ -12,17 +13,10 @@
         tools:replace="android:allowBackup">
         <meta-data android:name="app_uuid" android:value="151071e8-88a4-44f6-b71a-b17c559f9b7d" />
         <activity
-            android:name=".ui.EvotorCatalogActivity"
+            android:name=".ui.MainActivity"
             android:exported="true"
-            android:label="6.7 Coffee"
-            android:windowSoftInputMode="adjustUnspecified">
-            <meta-data android:name="ru.evotor.createPosition.background" android:value="#002FA7" />
-            <intent-filter>
-                <action android:name="ru.evotor.createPosition" />
-                <category android:name="android.intent.category.EVOTOR" />
-            </intent-filter>
-        </activity>
-        <activity android:name=".ui.MainActivity" android:exported="true">
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize">
             <meta-data android:name="ru.evotor.launcher.BACKGROUND_COLOR" android:value="#002FA7" />
             <meta-data android:name="ru.evotor.launcher.GRANTS" android:resource="@array/cashier_grants" />
             <intent-filter>
@@ -35,7 +29,7 @@
                 <action android:name="evo.v2.receipt.sell.receiptDiscount" />
             </intent-filter>
         </service>
-        <receiver android:name=".scanner.ScannerReceiver" android:exported="true" android:permission="ru.evotor.devices.SCANNER_RECEIVER">
+        <receiver android:name=".scanner.ScannerReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="ru.evotor.devices.ScannedCode" />
             </intent-filter>
