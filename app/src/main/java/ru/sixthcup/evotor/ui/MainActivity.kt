@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -16,13 +17,12 @@ import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.scanner.ScannerReceiver
 class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
-    private lateinit var input: EditText
     private val scanReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val code = intent.getStringExtra(ScannerReceiver.EXTRA_CODE) ?: return
             CardSession.set(this@MainActivity, code)
-            status.text = "Карта: $code"
-            Toast.makeText(this@MainActivity, "Карта $code", Toast.LENGTH_SHORT).show()
+            status.text = "Карта готова к следующей продаже"
+            Toast.makeText(this@MainActivity, "Клиент распознан", Toast.LENGTH_SHORT).show()
         }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -34,38 +34,46 @@ class MainActivity : AppCompatActivity() {
         val pad = (16 * resources.displayMetrics.density).toInt()
         root.setPadding(pad, pad, pad, pad)
         status = TextView(this).apply { text = statusText(); textSize = 18f }
-        input = EditText(this).apply {
-            hint = "Номер карты"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        val cardInput = EditText(this).apply {
+            hint = "Например, 0042"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            textSize = 20f
         }
-        val attach = Button(this).apply {
+        val bind = Button(this).apply {
             text = "Привязать карту"
             setOnClickListener {
-                val c = input.text.toString().trim()
-                if (c.isEmpty()) return@setOnClickListener
-                CardSession.set(this@MainActivity, c)
+                val code = cardInput.text.toString().trim()
+                if (!code.matches(Regex("\\d{1,18}"))) {
+                    cardInput.error = "Введите только цифры номера карты"
+                    return@setOnClickListener
+                }
+                CardSession.set(this@MainActivity, code)
+                cardInput.text?.clear()
                 status.text = statusText()
+                Toast.makeText(this@MainActivity, "Клиент готов", Toast.LENGTH_SHORT).show()
             }
         }
         val clear = Button(this).apply {
-            text = "Сбросить"
+            text = "Сбросить клиента"
             setOnClickListener {
                 CardSession.clear(this@MainActivity)
+                cardInput.text?.clear()
                 status.text = statusText()
             }
         }
         val hint = TextView(this).apply {
-            text = "Товары — меню Эвотор. Здесь карта: скан или номер."
+            text = "Сканируйте QR гостя или введите номер карты"
             textSize = 14f
         }
         listOf(
             TextView(this).apply { text = "6.7 Coffee"; textSize = 22f; setTextColor(0xFF002FA7.toInt()) },
-            status, input, attach, clear, hint
+            status, hint, cardInput, bind, clear
         ).forEach { root.addView(it) }
     }
     private fun statusText(): String {
         val c = CardSession.get(this)
-        return if (c != null) "Карта: $c\nДалее — продажа в меню Эвотор" else "Карта не выбрана"
+        return if (c != null) "Клиент распознан\nДалее — продажа в меню Эвотор" else "Клиент не выбран"
     }
     override fun onResume() {
         super.onResume()
