@@ -2,7 +2,6 @@ package ru.sixthcup.evotor.data
 
 import android.content.Context
 import android.database.Cursor
-import org.json.JSONObject
 import ru.evotor.framework.inventory.InventoryApi
 import ru.evotor.framework.inventory.ProductItem
 import ru.evotor.framework.inventory.ProductTable
@@ -18,18 +17,15 @@ data class CatalogProduct(
     val article: String?,
 )
 
-/**
- * Products from the terminal (synced from Evotor Cloud after admin push).
- * No hardcoded menu.
- */
+/** Docs: InventoryApi / commodity DB. Never call from Activity.onCreate. */
 object InventoryRepository {
     fun load(context: Context): List<CatalogProduct> {
         val out = mutableListOf<CatalogProduct>()
         context.contentResolver.query(ProductTable.URI, null, null, null, null)?.use { c ->
-            val uuidCol = col(c, ProductTable.ROW_UUID, "UUID", "uuid")
-            val nameCol = col(c, ProductTable.ROW_NAME, "NAME", "name")
-            val priceCol = col(c, ProductTable.ROW_PRICE_OUT, "PRICE_OUT", "priceOut", "PRICE")
-            val typeCol = col(c, ProductTable.ROW_TYPE, "TYPE", "type")
+            val uuidCol = col(c, "UUID", "uuid")
+            val nameCol = col(c, "NAME", "name")
+            val priceCol = col(c, "PRICE_OUT", "priceOut", "PRICE", "price")
+            val typeCol = col(c, "TYPE", "type")
             val allowCol = col(c, "ALLOW_TO_SELL", "allowToSell")
             while (c.moveToNext()) {
                 val uuid = uuidCol?.let { c.getString(it) }?.trim().orEmpty()
@@ -42,34 +38,16 @@ object InventoryRepository {
                 } ?: BigDecimal.ZERO
                 val allow = allowCol?.let { c.getInt(it) != 0 } ?: true
                 if (!allow) continue
-                val extra = readSixthCupExtra(context, uuid)
-                out.add(
-                    CatalogProduct(
-                        uuid = uuid,
-                        name = name,
-                        priceRub = price,
-                        allowToSell = allow,
-                        recipe = extra?.optString("recipe")?.ifBlank { null },
-                        description = extra?.optString("description")?.ifBlank { null },
-                        article = extra?.optString("article")?.ifBlank { null },
-                    ),
-                )
+                var recipe: String? = null
+                try {
+                    val item = InventoryApi.getProductByUuid(context, uuid) as? ProductItem.Product
+                    recipe = item?.description?.takeIf { it.isNotBlank() }
+                } catch (_: Throwable) {
+                }
+                out.add(CatalogProduct(uuid, name, price, allow, recipe, recipe, null))
             }
         }
         return out.sortedBy { it.name.lowercase() }
-    }
-
-    fun get(context: Context, uuid: String): CatalogProduct? =
-        load(context).find { it.uuid == uuid }
-
-    private fun readSixthCupExtra(context: Context, productUuid: String): JSONObject? {
-        return try {
-            val product = InventoryApi.getProductByUuid(context, productUuid) as? ProductItem.Product ?: return null
-            // Product extras vary by SDK; try reflection-safe name field if present
-            null
-        } catch (_: Throwable) {
-            null
-        }
     }
 
     private fun col(c: Cursor, vararg names: String): Int? {

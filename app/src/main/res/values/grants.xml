@@ -2,5 +2,6 @@
 <resources>
     <string-array name="cashier_grants">
         <item>CASH_OPERATIONS_SELL</item>
+        <item>CASH_OPERATIONS_PAYBACK</item>
     </string-array>
 </resources>

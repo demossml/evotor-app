@@ -9,8 +9,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 55
-        versionName = "3.0.1-cashier-ui"
+        versionCode = 56
+        versionName = "3.0.2-doc-aligned"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
         buildConfigField("String", "SERVER_PUBLIC_KEY", "\"${project.findProperty("SERVER_PUBLIC_KEY") ?: ""}\"")
         buildConfigField("String", "SERVER_KEY_ID", "\"${project.findProperty("SERVER_KEY_ID") ?: "main"}\"")
