@@ -33,9 +33,7 @@ APK не содержит собственного хардкод-каталог
 
 ```bash
 ./gradlew :app:assembleDebug \
-  -PSERVER_PUBLIC_KEY=<base64url-ed25519-public-key> \
-  -PSERVER_KEY_ID=<key-id> \
-  -PCUPS_FOR_FREE=5
+  -PAPI_BASE_URL=https://app.67coffee.ru
 ```
 
 APK: `app/build/outputs/apk/debug/app-debug.apk`

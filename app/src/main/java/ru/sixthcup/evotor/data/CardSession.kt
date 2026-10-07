@@ -1,72 +1,69 @@
 package ru.sixthcup.evotor.data
 
 import android.content.Context
+import org.json.JSONObject
 
 /**
- * Bound guest card for current sale.
- * [raw] is QR token or short numeric code (identity only).
- * Live balance comes from backend resolve, not from QR payload.
+ * Guest identified for the CURRENT sale only. The QR is just an identity; the balance and the
+ * bonus reservation come from the backend (see LoyaltyApi). Nothing here is a source of truth.
  */
+data class CardInfo(
+    /** Raw scanned value: signed QR token or short numeric card number. */
+    val code: String,
+    val cardCode: String,
+    val paidCups: Int,
+    val cupsForFree: Int,
+    val freeAvailable: Int,
+    val cashbackKopecks: Long,
+    val reservationId: String?,
+    val reservationExpiresAt: Long,
+    /** "RESERVED" | "ALREADY_RESERVED" | "NONE" | "OFFLINE" | "ERROR" */
+    val freeStatus: String,
+    val note: String? = null,
+)
+
 object CardSession {
-    private const val PREFS = "sixthcup_card"
-    private const val KEY_RAW = "raw"
-    private const val KEY_RESERVATION = "reservation_id"
-    private const val KEY_FREE = "free_available"
-    private const val KEY_PAID = "paid_cups"
-    private const val KEY_CASHBACK = "cashback"
-    private const val KEY_CODE = "card_code"
-    private const val KEY_EXPIRES = "reservation_expires"
+    private const val PREF = "sixthcup_card"
+    private const val KEY = "info"
+    private const val KEY_AT = "at"
+    /** A scan is only valid for one sale; stale scans must never leak into the next customer's receipt. */
+    private const val TTL_MS = 10 * 60 * 1000L
 
-    fun get(ctx: Context): String? =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_RAW, null)
+    fun set(ctx: Context, info: CardInfo) {
+        val o = JSONObject()
+            .put("code", info.code).put("cardCode", info.cardCode).put("paidCups", info.paidCups)
+            .put("cupsForFree", info.cupsForFree).put("freeAvailable", info.freeAvailable)
+            .put("cb", info.cashbackKopecks).put("res", info.reservationId ?: JSONObject.NULL)
+            .put("resExp", info.reservationExpiresAt).put("status", info.freeStatus).put("note", info.note ?: JSONObject.NULL)
+        ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .putString(KEY, o.toString()).putLong(KEY_AT, System.currentTimeMillis()).apply()
+    }
 
-    fun set(ctx: Context, raw: String) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_RAW, raw.trim())
-            .remove(KEY_RESERVATION)
-            .remove(KEY_FREE)
-            .remove(KEY_PAID)
-            .remove(KEY_CASHBACK)
-            .remove(KEY_CODE)
-            .remove(KEY_EXPIRES)
-            .apply()
+    fun get(ctx: Context): CardInfo? {
+        val p = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+        val s = p.getString(KEY, null) ?: return null
+        if (System.currentTimeMillis() - p.getLong(KEY_AT, 0L) > TTL_MS) { clear(ctx); return null }
+        return try {
+            val o = JSONObject(s)
+            CardInfo(
+                code = o.getString("code"), cardCode = o.optString("cardCode"), paidCups = o.optInt("paidCups"),
+                cupsForFree = o.optInt("cupsForFree", 5), freeAvailable = o.optInt("freeAvailable"),
+                cashbackKopecks = o.optLong("cb"), reservationId = if (o.isNull("res")) null else o.getString("res"),
+                reservationExpiresAt = o.optLong("resExp"), freeStatus = o.optString("status", "NONE"),
+                note = if (o.isNull("note")) null else o.getString("note"),
+            )
+        } catch (_: Throwable) { clear(ctx); null }
     }
 
     fun clear(ctx: Context) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+        ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
-    fun setResolve(
-        ctx: Context,
-        reservationId: String?,
-        freeAvailable: Boolean,
-        paidCups: Int,
-        cashbackKopecks: Int,
-        cardCode: String?,
-        expiresAt: Long?,
-    ) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_RESERVATION, reservationId)
-            .putBoolean(KEY_FREE, freeAvailable)
-            .putInt(KEY_PAID, paidCups)
-            .putInt(KEY_CASHBACK, cashbackKopecks)
-            .putString(KEY_CODE, cardCode)
-            .putLong(KEY_EXPIRES, expiresAt ?: 0L)
-            .apply()
+    /** extras.sc written into the receipt. The backend re-checks everything when it reads the SELL. */
+    fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+        val o = JSONObject().put("v", 2).put("c", info.code).put("ts", System.currentTimeMillis() / 1000)
+        if (info.reservationId != null) o.put("op", info.reservationId)
+        o.put("free", if (freeApplied) 1 else 0).put("cb", cashbackKopecks)
+        return o
     }
-
-    fun reservationId(ctx: Context): String? =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_RESERVATION, null)
-
-    fun freeAvailable(ctx: Context): Boolean =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_FREE, false)
-
-    fun paidCups(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_PAID, 0)
-
-    fun cashbackKopecks(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_CASHBACK, 0)
-
-    fun cardCode(ctx: Context): String? =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CODE, null)
 }

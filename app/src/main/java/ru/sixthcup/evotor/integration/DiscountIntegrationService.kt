@@ -15,10 +15,9 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 
 /**
- * Writes extras.sc for Cloud → backend SellHandler.
- * Discount from live resolve is not forced here — FREE_CUP is reserved on backend;
- * cash discount from old QR payload is not trusted (state is server-side).
- * op = reservation id from POST /api/loyalty/resolve when present.
+ * Applies the discount for the bonus that the backend RESERVED when the QR was scanned
+ * (free cup and/or cashback) and writes extras.sc for the backend to read after the SELL.
+ * The terminal never decides balances: if there is no reservation, no discount is given.
  */
 class DiscountIntegrationService : IntegrationService() {
     override fun createProcessors(): MutableMap<String, ActionProcessor>? {
@@ -26,39 +25,30 @@ class DiscountIntegrationService : IntegrationService() {
         map[ReceiptDiscountEvent.NAME_SELL_RECEIPT] = object : ReceiptDiscountEventProcessor() {
             override fun call(action: String, event: ReceiptDiscountEvent, callback: Callback) {
                 try {
-                    val ctx = applicationContext
-                    val cardValue = CardSession.get(ctx)
-                    if (cardValue == null) {
+                    val info = CardSession.get(applicationContext)
+                    if (info == null || info.code.isEmpty()) {
                         callback.skip()
                         return
                     }
-                    val isShortCode = cardValue.matches(Regex("\\d{1,18}"))
-                    val reservationId = CardSession.reservationId(ctx)
-                    val freeFlag = if (CardSession.freeAvailable(ctx)) 1 else 0
-                    val sc = JSONObject()
-                        .put("v", 2)
-                        .put("c", cardValue)
-                        .put("kind", if (isShortCode) "code" else "token")
-                        .put("op", reservationId ?: "")
-                        .put("free", freeFlag)
-                        .put("cb", 0)
-                        .put("disc", "0")
-                        .put("ts", System.currentTimeMillis() / 1000)
-                    // No terminal-side monetary discount from stale QR — backend is source of truth.
-                    val totalDiscount = BigDecimal.ZERO.setScale(2, RoundingMode.DOWN)
+                    val now = System.currentTimeMillis() / 1000
+                    val reserved = info.reservationId != null && (info.reservationExpiresAt == 0L || info.reservationExpiresAt + GRACE_SEC >= now)
+                    val prices = receiptUnitPrices()
+                    val gross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
+                    // Free cup: the cheapest single unit on the receipt (the backend still re-checks it).
+                    val freeDiscount = if (reserved && info.freeAvailable > 0 && prices.isNotEmpty())
+                        prices.minOf { it.first }.setScale(2, RoundingMode.DOWN) else BigDecimal.ZERO
+                    val cbRub = if (reserved)
+                        BigDecimal(info.cashbackKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN).min(gross.subtract(freeDiscount).max(BigDecimal.ZERO))
+                    else BigDecimal.ZERO
+                    val total = freeDiscount.add(cbRub).min(gross).setScale(2, RoundingMode.DOWN)
+                    val sc = CardSession.sc(info, freeDiscount.signum() > 0, cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong())
                     callback.onResult(
-                        ReceiptDiscountEventResult(
-                            totalDiscount,
-                            SetExtra(JSONObject().put("sc", sc)),
-                            emptyList(),
-                            null,
-                        ),
+                        ReceiptDiscountEventResult(total, SetExtra(JSONObject().put("sc", sc)), emptyList(), null),
                     )
-                } catch (_: RemoteException) {
-                    try { callback.skip() } catch (_: Exception) {}
                 } catch (_: Throwable) {
                     try { callback.skip() } catch (_: Exception) {}
                 } finally {
+                    // One scan serves exactly one sale.
                     CardSession.clear(applicationContext)
                 }
             }
@@ -66,16 +56,22 @@ class DiscountIntegrationService : IntegrationService() {
         return map
     }
 
-    @Suppress("unused")
-    private fun receiptGross(): BigDecimal {
+    /** (unit price, line total) for every position of the open sell receipt. */
+    private fun receiptUnitPrices(): List<Pair<BigDecimal, BigDecimal>> {
         return try {
-            val receipt = ReceiptApi.getReceipt(this, Receipt.Type.SELL) ?: return BigDecimal.ZERO
-            val positions = receipt.getPositions() ?: return BigDecimal.ZERO
-            positions.fold(BigDecimal.ZERO) { acc, p ->
-                acc.add(p.getTotalWithoutDiscounts() ?: BigDecimal.ZERO)
+            val receipt = ReceiptApi.getReceipt(this, Receipt.Type.SELL) ?: return emptyList()
+            (receipt.getPositions() ?: return emptyList()).map { p ->
+                val total = p.getTotalWithoutDiscounts() ?: BigDecimal.ZERO
+                val qty = p.getQuantity()?.takeIf { it.signum() > 0 } ?: BigDecimal.ONE
+                Pair(total.divide(qty, 2, RoundingMode.DOWN), total)
             }
         } catch (_: Throwable) {
-            BigDecimal.ZERO
+            emptyList()
         }
+    }
+
+    private companion object {
+        /** Slack for a slow barista: the backend honours a lapsed reservation only if nobody else took the bonus. */
+        const val GRACE_SEC = 300L
     }
 }

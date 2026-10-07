@@ -8,13 +8,11 @@ VersionName: `2.3.2-evotor-catalog`
 
 В Android Studio открой проект `evotor-app-main` и собери Debug APK.
 
-Для signed QR при сборке передай реальные значения публичного ключа сервера:
+APK обращается к backend по HTTPS через прокси Эвотора; секретов в APK нет. Адрес должен совпадать с маской разрешённых URL в кабинете Эвотор:
 
 ```bash
 ./gradlew :app:assembleDebug \
-  -PSERVER_PUBLIC_KEY=<base64url-ed25519-public-key> \
-  -PSERVER_KEY_ID=<key-id> \
-  -PCUPS_FOR_FREE=5
+  -PAPI_BASE_URL=https://app.67coffee.ru
 ```
 
 Секретный приватный ключ сервера в Android-проект не попадает.

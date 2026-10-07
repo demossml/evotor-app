@@ -40,8 +40,9 @@ object SellLauncher {
                 positionAdds.add(PositionAdd(position))
             }
             val card = CardSession.get(activity)
-            val setExtra = if (card != null) {
-                SetExtra(JSONObject().put("sc", JSONObject().put("c", card).put("v", 2)))
+            // Only identity + reservation id here; the discount event adds the applied amounts.
+            val setExtra = if (card != null && card.code.isNotEmpty()) {
+                SetExtra(JSONObject().put("sc", CardSession.sc(card, false, 0L)))
             } else null
 
             OpenSellReceiptCommand(positionAdds, setExtra).process(

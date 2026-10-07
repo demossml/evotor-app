@@ -9,11 +9,11 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 60
-        versionName = "3.1.0-loyalty-resolve"
+        versionCode = 57
+        versionName = "4.0.0-reservations"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
-        buildConfigField("String", "SERVER_PUBLIC_KEY", "\"${project.findProperty("SERVER_PUBLIC_KEY") ?: ""}\"")
-        buildConfigField("String", "SERVER_KEY_ID", "\"${project.findProperty("SERVER_KEY_ID") ?: "main"}\"")
+        // Public HTTPS URL of the backend as allowed in the Evotor cabinet (proxy mask). No secrets here.
+        buildConfigField("String", "API_BASE_URL", "\"${project.findProperty("API_BASE_URL") ?: "https://app.67coffee.ru"}\"")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -24,7 +24,6 @@ android {
 }
 dependencies {
     implementation("com.github.evotor:integration-library:v0.6.27")
-    implementation("net.i2p.crypto:eddsa:0.3.0")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
