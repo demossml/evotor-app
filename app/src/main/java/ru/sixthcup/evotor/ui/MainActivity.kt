@@ -18,6 +18,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardSession
+import ru.sixthcup.evotor.integration.LoyaltyApi
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CatalogProduct
@@ -34,11 +35,38 @@ class MainActivity : AppCompatActivity() {
     private enum class Screen { CARD, CATALOG, CART }
 
     private val scanReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val code = intent.getStringExtra(ScannerReceiver.EXTRA_CODE) ?: return
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val code = intent?.getStringExtra(ScannerReceiver.EXTRA_CODE) ?: return
             CardSession.set(this@MainActivity, code)
-            Toast.makeText(this@MainActivity, "Карта принята", Toast.LENGTH_SHORT).show()
-            if (screen == Screen.CARD) safeRender()
+            Toast.makeText(this@MainActivity, "Проверка на сервере…", Toast.LENGTH_SHORT).show()
+            LoyaltyApi.resolveAsync(
+                code,
+                onOk = { r ->
+                    runOnUiThread {
+                        CardSession.setResolve(
+                            this@MainActivity,
+                            r.reservationId,
+                            r.freeAvailable,
+                            r.paidCups,
+                            r.cashbackKopecks,
+                            r.cardCode,
+                            r.reservationExpiresAt,
+                        )
+                        Toast.makeText(
+                            this@MainActivity,
+                            if (r.freeAvailable) "Бесплатный: ДА" else "Карта OK",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        if (screen == Screen.CARD) safeRender()
+                    }
+                },
+                onErr = { msg ->
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Сервер: $msg", Toast.LENGTH_LONG).show()
+                        if (screen == Screen.CARD) safeRender()
+                    }
+                },
+            )
         }
     }
 
@@ -86,25 +114,66 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderCard() {
         title("6.7 Coffee")
-        hint("QR или номер карты. Скидка из подписанного QR (без HTTPS к 6.7).")
+        hint("QR или номер → сервер отдаёт актуальные кружки/баллы. Телефон гостя может быть офлайн.")
         val raw = CardSession.get(this)
-        body(when {
-            raw == null -> "Карта не привязана"
-            raw.matches(Regex("\\d{1,18}")) -> "Номер: $raw"
-            else -> {
-                val v = try { CardTokenVerifier.verify(raw) } catch (_: Throwable) { null }
-                if (v != null) "QR OK · кэшбэк ${v.cashbackKopecks / 100.0} ₽" else "QR принят"
-            }
-        })
+        val code = CardSession.cardCode(this)
+        val paid = CardSession.paidCups(this)
+        val free = CardSession.freeAvailable(this)
+        val cb = CardSession.cashbackKopecks(this)
+        val res = CardSession.reservationId(this)
+        body(
+            when {
+                raw == null -> "Карта не привязана — скан QR или номер"
+                else -> buildString {
+                    append(if (code != null) "Карта $code" else "Карта привязана")
+                    append("\nОплачено стаканов: $paid")
+                    append(if (free) "\nБесплатный стакан: ДА" else "\nБесплатный стакан: нет")
+                    append("\nКэшбэк: ${cb / 100.0} ₽")
+                    if (res != null) append("\nРезерв: $res")
+                }
+            },
+        )
         val input = EditText(this).apply {
             hint = "Номер карты"; inputType = InputType.TYPE_CLASS_NUMBER
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
         }
         root.addView(input)
+        fun bindAndResolve(value: String) {
+            CardSession.set(this@MainActivity, value)
+            Toast.makeText(this@MainActivity, "Проверка на сервере…", Toast.LENGTH_SHORT).show()
+            LoyaltyApi.resolveAsync(
+                value,
+                onOk = { r ->
+                    runOnUiThread {
+                        CardSession.setResolve(
+                            this@MainActivity,
+                            r.reservationId,
+                            r.freeAvailable,
+                            r.paidCups,
+                            r.cashbackKopecks,
+                            r.cardCode,
+                            r.reservationExpiresAt,
+                        )
+                        Toast.makeText(
+                            this@MainActivity,
+                            if (r.freeAvailable) "Бесплатный стакан доступен" else "Карта OK",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        safeRender()
+                    }
+                },
+                onErr = { msg ->
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Сервер: $msg", Toast.LENGTH_LONG).show()
+                        safeRender()
+                    }
+                },
+            )
+        }
         btn("Привязать номер") {
             val c = input.text.toString().trim()
             if (!c.matches(Regex("\\d{1,18}"))) { input.error = "Только цифры"; return@btn }
-            CardSession.set(this, c); safeRender()
+            bindAndResolve(c)
         }
         btn("Сбросить карту") { CardSession.clear(this); safeRender() }
         primary("К меню товаров") {
