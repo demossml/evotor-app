@@ -9,7 +9,7 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 57
+        versionCode = 62
         versionName = "4.0.0-reservations"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
         // Public HTTPS URL of the backend as allowed in the Evotor cabinet (proxy mask). No secrets here.
