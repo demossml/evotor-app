@@ -15,6 +15,7 @@ data class CatalogProduct(
     val recipe: String?,
     val description: String?,
     val article: String?,
+    val freeEligible: Boolean = false,
 )
 
 /** Docs: InventoryApi / commodity DB. Never call from Activity.onCreate. */
@@ -44,7 +45,7 @@ object InventoryRepository {
                     recipe = item?.description?.takeIf { it.isNotBlank() }
                 } catch (_: Throwable) {
                 }
-                out.add(CatalogProduct(uuid, name, price, allow, recipe, recipe, null))
+                out.add(CatalogProduct(uuid, name, price, allow, recipe, recipe, null, freeEligible = true))
             }
         }
         return out.sortedBy { it.name.lowercase() }

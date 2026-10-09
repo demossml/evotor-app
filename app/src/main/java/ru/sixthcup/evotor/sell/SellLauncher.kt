@@ -13,6 +13,7 @@ import ru.evotor.framework.receipt.Measure
 import ru.evotor.framework.receipt.Position
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.CheckoutChoice
 import java.util.UUID
 
 /**
@@ -20,7 +21,7 @@ import java.util.UUID
  * OpenSellReceiptCommand(positionAddList, setExtra).process → NavigationApi.createIntentForSellReceiptPayment()
  */
 object SellLauncher {
-    fun openSellReceipt(activity: Activity, onDone: (Boolean, String) -> Unit) {
+    fun openSellReceipt(activity: Activity, freeApplied: Boolean, spendCashback: Boolean, cashbackKopecks: Long, onDone: (Boolean, String) -> Unit) {
         val lines = Cart.all()
         if (lines.isEmpty()) {
             onDone(false, "Корзина пуста")
@@ -40,9 +41,10 @@ object SellLauncher {
                 positionAdds.add(PositionAdd(position))
             }
             val card = CardSession.get(activity)
-            // Only identity + reservation id here; the discount event adds the applied amounts.
+            CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks)
+            // Single contract consumed by SellHandler: extras.sc={v:2,c,op,free,cb,ts}.
             val setExtra = if (card != null && card.code.isNotEmpty()) {
-                SetExtra(JSONObject().put("sc", CardSession.sc(card, false, 0L)))
+                SetExtra(JSONObject().put("sc", CardSession.sc(card, freeApplied, if (spendCashback) cashbackKopecks else 0L)))
             } else null
 
             OpenSellReceiptCommand(positionAdds, setExtra).process(
@@ -51,21 +53,25 @@ object SellLauncher {
                     try {
                         val result = future.result
                         if (result?.type == IntegrationManagerFuture.Result.Type.OK) {
-                            Cart.clear()
                             try {
                                 activity.startActivity(NavigationApi.createIntentForSellReceiptPayment())
-                            } catch (_: Throwable) {
+                            } catch (e: Throwable) {
+                                onDone(false, e.message ?: "Не удалось открыть оплату")
+                                return@IntegrationManagerCallback
                             }
-                            onDone(true, "Чек открыт — завершите оплату на экране Эвотор")
+                            onDone(true, "Чек открыт. После возврата подтвердите результат фискализации")
                         } else {
+                            CheckoutChoice.clear(activity)
                             onDone(false, result?.error?.message ?: "Не удалось открыть чек")
                         }
                     } catch (e: Exception) {
+                        CheckoutChoice.clear(activity)
                         onDone(false, e.message ?: "Integration error")
                     }
                 },
             )
         } catch (e: Throwable) {
+            CheckoutChoice.clear(activity)
             Toast.makeText(activity, "Sell: ${e.message}", Toast.LENGTH_LONG).show()
             onDone(false, e.message ?: "OpenSellReceiptCommand failed")
         }

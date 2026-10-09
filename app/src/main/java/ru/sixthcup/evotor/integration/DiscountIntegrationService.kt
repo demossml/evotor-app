@@ -11,6 +11,8 @@ import ru.evotor.framework.core.action.processor.ActionProcessor
 import ru.evotor.framework.receipt.Receipt
 import ru.evotor.framework.receipt.ReceiptApi
 import ru.sixthcup.evotor.data.CardSession
+import ru.sixthcup.evotor.data.CheckoutChoice
+import ru.sixthcup.evotor.data.Cart
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -35,10 +37,12 @@ class DiscountIntegrationService : IntegrationService() {
                     val prices = receiptUnitPrices()
                     val gross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                     // Free cup: the cheapest single unit on the receipt (the backend still re-checks it).
-                    val freeDiscount = if (reserved && info.freeAvailable > 0 && prices.isNotEmpty())
-                        prices.minOf { it.first }.setScale(2, RoundingMode.DOWN) else BigDecimal.ZERO
-                    val cbRub = if (reserved)
-                        BigDecimal(info.cashbackKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN).min(gross.subtract(freeDiscount).max(BigDecimal.ZERO))
+                    val eligibleUnitPrices = Cart.all().filter { it.freeEligible }.map { it.priceRub }
+                    val freeDiscount = if (reserved && CheckoutChoice.free(applicationContext) && info.freeAvailable > 0 && eligibleUnitPrices.isNotEmpty())
+                        eligibleUnitPrices.minOrNull()!!.setScale(2, RoundingMode.DOWN) else BigDecimal.ZERO
+                    val requestedCb = if (CheckoutChoice.cashback(applicationContext)) CheckoutChoice.cashbackKopecks(applicationContext) else 0L
+                    val cbRub = if (reserved && requestedCb > 0L)
+                        BigDecimal(requestedCb.coerceAtMost(info.cashbackKopecks)).divide(BigDecimal(100), 2, RoundingMode.DOWN).min(gross.subtract(freeDiscount).max(BigDecimal.ZERO))
                     else BigDecimal.ZERO
                     val total = freeDiscount.add(cbRub).min(gross).setScale(2, RoundingMode.DOWN)
                     val sc = CardSession.sc(info, freeDiscount.signum() > 0, cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong())
@@ -48,8 +52,7 @@ class DiscountIntegrationService : IntegrationService() {
                 } catch (_: Throwable) {
                     try { callback.skip() } catch (_: Exception) {}
                 } finally {
-                    // One scan serves exactly one sale.
-                    CardSession.clear(applicationContext)
+                    CheckoutChoice.clear(applicationContext)
                 }
             }
         }

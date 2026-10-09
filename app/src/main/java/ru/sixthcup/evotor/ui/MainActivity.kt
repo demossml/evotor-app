@@ -7,7 +7,11 @@ import android.content.IntentFilter
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
+import android.view.inputmethod.EditorInfo
+import android.view.View
 import android.util.TypedValue
 import android.widget.Button
 import android.widget.EditText
@@ -15,6 +19,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardSession
@@ -32,13 +37,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var root: LinearLayout
     private var products: List<CatalogProduct> = emptyList()
     private var screen: Screen = Screen.CARD
-    private enum class Screen { CARD, CATALOG, CART }
+    private var resolving = false
+    private var awaitingPaymentReturn = false
+    private var input: EditText? = null
+    private var errorMessage: String? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var qrRunnable: Runnable? = null
+    private enum class Screen { CARD, ORDER }
 
     private val scanReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val note = intent.getStringExtra(ScannerReceiver.EXTRA_NOTE).orEmpty()
-            Toast.makeText(this@MainActivity, if (note.isEmpty()) "Карта принята" else note, Toast.LENGTH_SHORT).show()
-            safeRender()
+            val code = intent.getStringExtra(ScannerReceiver.EXTRA_CODE).orEmpty().trim()
+            if (code.isNotEmpty()) {
+                if (screen == Screen.CARD || CardSession.get(this@MainActivity) == null) {
+                    screen = Screen.CARD
+                    safeRender()
+                    input?.setText(code)
+                    resolve(code)
+                } else {
+                    Toast.makeText(this@MainActivity, "Сначала сбросьте текущего клиента", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -48,13 +67,10 @@ class MainActivity : AppCompatActivity() {
             setContentView(R.layout.activity_main)
             val frame = findViewById<android.widget.FrameLayout>(R.id.root)
             val scroll = ScrollView(this)
-            root = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(12), dp(16), dp(24))
-            }
+            root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(12), dp(16), dp(24)) }
             scroll.addView(root)
             frame.addView(scroll)
-            // Inventory NOT loaded here (crash fix + docs: load on demand)
+            reloadProducts()
             safeRender()
         } catch (e: Throwable) {
             Toast.makeText(this, "Старт: ${e.message}", Toast.LENGTH_LONG).show()
@@ -62,158 +78,159 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun safeRender() {
-        try { render() } catch (e: Throwable) {
-            Toast.makeText(this, "UI: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun reloadProducts() {
-        products = try { InventoryRepository.load(this) } catch (e: Throwable) {
-            Toast.makeText(this, "Номенклатура: ${e.message}", Toast.LENGTH_LONG).show()
-            emptyList()
-        }
-    }
+    private fun safeRender() { try { render() } catch (e: Throwable) { Toast.makeText(this, "UI: ${e.message}", Toast.LENGTH_LONG).show() } }
+    private fun reloadProducts() { products = try { InventoryRepository.load(this) } catch (_: Throwable) { emptyList() } }
 
     private fun render() {
         root.removeAllViews()
-        when (screen) {
-            Screen.CARD -> renderCard()
-            Screen.CATALOG -> renderCatalog()
-            Screen.CART -> renderCart()
-        }
+        when (screen) { Screen.CARD -> renderCard(); Screen.ORDER -> renderOrder() }
     }
 
     private fun renderCard() {
         title("6.7 Coffee")
-        hint("Отсканируйте QR гостя или введите номер карты. Бонусы проверяет и резервирует сервер.")
-        val info = CardSession.get(this)
-        body(
-            when {
-                info == null || info.code.isEmpty() -> "Карта не выбрана"
-                info.freeStatus == "OFFLINE" -> "Нет связи с сервером: стакан засчитается после чека, бонусы сейчас недоступны."
-                else -> buildString {
-                    append("Карта ${info.cardCode.padStart(4, '0')}\n")
-                    append("${info.paidCups} из ${info.cupsForFree} стаканов\n")
-                    append(when (info.freeStatus) {
-                        "RESERVED" -> "Бесплатный стакан: ДА (зарезервирован)\n"
-                        "ALREADY_RESERVED" -> "Бесплатный стакан уже зарезервирован на другой кассе\n"
-                        else -> if (info.code.matches(Regex("\\d{1,18}"))) "По номеру карты бонусы не списываются — только начисление\n" else "Бесплатный стакан: нет\n"
-                    })
-                    if (info.cashbackKopecks > 0) append("Кэшбэк: ${info.cashbackKopecks / 100} ₽\n")
+        body("Карта клиента")
+        val field = EditText(this).apply {
+            hint = "Введите номер или QR клиента"
+            inputType = InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            textSize = 20f
+            imeOptions = EditorInfo.IME_ACTION_GO
+            setSelectAllOnFocus(true)
+            isEnabled = !resolving
+        }
+        input = field
+        root.addView(field, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
+        hint("Введите номер карты или наведите сканер на QR клиента")
+        if (resolving) body("Проверяем карту…")
+        errorMessage?.let { body(it) }
+        field.setOnEditorActionListener { _, action, _ ->
+            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { resolve(field.text.toString()); true } else false
+        }
+        field.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val value = s?.toString()?.trim().orEmpty()
+                if (value.contains('.') && value.length > 20 && value.length < 4000) {
+                    qrRunnable?.let { handler.removeCallbacks(it) }
+                    val r = Runnable { if (!resolving && screen == Screen.CARD) resolve(value) }
+                    qrRunnable = r; handler.postDelayed(r, 250)
                 }
-            },
-        )
-        val input = EditText(this).apply {
-            hint = "Номер карты"; inputType = InputType.TYPE_CLASS_NUMBER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-        }
-        root.addView(input)
-        btn("Найти по номеру") {
-            val c = input.text.toString().trim()
-            if (!c.matches(Regex("\\d{1,18}"))) { input.error = "Только цифры"; return@btn }
-            lookup(c)
-        }
-        btn("Сбросить карту") { CardSession.clear(this); safeRender() }
-        primary("К меню товаров") {
-            screen = Screen.CATALOG; reloadProducts(); safeRender()
-        }
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+        primary("OK") { resolve(field.text.toString()) }
+        btn("Продолжить без карты") { CardSession.clear(this); errorMessage = null; screen = Screen.ORDER; safeRender() }
+        field.requestFocus()
+        field.post { if (!isFinishing) { field.requestFocus(); (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).showSoftInput(field, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT) } }
     }
 
-    private fun lookup(code: String) {
-        Toast.makeText(this, "Проверяем карту…", Toast.LENGTH_SHORT).show()
+    private fun resolve(raw: String) {
+        val code = raw.trim().removePrefix("6.7:").removePrefix("67coffee:").trim()
+        if (code.isEmpty()) { input?.error = "Введите номер карты или отсканируйте QR"; return }
+        if (resolving) return
+        resolving = true; errorMessage = null; safeRender()
         thread(name = "loyalty-lookup") {
             val info = LoyaltyApi.resolve(code)
             runOnUiThread {
-                if (info.code.isNotEmpty()) CardSession.set(this, info) else CardSession.clear(this)
-                if (!info.note.isNullOrEmpty()) Toast.makeText(this, info.note, Toast.LENGTH_LONG).show()
+                resolving = false
+                if (info.code.isNotEmpty()) {
+                    CardSession.set(this, info); screen = Screen.ORDER; errorMessage = null
+                    reloadProducts()
+                } else {
+                    CardSession.clear(this)
+                    errorMessage = if (info.freeStatus == "ERROR") "Карта не найдена" else "Лояльность недоступна. Можно продолжить без карты."
+                }
                 safeRender()
             }
         }
     }
 
-    private fun renderCatalog() {
-        title("Меню")
-        hint(if (products.isEmpty()) "Пусто — sync товаров в Эвотор и обновите номенклатуру" else "Номенклатура терминала")
-        cardBar()
-        products.forEach { p ->
-            val box = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                setBackgroundColor(0xFFFFFFFF.toInt())
-            }
-            box.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
-            box.addView(TextView(this).apply { text = "${p.name} · ${p.priceRub} ₽"; setTypeface(null, Typeface.BOLD) })
-            if (!p.recipe.isNullOrBlank()) box.addView(TextView(this).apply { text = p.recipe; setTextColor(0xFF64748B.toInt()) })
-            box.addView(Button(this).apply {
-                text = "В чек"
-                setOnClickListener {
-                    Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe))
-                    Toast.makeText(this@MainActivity, "+ ${p.name}", Toast.LENGTH_SHORT).show()
-                }
+    private fun renderOrder() {
+        title("6.7 Coffee")
+        val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+        if (card != null) {
+            root.addView(TextView(this).apply {
+                text = "Карта ${card.cardCode.ifBlank { "—" }} · ${card.paidCups}/${card.cupsForFree} · ${card.cashbackKopecks / 100} ₽" + if (card.freeAvailable > 0) " · Подарок доступен" else ""
+                textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF002FA7.toInt()); setPadding(0, 0, 0, dp(8))
             })
+            btn("Сбросить клиента") { CardSession.clear(this); safeRender() }
+        } else hint("Продажа без карты")
+        title("Каталог")
+        if (products.isEmpty()) hint("В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру и обновите меню.")
+        products.forEach { p ->
+            val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(8), dp(10), dp(8)) }
+            box.addView(TextView(this).apply { text = "${p.name} · ${p.priceRub.toPlainString()} ₽"; textSize = 17f; setTypeface(null, Typeface.BOLD) })
+            if (!p.recipe.isNullOrBlank()) box.addView(TextView(this).apply { text = p.recipe; textSize = 12f })
+            box.addView(Button(this).apply { text = "Добавить"; minHeight = dp(48); setOnClickListener {
+                Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible)); safeRender()
+            } })
             root.addView(box)
         }
-        primary("Корзина (${Cart.all().size})") { screen = Screen.CART; safeRender() }
-        btn("Карта гостя") { screen = Screen.CARD; safeRender() }
-        btn("Обновить меню") { reloadProducts(); safeRender() }
+        divider()
+        title("Корзина · ${Cart.all().sumOf { it.quantity.toInt() }} шт.")
+        Cart.all().forEach { line ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
+            row.addView(TextView(this).apply { text = "${line.name} × ${line.quantity.stripTrailingZeros().toPlainString()}\n${line.lineTotal().toPlainString()} ₽"; textSize = 15f }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(Button(this).apply { text = "−"; setOnClickListener { Cart.setQty(line.productUuid, line.quantity.subtract(BigDecimal.ONE)); safeRender() } })
+            row.addView(Button(this).apply { text = "+"; setOnClickListener { Cart.add(line.copy(quantity = BigDecimal.ONE)); safeRender() } })
+            row.addView(Button(this).apply { text = "×"; setOnClickListener { Cart.remove(line.productUuid); safeRender() } })
+            root.addView(row)
+        }
+        body("Итого: ${Cart.gross().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()} ₽")
+        primary("К оплате") { checkout(card) }
+        btn("Обновить каталог") { reloadProducts(); safeRender() }
+        btn("Очистить корзину") { Cart.clear(); safeRender() }
+        btn("Назад к карте") { screen = Screen.CARD; safeRender() }
     }
 
-    private fun renderCart() {
-        title("Корзина"); cardBar()
-        if (Cart.isEmpty()) hint("Пусто")
-        else {
-            Cart.all().forEach { line ->
-                root.addView(TextView(this).apply { text = "${line.name} × ${line.quantity} = ${line.lineTotal()} ₽"; setPadding(0, dp(6), 0, dp(6)) })
-            }
-            body("Итого: ${Cart.gross()} ₽")
-        }
-        primary("Пробить чек") {
-            SellLauncher.openSellReceipt(this) { ok, msg ->
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                if (ok) { screen = Screen.CATALOG; safeRender() }
-            }
-        }
-        btn("К меню") { screen = Screen.CATALOG; safeRender() }
-        btn("Очистить") { Cart.clear(); safeRender() }
+    private fun checkout(card: ru.sixthcup.evotor.data.CardInfo?) {
+        if (Cart.isEmpty()) { Toast.makeText(this, "Корзина пуста", Toast.LENGTH_SHORT).show(); return }
+        val eligible = Cart.all().any { it.freeEligible }
+        if (card != null && card.freeAvailable > 0 && eligible) {
+            AlertDialog.Builder(this).setTitle("Применить бесплатный стакан?")
+                .setMessage("Бариста подтверждает использование подарка.")
+                .setPositiveButton("Да") { _, _ -> askCashback(card, true) }
+                .setNegativeButton("Нет") { _, _ -> askCashback(card, false) }.show()
+        } else askCashback(card, false)
     }
 
-    private fun cardBar() {
-        root.addView(TextView(this).apply {
-            text = CardSession.get(this@MainActivity)?.takeIf { it.code.isNotEmpty() }?.let { "Гость: карта ${it.cardCode.padStart(4, '0')}" } ?: "Гость: не выбран"
-            setTextColor(0xFF002FA7.toInt()); setPadding(0, 0, 0, dp(8))
-        })
+    private fun askCashback(card: ru.sixthcup.evotor.data.CardInfo?, free: Boolean) {
+        if (card != null && card.cashbackKopecks > 0 && card.reservationId != null) {
+            AlertDialog.Builder(this).setTitle("Кэшбэк ${card.cashbackKopecks / 100} ₽")
+                .setMessage("Выберите, как использовать кэшбэк")
+                .setPositiveButton("Списать") { _, _ -> pay(free, true, card.cashbackKopecks) }
+                .setNegativeButton("Копить") { _, _ -> pay(free, false, 0L) }.show()
+        } else pay(free, false, 0L)
     }
-    private fun title(t: String) = root.addView(TextView(this).apply {
-        text = t; setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f); setTypeface(null, Typeface.BOLD)
-        setTextColor(0xFF002FA7.toInt()); setPadding(0, 0, 0, dp(8))
-    })
-    private fun hint(t: String) = root.addView(TextView(this).apply {
-        text = t; setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f); setTextColor(0xFF64748B.toInt()); setPadding(0, 0, 0, dp(12))
-    })
-    private fun body(t: String) = root.addView(TextView(this).apply {
-        text = t; setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f); setPadding(0, 0, 0, dp(12))
-    })
-    private fun btn(label: String, onClick: () -> Unit) = root.addView(Button(this).apply {
-        text = label; setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
-    })
-    private fun primary(label: String, onClick: () -> Unit) = root.addView(Button(this).apply {
-        text = label; setBackgroundColor(0xFF002FA7.toInt()); setTextColor(0xFFFFFFFF.toInt())
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
-    })
+
+    private fun pay(free: Boolean, spend: Boolean, amount: Long) {
+        SellLauncher.openSellReceipt(this, free, spend, amount) { ok, msg ->
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+            if (ok) awaitingPaymentReturn = true
+        }
+    }
+
+    private fun title(t: String) = root.addView(TextView(this).apply { text = t; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF002FA7.toInt()); setPadding(0, 0, 0, dp(8)) })
+    private fun hint(t: String) = root.addView(TextView(this).apply { text = t; textSize = 13f; setTextColor(0xFF64748B.toInt()); setPadding(0, 0, 0, dp(12)) })
+    private fun body(t: String) = root.addView(TextView(this).apply { text = t; textSize = 15f; setPadding(0, 0, 0, dp(12)) })
+    private fun btn(label: String, onClick: () -> Unit) = root.addView(Button(this).apply { text = label; minHeight = dp(48); setOnClickListener { onClick() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+    private fun primary(label: String, onClick: () -> Unit) = root.addView(Button(this).apply { text = label; minHeight = dp(50); setBackgroundColor(0xFF002FA7.toInt()); setTextColor(0xFFFFFFFF.toInt()); setOnClickListener { onClick() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) } })
+    private fun divider() = root.addView(View(this).apply { setBackgroundColor(0xFFE2E8F0.toInt()) }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply { topMargin = dp(8); bottomMargin = dp(8) })
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
     override fun onResume() {
         super.onResume()
-        try {
-            val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN)
-            if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED)
-            else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f)
-        } catch (_: Throwable) {}
+        try { val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN); if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED) else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f) } catch (_: Throwable) {}
+        if (awaitingPaymentReturn) {
+            awaitingPaymentReturn = false
+            AlertDialog.Builder(this).setTitle("Оплата завершена?")
+                .setMessage("Подтвердите результат фискализации на терминале.")
+                .setPositiveButton("Да, чек успешен") { _, _ ->
+                    CardSession.clear(this); Cart.clear(); screen = Screen.CARD; errorMessage = null; safeRender()
+                }
+                .setNegativeButton("Нет, оставить заказ") { _, _ -> screen = Screen.ORDER; safeRender() }
+                .setCancelable(false).show()
+        }
     }
-    override fun onPause() {
-        try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}
-        super.onPause()
-    }
+    override fun onPause() { try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}; super.onPause() }
 }

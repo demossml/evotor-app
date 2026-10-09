@@ -9,8 +9,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 62
-        versionName = "4.0.0-reservations"
+        versionCode = 64
+        versionName = "4.1.1-barista-v2"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
         // Public HTTPS URL of the backend as allowed in the Evotor cabinet (proxy mask). No secrets here.
         buildConfigField("String", "API_BASE_URL", "\"${project.findProperty("API_BASE_URL") ?: "https://app.67coffee.ru"}\"")

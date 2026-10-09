@@ -31,7 +31,7 @@ object LoyaltyApi {
                 CardInfo(
                     code = code, cardCode = o.optString("cardCode"), paidCups = o.optInt("paidCups"),
                     cupsForFree = o.optInt("cupsForFree", 5), freeAvailable = o.optInt("freeAvailable"),
-                    cashbackKopecks = o.optLong("cashbackReserved"),
+                    cashbackKopecks = o.optLong("cashback"),
                     reservationId = if (o.isNull("reservationId")) null else o.optString("reservationId").ifBlank { null },
                     reservationExpiresAt = o.optLong("reservationExpiresAt"),
                     freeStatus = o.optString("freeStatus", "NONE"),

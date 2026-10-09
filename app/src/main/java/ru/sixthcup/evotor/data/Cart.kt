@@ -8,6 +8,7 @@ data class CartLine(
     val priceRub: BigDecimal,
     val quantity: BigDecimal = BigDecimal.ONE,
     val recipe: String? = null,
+    val freeEligible: Boolean = false,
 ) {
     fun lineTotal(): BigDecimal = priceRub.multiply(quantity)
 }
