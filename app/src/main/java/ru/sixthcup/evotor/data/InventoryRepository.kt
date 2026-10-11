@@ -5,51 +5,70 @@ import android.database.Cursor
 import ru.evotor.framework.inventory.InventoryApi
 import ru.evotor.framework.inventory.ProductItem
 import ru.evotor.framework.inventory.ProductTable
+import ru.sixthcup.evotor.BuildConfig
 import java.math.BigDecimal
 
 data class CatalogProduct(
     val uuid: String,
     val name: String,
+    /** Цена в рублях (то, что видит бариста и что уходит в Position). */
     val priceRub: BigDecimal,
     val allowToSell: Boolean,
     val recipe: String?,
     val description: String?,
     val article: String?,
     val freeEligible: Boolean = false,
+    val parentUuid: String? = null,
+    val groupName: String? = null,
 )
 
-/** Docs: InventoryApi / commodity DB. Never call from Activity.onCreate. */
+/**
+ * Каталог терминала (ProductTable / InventoryApi, колонки по integration-library v0.6.27).
+ * Блокирующий вызов: НЕ вызывать с главного потока (MainActivity грузит каталог в фоне).
+ * Один запрос ко всей таблице, без запросов на каждый товар (DESCRIPTION читается из той же строки).
+ */
 object InventoryRepository {
     fun load(context: Context): List<CatalogProduct> {
-        val out = mutableListOf<CatalogProduct>()
+        val raw = mutableListOf<CatalogProduct>()
+        val groups = HashMap<String, String>()
+        val units = Prices.Units.parse(BuildConfig.PRICE_UNITS)
         context.contentResolver.query(ProductTable.URI, null, null, null, null)?.use { c ->
-            val uuidCol = col(c, "UUID", "uuid")
-            val nameCol = col(c, "NAME", "name")
-            val priceCol = col(c, "PRICE_OUT", "priceOut", "PRICE", "price")
-            val typeCol = col(c, "TYPE", "type")
+            val uuidCol = col(c, ProductTable.ROW_UUID, "uuid")
+            val nameCol = col(c, ProductTable.ROW_NAME, "name")
+            val priceCol = col(c, ProductTable.ROW_PRICE_OUT, "priceOut", "PRICE", "price")
+            val typeCol = col(c, ProductTable.ROW_TYPE, "type")
+            val isGroupCol = col(c, ProductTable.ROW_IS_GROUP)
             val allowCol = col(c, "ALLOW_TO_SELL", "allowToSell")
+            val descCol = col(c, ProductTable.ROW_DESCRIPTION, "description")
+            val parentCol = col(c, ProductTable.ROW_PARENT_UUID, "parentUuid")
             while (c.moveToNext()) {
                 val uuid = uuidCol?.let { c.getString(it) }?.trim().orEmpty()
                 val name = nameCol?.let { c.getString(it) }?.trim().orEmpty()
                 if (uuid.isEmpty() || name.isEmpty()) continue
-                val type = typeCol?.let { c.getString(it) }.orEmpty()
-                if (type.contains("GROUP", ignoreCase = true)) continue
+                // Группа Эвотор определяется колонкой IS_GROUP (TYPE у групп не «GROUP»).
+                val isGroup = (isGroupCol?.let { try { c.getInt(it) > 0 } catch (_: Throwable) { false } } ?: false) ||
+                    (typeCol?.let { c.getString(it) }.orEmpty().contains("GROUP", ignoreCase = true))
+                if (isGroup) { groups[uuid] = name; continue }
                 val price = priceCol?.let { idx ->
-                    try { BigDecimal.valueOf(c.getDouble(idx)) } catch (_: Throwable) { BigDecimal.ZERO }
+                    try { Prices.priceFromEvotorRaw(c.getDouble(idx), units) } catch (_: Throwable) { BigDecimal.ZERO }
                 } ?: BigDecimal.ZERO
                 val allow = allowCol?.let { c.getInt(it) != 0 } ?: true
                 if (!allow) continue
-                var recipe: String? = null
-                try {
-                    val item = InventoryApi.getProductByUuid(context, uuid) as? ProductItem.Product
-                    recipe = item?.description?.takeIf { it.isNotBlank() }
-                } catch (_: Throwable) {
-                }
-                out.add(CatalogProduct(uuid, name, price, allow, recipe, recipe, null, freeEligible = true))
+                val desc = descCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
+                val parent = parentCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
+                raw.add(CatalogProduct(uuid, name, price, allow, desc, desc, null, parentUuid = parent))
             }
         }
-        return out.sortedBy { it.name.lowercase() }
+        return raw.map { p ->
+            val g = p.parentUuid?.let { groups[it] }
+            p.copy(groupName = g, freeEligible = FreeCupRules.isEligible(p.name, g, p.description))
+        }.sortedBy { it.name.lowercase() }
     }
+
+    /** Рецепт/описание по требованию (тап на «i»), если в строке каталога его не было. */
+    fun recipeFor(context: Context, uuid: String): String? = try {
+        (InventoryApi.getProductByUuid(context, uuid) as? ProductItem.Product)?.description?.takeIf { it.isNotBlank() }
+    } catch (_: Throwable) { null }
 
     private fun col(c: Cursor, vararg names: String): Int? {
         for (n in names) {

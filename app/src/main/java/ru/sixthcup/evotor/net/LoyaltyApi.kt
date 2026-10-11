@@ -37,13 +37,16 @@ object LoyaltyApi {
                     freeStatus = o.optString("freeStatus", "NONE"),
                 )
             } else {
-                val err = o.optString("error")
                 // Unknown/invalid card: do not attach it to the receipt at all.
-                if (status == 404 || status == 400) offline(code, isToken, "Карта не найдена или недействительна ($err)", drop = true)
-                else offline(code, isToken, "Сервер ответил $status", drop = false)
+                when {
+                    status == 404 || status == 400 -> offline(code, isToken, "Карта не найдена или недействительна. Проверьте номер или QR.", drop = true)
+                    status == 401 || status == 403 -> offline(code, isToken, "Нет доступа к серверу лояльности ($status). Сообщите администратору.", drop = false)
+                    status >= 500 -> offline(code, isToken, "Сервер лояльности временно недоступен ($status).", drop = false)
+                    else -> offline(code, isToken, "Неожиданный ответ сервера ($status).", drop = false)
+                }
             }
         } catch (e: Throwable) {
-            offline(code, isToken, "Нет связи с сервером", drop = false)
+            offline(code, isToken, if (e is java.net.SocketTimeoutException) "Сервер не ответил вовремя." else "Нет связи с сервером.", drop = false)
         }
     }
 

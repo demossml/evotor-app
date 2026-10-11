@@ -6,6 +6,10 @@ Cold start has one card/QR field, OK for manual short numeric codes, and a secon
 
 The order screen uses the Evotor terminal inventory (`ProductTable` / `InventoryApi`) as the only catalog source. There is no local seed catalog. Prices are displayed from the terminal inventory in rubles and product UUIDs are passed to `OpenSellReceiptCommand`. If the terminal inventory is empty, no products can be sold from this UI.
 
+## Экраны в 4.2.0
+
+Экран заказа: сверху чип карты (баланс, подарок, OFFLINE/«Без карты») и меню «Ещё»; в центре поиск и плитки каталога; снизу липкая панель «Позиций / Корзина / К оплате · сумма». Корзина — шторка. «К оплате» при наличии бонусов открывает одно окно выбора (подарок, кэшбэк, итог, срок резерва). После открытия чека — экран ожидания подтверждения оплаты. Подробно: `CHANGELOG-CASHIER-UX.md`.
+
 ## Resolve contract
 
 `POST /api/devices/loyalty/resolve`, JSON `{ "code": "<signed card token or numeric card code>" }`. The app uses the existing configured HTTPS Evotor proxy path; it does not embed the proxy token or use the legacy device-enroll flow. Backend response is authoritative. Signed QR tokens are passed intact; `sc1.*` account-recovery codes are not card tokens and should not be used at the till. Numeric card codes resolve identity for accrual only according to backend policy.
@@ -14,11 +18,13 @@ The order screen uses the Evotor terminal inventory (`ProductTable` / `Inventory
 
 The receipt extras contract remains `extras.sc`, with `v:2`, `c` (signed token or numeric code), optional `op` (reservation ID), `free` (applied free cup claim), `cb` (cashback claim in kopecks), and `ts`. This matches `SellHandler.getSc`. The checkout integration applies only cashier-selected benefits, bounded by the backend reservation and receipt total.
 
+**Фактическое поведение 4.3.0:** подарок предлагается только за позиции, которые `FreeCupRules` считает напитками (метка `#cup`/`#nocup` в описании → слова в названии → группа Эвотор); скидка — на самую дешёвую такую единицу. Подробно: `CHANGELOG-CASHIER-UX-v2.md`.
+
 The APK's terminal inventory API does not expose backend `freeEligible` / `countsAsCup` metadata in the current implementation. To avoid incorrectly gifting an arbitrary product, the free-cup prompt is shown only when eligibility metadata is explicitly available; no product-name guess is used. Wiring the per-store product metadata to Evotor UUID links is a follow-up requirement for fully automatic eligibility.
 
 ## Session reset
 
-Card state is one-sale state. A successful resolve creates the session; a card reset detaches loyalty but does not clear the cart. On the current Integration Library API, `openSellReceipt` confirms that the receipt was opened, not that fiscal payment has completed. When the cashier returns from the payment screen, the app asks for explicit confirmation: “Да, чек успешен” clears the cart and customer, while “Нет, оставить заказ” preserves them. This avoids treating “receipt opened” as a confirmed fiscal sale. Fully automatic reset still requires a documented fiscal-completion callback verified on a terminal.
+Card state is one-sale state. A successful resolve creates the session; a card reset detaches loyalty but does not clear the cart. On the current Integration Library API, `openSellReceipt` confirms that the receipt was opened, not that fiscal payment has completed. When the cashier returns from the payment screen, the app shows a waiting screen (state persisted): “Чек пробит — следующий гость” clears the cart and customer, while “Не оплачено — вернуться к заказу” preserves them. This avoids treating “receipt opened” as a confirmed fiscal sale. Fully automatic reset still requires a documented fiscal-completion callback verified on a terminal.
 
 ## Manual terminal checklist
 

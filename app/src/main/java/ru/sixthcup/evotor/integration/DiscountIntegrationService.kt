@@ -13,6 +13,7 @@ import ru.evotor.framework.receipt.ReceiptApi
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.DiscountCalc
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -33,18 +34,16 @@ class DiscountIntegrationService : IntegrationService() {
                         return
                     }
                     val now = System.currentTimeMillis() / 1000
-                    val reserved = info.reservationId != null && (info.reservationExpiresAt == 0L || info.reservationExpiresAt + GRACE_SEC >= now)
+                    val reserved = DiscountCalc.reserved(info, now)
                     val prices = receiptUnitPrices()
                     val gross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                     // Free cup: the cheapest single unit on the receipt (the backend still re-checks it).
                     val eligibleUnitPrices = Cart.all().filter { it.freeEligible }.map { it.priceRub }
-                    val freeDiscount = if (reserved && CheckoutChoice.free(applicationContext) && info.freeAvailable > 0 && eligibleUnitPrices.isNotEmpty())
-                        eligibleUnitPrices.minOrNull()!!.setScale(2, RoundingMode.DOWN) else BigDecimal.ZERO
                     val requestedCb = if (CheckoutChoice.cashback(applicationContext)) CheckoutChoice.cashbackKopecks(applicationContext) else 0L
-                    val cbRub = if (reserved && requestedCb > 0L)
-                        BigDecimal(requestedCb.coerceAtMost(info.cashbackKopecks)).divide(BigDecimal(100), 2, RoundingMode.DOWN).min(gross.subtract(freeDiscount).max(BigDecimal.ZERO))
-                    else BigDecimal.ZERO
-                    val total = freeDiscount.add(cbRub).min(gross).setScale(2, RoundingMode.DOWN)
+                    val calc = DiscountCalc.compute(gross, eligibleUnitPrices, reserved, CheckoutChoice.free(applicationContext), info.freeAvailable, requestedCb, info.cashbackKopecks)
+                    val freeDiscount = calc.free
+                    val cbRub = calc.cashback
+                    val total = calc.total
                     val sc = CardSession.sc(info, freeDiscount.signum() > 0, cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong())
                     callback.onResult(
                         ReceiptDiscountEventResult(total, SetExtra(JSONObject().put("sc", sc)), emptyList(), null),
@@ -73,8 +72,4 @@ class DiscountIntegrationService : IntegrationService() {
         }
     }
 
-    private companion object {
-        /** Slack for a slow barista: the backend honours a lapsed reservation only if nobody else took the bonus. */
-        const val GRACE_SEC = 300L
-    }
 }

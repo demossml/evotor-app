@@ -1,7 +1,6 @@
 package ru.sixthcup.evotor.sell
 
 import android.app.Activity
-import android.widget.Toast
 import org.json.JSONObject
 import ru.evotor.framework.core.IntegrationManagerCallback
 import ru.evotor.framework.core.IntegrationManagerFuture
@@ -14,6 +13,9 @@ import ru.evotor.framework.receipt.Position
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CheckoutChoice
+import ru.sixthcup.evotor.data.DiscountCalc
+import ru.evotor.framework.inventory.InventoryApi
+import ru.evotor.framework.inventory.ProductItem
 import java.util.UUID
 
 /**
@@ -30,21 +32,27 @@ object SellLauncher {
         try {
             val positionAdds = ArrayList<PositionAdd>()
             for (line in lines) {
-                val position = Position.Builder.newInstance(
-                    UUID.randomUUID().toString(),
-                    line.productUuid,
-                    line.name,
-                    Measure("шт", 0, 0),
-                    line.priceRub,
-                    line.quantity,
-                ).build()
-                positionAdds.add(PositionAdd(position))
+                // Берём настоящий товар Эвотор (НДС, тип, код, единица измерения — как в нативном меню);
+                // цену подставляем ту же рублёвую, что видел бариста. Запасной путь — позиция «вручную».
+                val item = try { InventoryApi.getProductByUuid(activity, line.productUuid) as? ProductItem.Product } catch (_: Throwable) { null }
+                val builder = if (item != null) {
+                    Position.Builder.newInstance(item, line.quantity).setPrice(line.priceRub)
+                } else {
+                    Position.Builder.newInstance(UUID.randomUUID().toString(), line.productUuid, line.name, Measure("шт", 0, 0), line.priceRub, line.quantity)
+                }
+                positionAdds.add(PositionAdd(builder.build()))
             }
             val card = CardSession.get(activity)
             CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks)
-            // Single contract consumed by SellHandler: extras.sc={v:2,c,op,free,cb,ts}.
+            // Единый контракт для SellHandler: extras.sc={v:2,c,op,free,cb,ts}.
+            // free/cb считаются тем же DiscountCalc, что и окно «К оплате» и DiscountIntegrationService.
             val setExtra = if (card != null && card.code.isNotEmpty()) {
-                SetExtra(JSONObject().put("sc", CardSession.sc(card, freeApplied, if (spendCashback) cashbackKopecks else 0L)))
+                val calc = DiscountCalc.compute(
+                    Cart.gross(), Cart.all().filter { it.freeEligible }.map { it.priceRub },
+                    DiscountCalc.reserved(card, System.currentTimeMillis() / 1000), freeApplied, card.freeAvailable,
+                    if (spendCashback) cashbackKopecks else 0L, card.cashbackKopecks,
+                )
+                SetExtra(JSONObject().put("sc", CardSession.sc(card, calc.free.signum() > 0, DiscountCalc.kopecks(calc.cashback))))
             } else null
 
             OpenSellReceiptCommand(positionAdds, setExtra).process(
@@ -59,7 +67,7 @@ object SellLauncher {
                                 onDone(false, e.message ?: "Не удалось открыть оплату")
                                 return@IntegrationManagerCallback
                             }
-                            onDone(true, "Чек открыт. После возврата подтвердите результат фискализации")
+                            onDone(true, "Чек открыт")
                         } else {
                             CheckoutChoice.clear(activity)
                             onDone(false, result?.error?.message ?: "Не удалось открыть чек")
@@ -72,7 +80,6 @@ object SellLauncher {
             )
         } catch (e: Throwable) {
             CheckoutChoice.clear(activity)
-            Toast.makeText(activity, "Sell: ${e.message}", Toast.LENGTH_LONG).show()
             onDone(false, e.message ?: "OpenSellReceiptCommand failed")
         }
     }

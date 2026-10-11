@@ -1,8 +1,8 @@
 # Установка 6.7 Coffee на Эвотор
 
 Package: `ru.sixthcup.evotor`  
-VersionCode: `53`  
-VersionName: `2.3.2-evotor-catalog`
+VersionCode: `70`  
+VersionName: `4.3.0-cashier-ux`
 
 ## 1. Сборка
 
