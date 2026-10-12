@@ -21,6 +21,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -445,20 +446,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Круглый «фото»-плейсхолдер с инициалами (URL-фото подключаются позже через Coil). */
-    private fun thumb(p: CatalogProduct, sizeDp: Int): TextView {
-        val initials = p.name.trim().split(Regex("\\s+")).take(2).mapNotNull { it.firstOrNull()?.uppercaseChar() }.joinToString("")
-            .ifEmpty { "•" }
-        return TextView(this).apply {
+    /** Круглый thumb: URL с catalog → ThumbLoader, иначе инициалы. */
+    private fun thumb(p: CatalogProduct, sizeDp: Int): View {
+        val size = dp(sizeDp)
+        val frame = FrameLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(size, size)
+            background = rounded(SOFT, sizeDp / 2, SOFT)
+            clipToOutline = true
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, (sizeDp / 2f) * resources.displayMetrics.density)
+                }
+            }
+        }
+        val initials = p.name.trim().split(Regex("\\s+")).mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "•" }
+        val placeholder = TextView(this).apply {
             text = initials
             textSize = if (sizeDp >= 56) 16f else 13f
             gravity = Gravity.CENTER
             setTypeface(null, Typeface.BOLD)
             setTextColor(BRAND)
-            background = rounded(SOFT, sizeDp / 2, SOFT)
-            minWidth = dp(sizeDp)
-            minHeight = dp(sizeDp)
         }
+        frame.addView(placeholder, FrameLayout.LayoutParams(size, size))
+        val url = p.imageUrl?.trim().orEmpty()
+        if (url.startsWith("http")) {
+            val img = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                contentDescription = p.name
+            }
+            frame.addView(img, FrameLayout.LayoutParams(size, size))
+            ThumbLoader.bind(img, url)
+        }
+        return frame
     }
 
     private fun focusCard(p: CatalogProduct): View {
