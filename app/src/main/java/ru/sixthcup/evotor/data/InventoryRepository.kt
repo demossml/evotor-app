@@ -20,7 +20,33 @@ data class CatalogProduct(
     val freeEligible: Boolean = false,
     val parentUuid: String? = null,
     val groupName: String? = null,
+    /** Товар в блоке «Фокус» (#focus в описании или комбо в названии). */
+    val featured: Boolean = false,
+    val isCombo: Boolean = false,
+    /** Данные с backend /api/devices/catalog (после merge). */
+    val imageUrl: String? = null,
+    val toppings: List<Topping> = emptyList(),
+    val upsell: List<UpsellItem> = emptyList(),
+    val countsAsCupServer: Boolean? = null,
 )
+
+data class Topping(
+    val id: Int,
+    val name: String,
+    val priceRub: java.math.BigDecimal,
+    val groupKey: String,
+    val maxCount: Int = 2,
+    val evotorUuid: String? = null,
+)
+
+data class UpsellItem(
+    val productId: Int,
+    val evotorUuid: String?,
+    val name: String,
+    val priceRub: java.math.BigDecimal,
+    val imageUrl: String? = null,
+)
+
 
 /**
  * Каталог терминала (ProductTable / InventoryApi, колонки по integration-library v0.6.27).
@@ -61,7 +87,15 @@ object InventoryRepository {
         }
         return raw.map { p ->
             val g = p.parentUuid?.let { groups[it] }
-            p.copy(groupName = g, freeEligible = FreeCupRules.isEligible(p.name, g, p.description))
+            val desc = p.description.orEmpty()
+            val featured = desc.contains("#focus", ignoreCase = true) || p.name.contains('+')
+            val isCombo = p.name.contains('+')
+            p.copy(
+                groupName = g,
+                freeEligible = FreeCupRules.isEligible(p.name, g, p.description),
+                featured = featured,
+                isCombo = isCombo,
+            )
         }.sortedBy { it.name.lowercase() }
     }
 

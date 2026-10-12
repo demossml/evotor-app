@@ -44,6 +44,9 @@ import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.net.LoyaltyApi
+import ru.sixthcup.evotor.net.CatalogApi
+import ru.sixthcup.evotor.data.Topping
+import ru.sixthcup.evotor.data.UpsellItem
 import ru.sixthcup.evotor.scanner.ScannerReceiver
 import ru.sixthcup.evotor.sell.SellLauncher
 import java.math.BigDecimal
@@ -61,6 +64,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bottomBar: LinearLayout
 
     private var products: List<CatalogProduct> = emptyList()
+    private var upsellDefault: List<UpsellItem> = emptyList()
     private var productsLoading = false
     private var productsError = false
     private var catalogGen = 0
@@ -125,7 +129,7 @@ class MainActivity : AppCompatActivity() {
             root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(16)) }
             scroll.addView(root)
             bottomBar = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; setBackgroundColor(WHITE); setPadding(dp(12), dp(8), dp(12), dp(8)); elevation = dp(8).toFloat()
+                orientation = LinearLayout.VERTICAL; setBackgroundColor(PAGE); setPadding(dp(12), dp(8), dp(12), dp(8)); elevation = dp(8).toFloat()
             }
             shell.addView(topBar, LinearLayout.LayoutParams(MATCH, WRAP))
             shell.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -154,11 +158,16 @@ class MainActivity : AppCompatActivity() {
         if (screen == Screen.ORDER) fillCatalog()
         val ctx = applicationContext
         thread(name = "catalog-load") {
-            val result = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
+            val inv = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
+            val enrich = try { CatalogApi.fetch(null) } catch (e: Throwable) { Log.e(TAG, "enrich", e); CatalogApi.Payload(emptyMap(), emptyList()) }
+            val merged = if (inv != null) CatalogApi.merge(inv, enrich) else null
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 productsLoading = false
-                if (result == null) productsError = true else products = result
+                if (merged == null) productsError = true else {
+                    products = merged
+                    upsellDefault = enrich.upsellDefault
+                }
                 if (screen == Screen.ORDER) fillCatalog()
             }
         }
@@ -336,11 +345,12 @@ class MainActivity : AppCompatActivity() {
         sumRow.addView(summary, LinearLayout.LayoutParams(0, WRAP, 1f))
         sumRow.addView(cartBtn, LinearLayout.LayoutParams(dp(120), dp(48)))
         bottomBar.addView(sumRow, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(6) })
-        val pay = button("К оплате", true, 56) { checkout(card) }
+        val pay = button("К оплате", true, 56) { showUpsellThenCheckout(card) }
         payButton = pay
         bottomBar.addView(pay, LinearLayout.LayoutParams(MATCH, dp(56)))
         updateBar()
     }
+
 
     private fun fillCatalog() {
         val host = catalogHost ?: return
@@ -354,71 +364,270 @@ class MainActivity : AppCompatActivity() {
                     host.addView(banner("Каталог не загрузился.", Kind.ERROR))
                     host.addView(button("Повторить", true, 48) { loadProducts() }, LinearLayout.LayoutParams(MATCH, dp(48)))
                 }
-                else -> host.addView(banner("В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру и нажмите «Ещё → Обновить каталог».", Kind.WARN))
+                else -> host.addView(banner("В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру.", Kind.WARN))
             }
             return
         }
         val groups = products.mapNotNull { it.groupName }.distinct().sorted()
         if (group != null && group !in groups) group = null
-        if (groups.size >= 2) {
-            val strip = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-            val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            fun chip(label: String, value: String?) {
-                val on = group == value
-                chips.addView(TextView(this).apply {
-                    this.text = label; textSize = 16f; gravity = Gravity.CENTER
-                    setTextColor(if (on) WHITE else BRAND); setTypeface(null, Typeface.BOLD)
-                    background = rounded(if (on) BRAND else WHITE, 24, BRAND)
-                    setPadding(dp(16), 0, dp(16), 0); isClickable = true
-                    setOnClickListener { group = value; fillCatalog() }
-                }, LinearLayout.LayoutParams(WRAP, dp(48)).apply { rightMargin = dp(8) })
-            }
-            chip("Все", null)
-            groups.forEach { chip(it, it) }
-            strip.addView(chips)
-            host.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+
+        // Чипы категорий — pill как на целевых скринах
+        val strip = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(0, 0, dp(4), 0)
         }
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun chip(label: String, value: String?) {
+            val on = group == value
+            chips.addView(TextView(this).apply {
+                this.text = label
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(if (on) WHITE else INK)
+                setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
+                background = rounded(if (on) BRAND else WHITE, 22, if (on) BRAND else LINE)
+                setPadding(dp(14), 0, dp(14), 0)
+                isClickable = true
+                minimumHeight = dp(40)
+                setOnClickListener { group = value; fillCatalog() }
+            }, LinearLayout.LayoutParams(WRAP, dp(40)).apply { rightMargin = dp(8) })
+        }
+        chip("Всё", null)
+        groups.forEach { chip(it, it) }
+        strip.addView(chips)
+        host.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
+
         val q = if (searchOn) query.trim() else ""
-        val list = products.filter { (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true)) }
-        if (list.isEmpty()) { host.addView(text("Ничего не найдено", 16f, HINT, false)); return }
-        list.chunked(2).forEach { pair ->
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            pair.forEachIndexed { i, p ->
-                row.addView(tile(p), LinearLayout.LayoutParams(0, WRAP, 1f).apply { if (i == 0) rightMargin = dp(4) else leftMargin = dp(4) })
+        val filtered = products.filter {
+            (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true))
+        }
+        if (filtered.isEmpty()) {
+            host.addView(text("Ничего не найдено", 15f, HINT, false))
+            return
+        }
+
+        // Блок «Фокус» — featured / combos / первые напитки
+        val focus = filtered.filter { it.featured || it.isCombo }.ifEmpty {
+            filtered.filter { it.freeEligible }.take(6)
+        }.take(8)
+        if (focus.isNotEmpty() && q.isEmpty()) {
+            host.addView(TextView(this).apply {
+                text = "Фокус"
+                textSize = 15f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(INK)
+                setPadding(0, 0, 0, dp(6))
+            })
+            val focusScroll = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                clipToPadding = false
             }
-            if (pair.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f).apply { leftMargin = dp(4) })
-            host.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+            val focusRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            focus.forEach { p ->
+                focusRow.addView(focusCard(p), LinearLayout.LayoutParams(dp(124), WRAP).apply { rightMargin = dp(10) })
+            }
+            focusScroll.addView(focusRow)
+            host.addView(focusScroll, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(14) })
+        }
+
+        // Секция списка
+        val sectionTitle = group ?: "Меню"
+        host.addView(TextView(this).apply {
+            text = sectionTitle
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+            setPadding(0, 0, 0, dp(8))
+        })
+        filtered.forEach { p ->
+            host.addView(listRow(p), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
         }
     }
 
-    private fun tile(p: CatalogProduct): View {
+    /** Круглый «фото»-плейсхолдер с инициалами (URL-фото подключаются позже через Coil). */
+    private fun thumb(p: CatalogProduct, sizeDp: Int): TextView {
+        val initials = p.name.trim().split(Regex("\\s+")).take(2).mapNotNull { it.firstOrNull()?.uppercaseChar() }.joinToString("")
+            .ifEmpty { "•" }
+        return TextView(this).apply {
+            text = initials
+            textSize = if (sizeDp >= 56) 16f else 13f
+            gravity = Gravity.CENTER
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(BRAND)
+            background = rounded(SOFT, sizeDp / 2, SOFT)
+            minWidth = dp(sizeDp)
+            minHeight = dp(sizeDp)
+        }
+    }
+
+    private fun focusCard(p: CatalogProduct): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            background = rounded(WHITE, 12, LINE)
-            minimumHeight = dp(88)
-            isClickable = true; isFocusable = true
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = rounded(WHITE, 16, LINE)
+            isClickable = true
+            isFocusable = true
+            elevation = dp(2).toFloat()
         }
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        head.addView(TextView(this).apply { text = p.name; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(INK); maxLines = 2; ellipsize = TextUtils.TruncateAt.END },
-            LinearLayout.LayoutParams(0, WRAP, 1f))
-        // «i» — рецепт по требованию (в списке длинный текст не показываем).
-        head.addView(TextView(this).apply {
-            text = "i"; textSize = 16f; gravity = Gravity.CENTER; setTextColor(BRAND); setTypeface(null, Typeface.BOLD)
-            background = rounded(WHITE, 24, BRAND); contentDescription = "Рецепт: ${p.name}"; isClickable = true
-            setOnClickListener { showRecipe(p) }
-        }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(4); topMargin = -dp(4); rightMargin = -dp(4) })
-        box.addView(head)
-        box.addView(text(rub(p.priceRub), 16f, BRAND, true))
-        val badge = TextView(this).apply { textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF1E6B4A.toInt()) }
+        val photoWrap = FrameLayout(this).apply {
+            setPadding(0, 0, 0, dp(8))
+            addView(thumb(p, 72), FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER_HORIZONTAL))
+        }
+        box.addView(photoWrap, LinearLayout.LayoutParams(MATCH, WRAP))
+        box.addView(TextView(this).apply {
+            text = p.name
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
+        box.addView(TextView(this).apply {
+            text = rub(p.priceRub)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(BRAND)
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(4), 0, 0)
+        })
+        val badge = TextView(this).apply {
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(0xFF1E6B4A.toInt())
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
         box.addView(badge)
         badges[p.uuid] = badge
         setBadge(p.uuid)
-        box.setOnClickListener {
+        box.setOnClickListener { onProductTap(p) }
+        box.setOnLongClickListener { showRecipe(p); true }
+        return box
+    }
+
+    private fun listRow(p: CatalogProduct): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = rounded(WHITE, 14, LINE)
+            minimumHeight = dp(64)
+            isClickable = true
+            isFocusable = true
+        }
+        box.addView(thumb(p, 48), LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(10) })
+        val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        mid.addView(TextView(this).apply {
+            text = p.name
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        val meta = buildString {
+            append(rub(p.priceRub))
+            if (p.isCombo) append(" · комбо")
+            if (p.freeEligible) append(" · стакан")
+        }
+        mid.addView(TextView(this).apply {
+            text = meta
+            textSize = 13f
+            setTextColor(HINT)
+        })
+        val badge = TextView(this).apply {
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(0xFF1E6B4A.toInt())
+        }
+        mid.addView(badge)
+        badges[p.uuid] = badge
+        setBadge(p.uuid)
+        box.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f))
+        box.addView(TextView(this).apply {
+            text = "i"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(BRAND)
+            setTypeface(null, Typeface.BOLD)
+            background = rounded(WHITE, 20, BRAND)
+            contentDescription = "Рецепт: ${p.name}"
+            isClickable = true
+            setOnClickListener { showRecipe(p) }
+        }, LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(4) })
+        box.setOnClickListener { onProductTap(p) }
+        return box
+    }
+
+    private fun onProductTap(p: CatalogProduct) {
+        if (p.toppings.isNotEmpty()) showToppingsSheet(p)
+        else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             setBadge(p.uuid); updateBar()
         }
-        return box
+    }
+
+    /** Топинги с backend scheme — перед добавлением напитка в корзину. */
+    private fun showToppingsSheet(p: CatalogProduct) {
+        val dialog = BottomSheetDialog(this)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        box.addView(text(p.name, 18f, BRAND, true))
+        box.addView(text("Добавки (по желанию)", 14f, HINT, false).apply { setPadding(0, dp(4), 0, dp(8)) })
+        val selected = linkedMapOf<Int, Int>()
+        val groups = p.toppings.groupBy { it.groupKey }
+        groups.forEach { (gk, list) ->
+            box.addView(text(gk, 13f, HINT, true).apply { setPadding(0, dp(6), 0, dp(4)) })
+            list.forEach { top ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(4))
+                }
+                val label = text("${top.name} · ${rub(top.priceRub)}", 15f, INK, false)
+                val qty = text("0", 15f, BRAND, true)
+                val minus = button("−", false, 40) {
+                    val n = (selected[top.id] ?: 0) - 1
+                    if (n <= 0) selected.remove(top.id) else selected[top.id] = n
+                    qty.text = "${selected[top.id] ?: 0}"
+                }
+                val plus = button("+", false, 40) {
+                    val n = (selected[top.id] ?: 0) + 1
+                    if (n <= top.maxCount) {
+                        selected[top.id] = n
+                        qty.text = "$n"
+                    }
+                }
+                row.addView(label, LinearLayout.LayoutParams(0, WRAP, 1f))
+                row.addView(minus, LinearLayout.LayoutParams(dp(40), dp(40)))
+                row.addView(qty, LinearLayout.LayoutParams(dp(28), WRAP))
+                row.addView(plus, LinearLayout.LayoutParams(dp(40), dp(40)))
+                box.addView(row)
+            }
+        }
+        box.addView(button("В заказ", true, 52) {
+            Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
+            p.toppings.forEach { top ->
+                val n = selected[top.id] ?: return@forEach
+                if (n <= 0) return@forEach
+                val uuid = top.evotorUuid?.takeIf { it.isNotBlank() } ?: "mod:${top.id}"
+                Cart.add(CartLine(uuid, "${top.name} (${p.name})", top.priceRub, BigDecimal(n), null, false))
+            }
+            setBadge(p.uuid); updateBar()
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(12) })
+        box.addView(button("Без добавок", false, 48) {
+            Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
+            setBadge(p.uuid); updateBar()
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(8) })
+        val scroll = NestedScrollView(this)
+        scroll.addView(box)
+        dialog.setContentView(scroll)
+        dialog.show()
     }
 
     private fun setBadge(uuid: String) {
@@ -549,6 +758,59 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── Экран 3: «К оплате» с лояльностью ──
+
+
+    private fun showUpsellThenCheckout(card: CardInfo?) {
+        val inCart = Cart.all().map { it.productUuid }.toSet()
+        val candidates = LinkedHashMap<String, UpsellItem>()
+        products.forEach { p ->
+            if (p.uuid in inCart) p.upsell.forEach { u ->
+                val id = u.evotorUuid ?: return@forEach
+                if (id !in inCart) candidates[id] = u
+            }
+        }
+        upsellDefault.forEach { u ->
+            val id = u.evotorUuid ?: return@forEach
+            if (id !in inCart) candidates.putIfAbsent(id, u)
+        }
+        val list = candidates.values.take(5)
+        if (list.isEmpty()) {
+            checkout(card)
+            return
+        }
+        val dialog = BottomSheetDialog(this)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        box.addView(text("Добавить к заказу?", 18f, BRAND, true))
+        box.addView(text("Рекомендации", 14f, HINT, false).apply { setPadding(0, dp(4), 0, dp(8)) })
+        list.forEach { u ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                background = rounded(WHITE, 12, LINE)
+            }
+            row.addView(text("${u.name}\n${rub(u.priceRub)}", 15f, INK, false), LinearLayout.LayoutParams(0, WRAP, 1f))
+            row.addView(button("+", true, 44) {
+                Cart.add(CartLine(u.evotorUuid!!, u.name, u.priceRub, BigDecimal.ONE, null, false))
+                updateBar()
+                Toast.makeText(this, "Добавлено: ${u.name}", Toast.LENGTH_SHORT).show()
+            }, LinearLayout.LayoutParams(dp(56), dp(44)))
+            box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        }
+        box.addView(button("К оплате", true, 52) {
+            dialog.dismiss()
+            checkout(card)
+        }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(8) })
+        box.addView(button("Пропустить", false, 48) {
+            dialog.dismiss()
+            checkout(card)
+        }, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(6) })
+        dialog.setContentView(box)
+        dialog.show()
+    }
 
     private fun checkout(card: CardInfo?) {
         if (Cart.isEmpty()) { notice = "Корзина пуста — добавьте позиции."; noticeKind = Kind.WARN; safeRender(); return }
@@ -729,9 +991,12 @@ class MainActivity : AppCompatActivity() {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         val BRAND = 0xFF002FA7.toInt()
+        val SOFT = 0xFFEEF4FF.toInt()
+        val PAGE = 0xFFF5F7FB.toInt()
         val INK = 0xFF1E293B.toInt()
-        val HINT = 0xFF475569.toInt()      // контраст на #F5F7FB ≈ 7:1 (раньше #64748B = 4.44:1)
+        val HINT = 0xFF475569.toInt()
         val LINE = 0xFFCBD5E1.toInt()
         val WHITE = 0xFFFFFFFF.toInt()
     }
 }
+
