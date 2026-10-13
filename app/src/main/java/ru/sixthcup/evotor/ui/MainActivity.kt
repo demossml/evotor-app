@@ -21,7 +21,6 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -32,7 +31,11 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.NestedScrollView
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import ru.sixthcup.evotor.R
@@ -63,6 +66,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var root: LinearLayout
     private lateinit var topBar: LinearLayout
     private lateinit var bottomBar: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var orderPane: LinearLayout
 
     private var products: List<CatalogProduct> = emptyList()
     private var upsellDefault: List<UpsellItem> = emptyList()
@@ -80,11 +85,17 @@ class MainActivity : AppCompatActivity() {
     private var lastCardCode: String? = null   // только в памяти процесса, на диск не пишется
     private var lastCardLabel: String? = null
 
-    private var catalogHost: LinearLayout? = null
     private var searchView: EditText? = null
+    private var chipsScroll: HorizontalScrollView? = null
+    private var chipsRow: LinearLayout? = null
+    private val chipViews = ArrayList<Pair<String?, TextView>>()
+    private var groupsCache: List<String> = emptyList()
+    private var recycler: RecyclerView? = null
+    private var adapter: CatalogAdapter? = null
+    private var searchRunnable: Runnable? = null
+    private var lastEnrich: CatalogApi.Payload? = null
     private var payButton: Button? = null
-    private var itemsView: TextView? = null
-    private val badges = HashMap<String, TextView>()
+    private var cartButton: Button? = null
     private var cartDialog: BottomSheetDialog? = null
     private var checkoutDialog: BottomSheetDialog? = null
 
@@ -126,16 +137,28 @@ class MainActivity : AppCompatActivity() {
             val frame = findViewById<FrameLayout>(R.id.root)
             val shell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             topBar = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(4)) }
-            val scroll = ScrollView(this)
+            scroll = ScrollView(this)
             root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(16)) }
             scroll.addView(root)
+            // Экран заказа: поиск + чипы закреплены, список (RecyclerView) занимает всё остальное.
+            orderPane = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), 0); visibility = View.GONE
+            }
             bottomBar = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; setBackgroundColor(PAGE); setPadding(dp(12), dp(8), dp(12), dp(8)); elevation = dp(8).toFloat()
+                orientation = LinearLayout.VERTICAL; setBackgroundColor(PAGE); setPadding(dp(12), dp(6), dp(12), dp(6)); elevation = dp(4).toFloat()
             }
             shell.addView(topBar, LinearLayout.LayoutParams(MATCH, WRAP))
             shell.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+            shell.addView(orderPane, LinearLayout.LayoutParams(MATCH, 0, 1f))
             shell.addView(bottomBar, LinearLayout.LayoutParams(MATCH, WRAP))
             frame.addView(shell, FrameLayout.LayoutParams(MATCH, MATCH))
+            // Системные панели/вырезы: контент не уезжает под них (раньше отступы не учитывались).
+            ViewCompat.setOnApplyWindowInsetsListener(frame) { _, insets ->
+                val b = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                shell.setPadding(b.left, b.top, b.right, b.bottom)
+                insets
+            }
+            ViewCompat.requestApplyInsets(frame)
 
             screen = when {
                 PendingPayment.active(this) -> Screen.PAYMENT
@@ -153,23 +176,36 @@ class MainActivity : AppCompatActivity() {
 
     // ───────────────────────── каталог (в фоне) ─────────────────────────
 
+    /**
+     * Двухфазная загрузка: (1) Inventory Эвотор (локально, быстро) → каталог показывается сразу;
+     * (2) backend /api/devices/catalog (сеть) → фото, топинги, upsell добавляются поверх без перерисовки всего.
+     * Сеть больше не блокирует первый показ каталога.
+     */
     private fun loadProducts() {
         val gen = ++catalogGen
-        productsLoading = true; productsError = false
-        if (screen == Screen.ORDER) fillCatalog()
+        productsLoading = products.isEmpty(); productsError = false
+        if (screen == Screen.ORDER) refreshChromeAndRows(false)
         val ctx = applicationContext
         thread(name = "catalog-load") {
             val inv = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
-            val enrich = try { CatalogApi.fetch(null) } catch (e: Throwable) { Log.e(TAG, "enrich", e); CatalogApi.Payload(emptyMap(), emptyList()) }
-            val merged = if (inv != null) CatalogApi.merge(inv, enrich) else null
+            val known = lastEnrich
+            val first = if (inv != null && known != null) CatalogApi.merge(inv, known) else inv
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 productsLoading = false
-                if (merged == null) productsError = true else {
-                    products = merged
-                    upsellDefault = enrich.upsellDefault
-                }
-                if (screen == Screen.ORDER) fillCatalog()
+                if (first == null) { if (products.isEmpty()) productsError = true } else products = first
+                if (screen == Screen.ORDER) refreshChromeAndRows(false)
+            }
+            if (inv == null) return@thread
+            val enrich = try { CatalogApi.fetch(null) } catch (e: Throwable) { Log.e(TAG, "enrich", e); CatalogApi.Payload(emptyMap(), emptyList()) }
+            if (enrich.byUuid.isEmpty()) return@thread
+            val merged = CatalogApi.merge(inv, enrich)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
+                lastEnrich = enrich
+                products = merged
+                upsellDefault = enrich.upsellDefault
+                if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
         }
     }
@@ -185,8 +221,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun render() {
         dismissSheets()
-        root.removeAllViews(); topBar.removeAllViews(); bottomBar.removeAllViews()
-        catalogHost = null; searchView = null; payButton = null; itemsView = null; badges.clear()
+        root.removeAllViews(); topBar.removeAllViews(); bottomBar.removeAllViews(); orderPane.removeAllViews()
+        searchRunnable?.let { handler.removeCallbacks(it) }
+        searchView = null; chipsScroll = null; chipsRow = null; chipViews.clear(); groupsCache = emptyList()
+        recycler = null; adapter = null; payButton = null; cartButton = null
+        scroll.visibility = View.VISIBLE; orderPane.visibility = View.GONE
         when (screen) { Screen.CARD -> renderCard(); Screen.ORDER -> renderOrder(); Screen.PAYMENT -> renderPayment() }
         topBar.visibility = if (topBar.childCount == 0) View.GONE else View.VISIBLE
         bottomBar.visibility = if (bottomBar.childCount == 0) View.GONE else View.VISIBLE
@@ -307,283 +346,160 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderOrder() {
         val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+        scroll.visibility = View.GONE; orderPane.visibility = View.VISIBLE
 
+        // Верхняя полоса: карта/лояльность + «Ещё» в одну строку 48 dp.
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        head.addView(cardChip(card, clickable = true), LinearLayout.LayoutParams(0, WRAP, 1f))
-        val more = button("Ещё", false, 56) { }
+        head.addView(cardChip(card, clickable = true), LinearLayout.LayoutParams(0, dp(48), 1f))
+        val more = button("Ещё", false, 44) { }
         more.setOnClickListener { showMore(more, card) }
-        head.addView(more, LinearLayout.LayoutParams(dp(80), dp(56)).apply { leftMargin = dp(8) })
+        more.textSize = 14f
+        head.addView(more, LinearLayout.LayoutParams(dp(64), dp(44)).apply { leftMargin = dp(8) })
         topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
-        notice?.let { topBar.addView(banner(it, noticeKind).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(8) }) }
+        notice?.let { topBar.addView(banner(it, noticeKind, 14f).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6) }) }
 
         val search = EditText(this).apply {
             hint = "Поиск по названию"
             isSingleLine = true
-            textSize = 16f
+            textSize = 15f
             setTextColor(INK); setHintTextColor(HINT)
             imeOptions = EditorInfo.IME_ACTION_DONE
             background = rounded(WHITE, 12, LINE)
             setPadding(dp(12), 0, dp(12), 0)
             setText(query)
         }
+        // Debounce 180 мс: пересчёт строк не на каждую букву.
         search.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { query = s?.toString().orEmpty(); fillCatalog() }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                query = s?.toString().orEmpty()
+                searchRunnable?.let { handler.removeCallbacks(it) }
+                val r = Runnable { refreshRows(true) }
+                searchRunnable = r
+                handler.postDelayed(r, 180)
+            }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
         searchView = search
-        root.addView(search, LinearLayout.LayoutParams(MATCH, dp(48)).apply { bottomMargin = dp(8) })
+        orderPane.addView(search, LinearLayout.LayoutParams(MATCH, dp(44)).apply { bottomMargin = dp(6) })
 
-        val host = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        catalogHost = host
-        root.addView(host, LinearLayout.LayoutParams(MATCH, WRAP))
-        fillCatalog()
+        // Чипы закреплены над списком и не пересоздаются при выборе (меняется только стиль).
+        val strip = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; clipToPadding = false; overScrollMode = View.OVER_SCROLL_NEVER }
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        strip.addView(chips)
+        chipsScroll = strip; chipsRow = chips
+        orderPane.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(6) })
 
-        val summary = text("", 16f, INK, true)
-        itemsView = summary
-        val cartBtn = button("Корзина", false, 48) { showCart() }
-        val sumRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        sumRow.addView(summary, LinearLayout.LayoutParams(0, WRAP, 1f))
-        sumRow.addView(cartBtn, LinearLayout.LayoutParams(dp(120), dp(48)))
-        bottomBar.addView(sumRow, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(6) })
-        val pay = button("К оплате", true, 56) { showUpsellThenCheckout(card) }
+        val ad = CatalogAdapter(CatalogCallbacks(onTap = { onProductTap(it) }, onInfo = { showRecipe(it) }, onRetry = { loadProducts() }))
+        adapter = ad
+        val rv = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = ad
+            itemAnimator = null              // без анимаций макета при bind/diff
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            setPadding(0, dp(2), 0, dp(8))
+            setHasFixedSize(true)
+            setItemViewCacheSize(8)
+        }
+        recycler = rv
+        orderPane.addView(rv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        refreshChromeAndRows(false)
+
+        // Нижняя полоса: одна строка 52 dp — «Корзина · N · сумма» и «К оплате».
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val cartBtn = button("Корзина пуста", false, 52) { showCart() }
+        cartBtn.textSize = 15f; cartBtn.maxLines = 1; cartBtn.ellipsize = TextUtils.TruncateAt.END
+        cartButton = cartBtn
+        val pay = button("К оплате", true, 52) { showUpsellThenCheckout(card) }
+        pay.textSize = 15f; pay.maxLines = 1
         payButton = pay
-        bottomBar.addView(pay, LinearLayout.LayoutParams(MATCH, dp(56)))
+        row.addView(cartBtn, LinearLayout.LayoutParams(0, dp(52), 1f))
+        row.addView(pay, LinearLayout.LayoutParams(dp(124), dp(52)).apply { leftMargin = dp(8) })
+        bottomBar.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
         updateBar()
     }
 
-
-    private fun fillCatalog() {
-        val host = catalogHost ?: return
-        host.removeAllViews(); badges.clear()
-        val searchOn = products.size > SEARCH_MIN_ITEMS
-        searchView?.visibility = if (searchOn) View.VISIBLE else View.GONE
-        if (products.isEmpty()) {
-            when {
-                productsLoading -> host.addView(banner("Загружаем каталог…", Kind.INFO))
-                productsError -> {
-                    host.addView(banner("Каталог не загрузился.", Kind.ERROR))
-                    host.addView(button("Повторить", true, 48) { loadProducts() }, LinearLayout.LayoutParams(MATCH, dp(48)))
-                }
-                else -> host.addView(banner("В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру.", Kind.WARN))
-            }
-            return
-        }
+    /** Поиск/чипы (если набор групп изменился) + строки списка. */
+    private fun refreshChromeAndRows(toTop: Boolean) {
+        searchView?.visibility = if (products.size > SEARCH_MIN_ITEMS) View.VISIBLE else View.GONE
         val groups = products.mapNotNull { it.groupName }.distinct().sorted()
-        if (group != null && group !in groups) group = null
-
-        // Чипы категорий — pill как на целевых скринах
-        val strip = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            clipToPadding = false
-            setPadding(0, 0, dp(4), 0)
+        if (groups != groupsCache || chipViews.isEmpty()) {
+            groupsCache = groups
+            rebuildChips()
         }
-        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun chip(label: String, value: String?) {
-            val on = group == value
-            chips.addView(TextView(this).apply {
-                this.text = label
+        refreshRows(toTop)
+    }
+
+    private fun rebuildChips() {
+        val row = chipsRow ?: return
+        row.removeAllViews(); chipViews.clear()
+        if (group != null && group !in groupsCache) group = null
+        fun add(label: String, value: String?) {
+            val tv = TextView(this).apply {
+                text = label
                 textSize = 14f
                 gravity = Gravity.CENTER
-                setTextColor(if (on) WHITE else INK)
-                setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
-                background = rounded(if (on) BRAND else WHITE, 22, if (on) BRAND else LINE)
+                maxLines = 1
                 setPadding(dp(14), 0, dp(14), 0)
                 isClickable = true
-                minimumHeight = dp(40)
-                setOnClickListener { group = value; fillCatalog() }
-            }, LinearLayout.LayoutParams(WRAP, dp(40)).apply { rightMargin = dp(8) })
-        }
-        chip("Всё", null)
-        groups.forEach { chip(it, it) }
-        strip.addView(chips)
-        host.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
-
-        val q = if (searchOn) query.trim() else ""
-        val filtered = products.filter {
-            (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true))
-        }
-        if (filtered.isEmpty()) {
-            host.addView(text("Ничего не найдено", 15f, HINT, false))
-            return
-        }
-
-        // Блок «Фокус» — featured / combos / первые напитки
-        val focus = filtered.filter { it.featured || it.isCombo }.ifEmpty {
-            filtered.filter { it.freeEligible }.take(6)
-        }.take(8)
-        if (focus.isNotEmpty() && q.isEmpty()) {
-            host.addView(TextView(this).apply {
-                text = "Фокус"
-                textSize = 15f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(INK)
-                setPadding(0, 0, 0, dp(6))
-            })
-            val focusScroll = HorizontalScrollView(this).apply {
-                isHorizontalScrollBarEnabled = false
-                clipToPadding = false
-            }
-            val focusRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            focus.forEach { p ->
-                focusRow.addView(focusCard(p), LinearLayout.LayoutParams(dp(124), WRAP).apply { rightMargin = dp(10) })
-            }
-            focusScroll.addView(focusRow)
-            host.addView(focusScroll, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(14) })
-        }
-
-        // Секция списка
-        val sectionTitle = group ?: "Меню"
-        host.addView(TextView(this).apply {
-            text = sectionTitle
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            setPadding(0, 0, 0, dp(8))
-        })
-        filtered.forEach { p ->
-            host.addView(listRow(p), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
-        }
-    }
-
-    /** Круглый thumb: URL с catalog → ThumbLoader, иначе инициалы. */
-    private fun thumb(p: CatalogProduct, sizeDp: Int): View {
-        val size = dp(sizeDp)
-        val frame = FrameLayout(this).apply {
-            layoutParams = ViewGroup.LayoutParams(size, size)
-            background = rounded(SOFT, sizeDp / 2, SOFT)
-            clipToOutline = true
-            outlineProvider = object : android.view.ViewOutlineProvider() {
-                override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, (sizeDp / 2f) * resources.displayMetrics.density)
+                setOnClickListener {
+                    if (group != value) { group = value; updateChipStyles(); refreshRows(true) }
                 }
             }
+            row.addView(tv, LinearLayout.LayoutParams(WRAP, dp(42)).apply { rightMargin = dp(8) })
+            chipViews.add(value to tv)
         }
-        val initials = p.name.trim().split(Regex("\\s+")).mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "•" }
-        val placeholder = TextView(this).apply {
-            text = initials
-            textSize = if (sizeDp >= 56) 16f else 13f
-            gravity = Gravity.CENTER
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
+        add("Всё", null)
+        groupsCache.forEach { add(it, it) }
+        updateChipStyles()
+        chipsScroll?.visibility = if (groupsCache.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun updateChipStyles() {
+        for ((value, tv) in chipViews) {
+            val on = group == value
+            tv.setTextColor(if (on) WHITE else INK)
+            tv.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
+            tv.background = rounded(if (on) BRAND else WHITE, 21, if (on) BRAND else LINE)
         }
-        frame.addView(placeholder, FrameLayout.LayoutParams(size, size))
-        val url = p.imageUrl?.trim().orEmpty()
-        if (url.startsWith("http")) {
-            val img = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                contentDescription = p.name
+    }
+
+    /** Пересчёт строк в памяти (каталог уже загружен) и diff в адаптер; дерево view не пересобирается. */
+    private fun refreshRows(toTop: Boolean) {
+        val ad = adapter ?: return
+        val rows = computeRows()
+        if (toTop) ad.submitList(rows) { recycler?.scrollToPosition(0) } else ad.submitList(rows)
+    }
+
+    private fun computeRows(): List<CatalogRow> {
+        if (products.isEmpty()) return when {
+            productsLoading -> List(6) { CatalogRow.Skeleton(it) }
+            productsError -> listOf(CatalogRow.State("err", "Каталог не загрузился.", true, "Повторить"))
+            else -> listOf(CatalogRow.State("empty", "В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру.", true, null))
+        }
+        val q = if (products.size > SEARCH_MIN_ITEMS) query.trim() else ""
+        val filtered = products.filter { (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true)) }
+        if (filtered.isEmpty()) {
+            val msg = if (q.isNotEmpty()) "Ничего не найдено по «$q»" else "В этой категории пока нет позиций"
+            return listOf(CatalogRow.State("nf", msg, false, null))
+        }
+        val rows = ArrayList<CatalogRow>(filtered.size + 3)
+        if (group == null && q.isEmpty()) {
+            val focus = filtered.filter { it.featured }.take(8)
+            if (focus.isNotEmpty()) {
+                rows.add(CatalogRow.Header("Фокус")); rows.add(CatalogRow.Focus(focus)); rows.add(CatalogRow.Header("Меню"))
             }
-            frame.addView(img, FrameLayout.LayoutParams(size, size))
-            ThumbLoader.bind(img, url)
         }
-        return frame
-    }
-
-    private fun focusCard(p: CatalogProduct): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            background = rounded(WHITE, 16, LINE)
-            isClickable = true
-            isFocusable = true
-            elevation = dp(2).toFloat()
-        }
-        val photoWrap = FrameLayout(this).apply {
-            setPadding(0, 0, 0, dp(8))
-            addView(thumb(p, 72), FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER_HORIZONTAL))
-        }
-        box.addView(photoWrap, LinearLayout.LayoutParams(MATCH, WRAP))
-        box.addView(TextView(this).apply {
-            text = p.name
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-            gravity = Gravity.CENTER_HORIZONTAL
-        })
-        box.addView(TextView(this).apply {
-            text = rub(p.priceRub)
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, dp(4), 0, 0)
-        })
-        val badge = TextView(this).apply {
-            textSize = 12f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(0xFF1E6B4A.toInt())
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-        box.addView(badge)
-        badges[p.uuid] = badge
-        setBadge(p.uuid)
-        box.setOnClickListener { onProductTap(p) }
-        box.setOnLongClickListener { showRecipe(p); true }
-        return box
-    }
-
-    private fun listRow(p: CatalogProduct): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            background = rounded(WHITE, 14, LINE)
-            minimumHeight = dp(64)
-            isClickable = true
-            isFocusable = true
-        }
-        box.addView(thumb(p, 48), LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(10) })
-        val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        mid.addView(TextView(this).apply {
-            text = p.name
-            textSize = 15f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-        })
-        val meta = buildString {
-            append(rub(p.priceRub))
-            if (p.isCombo) append(" · комбо")
-            if (p.freeEligible) append(" · стакан")
-        }
-        mid.addView(TextView(this).apply {
-            text = meta
-            textSize = 13f
-            setTextColor(HINT)
-        })
-        val badge = TextView(this).apply {
-            textSize = 12f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(0xFF1E6B4A.toInt())
-        }
-        mid.addView(badge)
-        badges[p.uuid] = badge
-        setBadge(p.uuid)
-        box.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f))
-        box.addView(TextView(this).apply {
-            text = "i"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(BRAND)
-            setTypeface(null, Typeface.BOLD)
-            background = rounded(WHITE, 20, BRAND)
-            contentDescription = "Рецепт: ${p.name}"
-            isClickable = true
-            setOnClickListener { showRecipe(p) }
-        }, LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(4) })
-        box.setOnClickListener { onProductTap(p) }
-        return box
+        filtered.forEach { rows.add(CatalogRow.Item(it)) }
+        return rows
     }
 
     private fun onProductTap(p: CatalogProduct) {
         if (p.toppings.isNotEmpty()) showToppingsSheet(p)
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
-            setBadge(p.uuid); updateBar()
+            onCartChanged()
         }
     }
 
@@ -635,12 +551,12 @@ class MainActivity : AppCompatActivity() {
                 val uuid = top.evotorUuid?.takeIf { it.isNotBlank() } ?: "mod:${top.id}"
                 Cart.add(CartLine(uuid, "${top.name} (${p.name})", top.priceRub, BigDecimal(n), null, false))
             }
-            setBadge(p.uuid); updateBar()
+            onCartChanged()
             dialog.dismiss()
         }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(12) })
         box.addView(button("Без добавок", false, 48) {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
-            setBadge(p.uuid); updateBar()
+            onCartChanged()
             dialog.dismiss()
         }, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(8) })
         val scroll = NestedScrollView(this)
@@ -649,46 +565,44 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun setBadge(uuid: String) {
-        val b = badges[uuid] ?: return
-        val n = Cart.qty(uuid)
-        b.text = if (n > 0) "В заказе: ×$n" else ""
-        b.visibility = if (n > 0) View.VISIBLE else View.GONE
-    }
-
-    private fun refreshBadges() { badges.keys.toList().forEach { setBadge(it) } }
+    /** Корзина изменилась: обновить плашки «×N» (payload, без перебинда) и нижнюю полосу. */
+    private fun onCartChanged() { adapter?.refreshQty(); updateBar() }
 
     private fun updateBar() {
         val empty = Cart.isEmpty()
-        itemsView?.text = if (empty) "Корзина пуста" else "Позиций: ${Cart.count()}"
+        cartButton?.text = if (empty) "Корзина пуста" else "Корзина · ${Cart.count()} · ${rub(Cart.gross())}"
         payButton?.apply {
-            text = if (empty) "Добавьте позицию" else "К оплате · ${rub(Cart.gross())}"
             isEnabled = !empty
             alpha = if (empty) 0.5f else 1f
         }
+        cartButton?.apply { isEnabled = !empty; alpha = if (empty) 0.6f else 1f }
     }
 
+    /** Компактная «таблетка» карты: строка 1 — карта/прогресс/кэшбэк, строка 2 — статус (подарок, нет связи). */
     private fun cardChip(card: CardInfo?, clickable: Boolean): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(12), dp(4), dp(12), dp(4))
             background = rounded(WHITE, 12, LINE)
-            minimumHeight = dp(56)
+            minimumHeight = dp(48)
             gravity = Gravity.CENTER_VERTICAL
         }
+        fun line(t: String, sp: Float, color: Int, bold: Boolean) = text(t, sp, color, bold).apply {
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        }
         if (card == null) {
-            box.addView(text("Без карты", 16f, INK, true))
-            if (clickable) box.addView(text("Нажмите, чтобы ввести карту", 14f, HINT, false))
+            box.addView(line("Без карты", 15f, INK, true))
+            if (clickable) box.addView(line("Нажмите, чтобы ввести карту", 12f, HINT, false))
         } else {
             val main = when {
                 card.freeStatus == "OFFLINE" -> "Карта по QR · баланс неизвестен"
                 else -> "Карта ${card.cardCode.ifBlank { "—" }} · ${card.paidCups}/${card.cupsForFree} · ${card.cashbackKopecks / 100} ₽"
             }
-            box.addView(text(main, 16f, BRAND, true))
+            box.addView(line(main, 14f, BRAND, true))
             when {
-                card.freeStatus == "OFFLINE" -> box.addView(text("Нет связи — бонусы недоступны", 14f, 0xFF6B4700.toInt(), true))
-                card.freeStatus == "ALREADY_RESERVED" -> box.addView(text("Бонус уже зарезервирован другим чеком", 14f, 0xFF6B4700.toInt(), true))
-                card.freeAvailable > 0 -> box.addView(text("Доступен подарок", 14f, 0xFF1E6B4A.toInt(), true))
+                card.freeStatus == "OFFLINE" -> box.addView(line("Нет связи — бонусы недоступны", 12f, 0xFF6B4700.toInt(), true))
+                card.freeStatus == "ALREADY_RESERVED" -> box.addView(line("Бонус уже зарезервирован другим чеком", 12f, 0xFF6B4700.toInt(), true))
+                card.freeAvailable > 0 -> box.addView(line("Доступен подарок", 12f, 0xFF1E6B4A.toInt(), true))
             }
         }
         if (clickable) { box.isClickable = true; box.setOnClickListener { notice = null; screen = Screen.CARD; safeRender() } }
@@ -719,7 +633,7 @@ class MainActivity : AppCompatActivity() {
                 1 -> loadProducts()
                 2 -> { notice = null; screen = Screen.CARD; safeRender() }
                 3 -> confirm("Сбросить клиента?", "Карта будет отвязана от заказа, корзина останется.", "Сбросить") { CardSession.clear(this); notice = null; safeRender() }
-                4 -> confirm("Очистить корзину?", "Все ${Cart.count()} поз. будут удалены.", "Очистить") { Cart.clear(); refreshBadges(); updateBar() }
+                4 -> confirm("Очистить корзину?", "Все ${Cart.count()} поз. будут удалены.", "Очистить") { Cart.clear(); onCartChanged() }
             }
             true
         }
@@ -757,7 +671,7 @@ class MainActivity : AppCompatActivity() {
                     row.addView(Button(this).apply {
                         text = label; textSize = 20f; transformationMethod = null; contentDescription = "$desc: ${line.name}"
                         minWidth = 0; minimumWidth = 0; setPadding(0, 0, 0, 0)
-                        setOnClickListener { onClick(); refreshBadges(); updateBar(); fill() }
+                        setOnClickListener { onClick(); onCartChanged(); fill() }
                     }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(4) })
                 }
                 small("−", "Уменьшить") { Cart.setQty(line.productUuid, line.quantity.subtract(BigDecimal.ONE)) }
@@ -770,7 +684,7 @@ class MainActivity : AppCompatActivity() {
         }
         fill()
         dialog.setContentView(scroll)
-        dialog.setOnDismissListener { refreshBadges(); updateBar(); if (cartDialog === dialog) cartDialog = null }
+        dialog.setOnDismissListener { onCartChanged(); if (cartDialog === dialog) cartDialog = null }
         cartDialog = dialog
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
@@ -959,7 +873,7 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { onClick() }
     }
 
-    private fun banner(t: String, kind: Kind): TextView {
+    private fun banner(t: String, kind: Kind, sp: Float = 16f): TextView {
         val (bg, fg) = when (kind) {
             Kind.ERROR -> 0xFFFDECEA.toInt() to 0xFF8C1D18.toInt()
             Kind.WARN -> 0xFFFFF4D6.toInt() to 0xFF6B4700.toInt()
@@ -967,7 +881,7 @@ class MainActivity : AppCompatActivity() {
             Kind.OK -> 0xFFE6F4EC.toInt() to 0xFF1E6B4A.toInt()
         }
         return TextView(this).apply {
-            text = t; textSize = 16f; setTextColor(fg); background = rounded(bg, 12, null)
+            text = t; textSize = sp; setTextColor(fg); background = rounded(bg, 12, null)
             setPadding(dp(12), dp(10), dp(12), dp(10))
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) }
         }

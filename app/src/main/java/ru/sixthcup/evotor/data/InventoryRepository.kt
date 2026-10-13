@@ -23,6 +23,8 @@ data class CatalogProduct(
     /** Товар в блоке «Фокус» (#focus в описании или комбо в названии). */
     val featured: Boolean = false,
     val isCombo: Boolean = false,
+    /** «Старая цена» из метки `#old=` (только подпись; в чек уходит priceRub). */
+    val oldPriceRub: BigDecimal? = null,
     /** Данные с backend /api/devices/catalog (после merge). */
     val imageUrl: String? = null,
     val toppings: List<Topping> = emptyList(),
@@ -87,21 +89,21 @@ object InventoryRepository {
         }
         return raw.map { p ->
             val g = p.parentUuid?.let { groups[it] }
-            val desc = p.description.orEmpty()
-            val featured = desc.contains("#focus", ignoreCase = true) || p.name.contains('+')
-            val isCombo = p.name.contains('+')
             p.copy(
                 groupName = g,
                 freeEligible = FreeCupRules.isEligible(p.name, g, p.description),
-                featured = featured,
-                isCombo = isCombo,
+                featured = ProductMarkers.isFocus(p.description) || ProductMarkers.isCombo(p.name, p.description),
+                isCombo = ProductMarkers.isCombo(p.name, p.description),
+                oldPriceRub = ProductMarkers.oldPriceRub(p.description),
+                // Рецепт без служебных меток (#focus/#old=…); description остаётся «сырым» для FreeCupRules.
+                recipe = ProductMarkers.cleanDescription(p.description),
             )
         }.sortedBy { it.name.lowercase() }
     }
 
     /** Рецепт/описание по требованию (тап на «i»), если в строке каталога его не было. */
     fun recipeFor(context: Context, uuid: String): String? = try {
-        (InventoryApi.getProductByUuid(context, uuid) as? ProductItem.Product)?.description?.takeIf { it.isNotBlank() }
+        (InventoryApi.getProductByUuid(context, uuid) as? ProductItem.Product)?.description?.let { ProductMarkers.cleanDescription(it) }
     } catch (_: Throwable) { null }
 
     private fun col(c: Cursor, vararg names: String): Int? {
