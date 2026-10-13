@@ -189,7 +189,11 @@ class MainActivity : AppCompatActivity() {
         thread(name = "catalog-load") {
             val inv = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
             val known = lastEnrich
-            val first = if (inv != null && known != null) CatalogApi.merge(inv, known) else inv
+            val first = when {
+                inv != null && known != null -> CatalogApi.merge(inv, known)
+                inv != null -> CatalogApi.applySoftFocus(inv)
+                else -> null
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 productsLoading = false
@@ -423,7 +427,10 @@ class MainActivity : AppCompatActivity() {
     /** Поиск/чипы (если набор групп изменился) + строки списка. */
     private fun refreshChromeAndRows(toTop: Boolean) {
         searchView?.visibility = if (products.size > SEARCH_MIN_ITEMS) View.VISIBLE else View.GONE
-        val groups = products.mapNotNull { it.groupName }.distinct().sorted()
+        // Группы: из Evotor parent + из merge categoryName (6.7).
+        val groups = products.mapNotNull { it.groupName?.takeIf { n -> n.isNotBlank() } }
+            .distinct()
+            .sorted()
         if (groups != groupsCache || chipViews.isEmpty()) {
             groupsCache = groups
             rebuildChips()
