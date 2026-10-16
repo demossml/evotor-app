@@ -20,10 +20,10 @@ import kotlin.math.max
  */
 class ThumbView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
-    private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE6ECFF.toInt() }
+    private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFEEF4FF.toInt() } // brand_soft
     private val photo = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF002FA7.toInt(); typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
+        color = 0xFF002FA7.toInt(); typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER // brand
     }
     private val rect = RectF()
     private val m = Matrix()
@@ -39,8 +39,8 @@ class ThumbView(context: Context) : View(context) {
     fun bind(name: String, url: String?, px: Int) {
         request?.cancelled = true
         request = null
-        val initials = name.trim().split(Regex("\\s+")).mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("")
-        label = initials.ifEmpty { "•" }
+                // Brand placeholder (PWA parity), not product initials
+        label = "6.7"
         contentDescription = name
         request = ThumbLoader.load(this, url, px)
         invalidate()

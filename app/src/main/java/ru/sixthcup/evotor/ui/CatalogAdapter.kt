@@ -173,34 +173,44 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         val d = ctx.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val box = itemView as LinearLayout
-        box.orientation = LinearLayout.HORIZONTAL
-        box.gravity = Gravity.CENTER_VERTICAL
-        box.setPadding(dp(8), dp(6), dp(8), dp(6))
-        box.minimumHeight = dp(64)
-        box.background = UiKit.rounded(d, UiKit.WHITE, 14, UiKit.LINE)
+        // PWA-like tile: photo on top, name + price below (2-column grid parent)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(8), dp(8), dp(8), dp(8))
+        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
         box.isClickable = true; box.isFocusable = true
-        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(6) }
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply {
+            width = MATCH
+            setMargins(dp(4), dp(4), dp(4), dp(4))
+        }
 
-        thumb.setCorner(28)
-        box.addView(thumb, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(10) })
-        thumbPx = 128 // 52 dp ≈ 100–130 px на ST5; мастер на диске 288 px, декод с inSampleSize
-
-        val mid = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        name.textSize = 15f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
-        name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
-        meta.textSize = 13f; meta.setTextColor(UiKit.INK); meta.maxLines = 1; meta.ellipsize = TextUtils.TruncateAt.END
-        mid.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
-        mid.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP))
-        box.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val photoBox = FrameLayout(ctx)
+        thumb.setCorner(14)
+        photoBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
+        // square photo via 1:1 — fixed height ~ half column on ST5
+        val photoH = dp(120)
+        box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
+        thumbPx = (photoH * 2).coerceIn(240, 480)
 
         qty = qtyPill(ctx, d)
-        box.addView(qty, LinearLayout.LayoutParams(WRAP, dp(28)).apply { leftMargin = dp(6) })
+        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(28)).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = dp(6); rightMargin = dp(6)
+        })
 
-        info.text = "i"; info.textSize = 14f; info.gravity = Gravity.CENTER
+        name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
+        name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
+        name.setPadding(0, dp(8), 0, 0)
+        box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        meta.textSize = 15f; meta.setTypeface(null, Typeface.BOLD); meta.setTextColor(UiKit.INK)
+        meta.maxLines = 1; meta.ellipsize = TextUtils.TruncateAt.END
+        box.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
+
+        info.text = "i"; info.textSize = 12f; info.gravity = Gravity.CENTER
         info.setTextColor(UiKit.BRAND); info.setTypeface(null, Typeface.BOLD)
-        info.background = UiKit.rounded(d, UiKit.WHITE, 18, UiKit.BRAND)
+        info.background = UiKit.rounded(d, UiKit.WHITE, 14, UiKit.BRAND)
         info.visibility = View.GONE
-        box.addView(info, LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(6) })
+        box.addView(info, LinearLayout.LayoutParams(dp(28), dp(28)).apply { topMargin = dp(4) })
 
         box.setOnClickListener { item?.let(cb.onTap) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }

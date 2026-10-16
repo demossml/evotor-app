@@ -23,6 +23,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.EVOTOR" />
             </intent-filter>
+            <!-- Replace system Sale button: https://developer.evotor.ru/docs/doc_java_app_icon.html -->
+            <intent-filter>
+                <action android:name="ru.evotor.intent.action.SELL_MAIN" />
+                <category android:name="android.intent.category.EVOTOR" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
         </activity>
         <service android:name=".integration.DiscountIntegrationService" android:exported="true">
             <intent-filter>

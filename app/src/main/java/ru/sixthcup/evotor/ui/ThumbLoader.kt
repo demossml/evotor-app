@@ -22,8 +22,8 @@ import kotlin.math.max
  * предсказуемый путь, а нужны только HTTPS → круглая/скруглённая миниатюра).
  *
  * Конвейер:
- *  1. память: LruCache по «url@px» (≈1/12 кучи, ARGB_8888, но картинки ≤ 288 px → десятки КБ);
- *  2. диск: «мастер» каждого URL — WebP, длинная сторона ≤ MASTER_PX (288), в cacheDir/thumbs, лимит DISK_LIMIT_BYTES;
+ *  1. память: LruCache по «url@px» (≈1/12 кучи, ARGB_8888, но картинки ≤ 480 px → десятки КБ);
+ *  2. диск: «мастер» каждого URL — WebP, длинная сторона ≤ MASTER_PX (480), в cacheDir/thumbs, лимит DISK_LIMIT_BYTES;
  *  3. сеть: только https, таймауты 4/8 с, потолок размера ответа MAX_BYTES, декод с inSampleSize (полный
  *     кадр в память не попадает), результат ужимается до мастера и пишется на диск.
  * Отмена: каждый запрос — Request с флагом; при переиспользовании ячейки (ThumbView.bind) старый запрос
@@ -32,7 +32,7 @@ import kotlin.math.max
  * Все колбэки приходят на главный поток. Декод и сеть — в пуле из 3 потоков, не на UI.
  */
 object ThumbLoader {
-    private const val MASTER_PX = 288
+    private const val MASTER_PX = 480
     private const val MAX_BYTES = 2 * 1024 * 1024
     private const val DISK_LIMIT_BYTES = 24L * 1024 * 1024
     private const val NEG_TTL_MS = 5 * 60 * 1000L

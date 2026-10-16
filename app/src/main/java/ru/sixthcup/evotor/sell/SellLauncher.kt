@@ -31,7 +31,14 @@ object SellLauncher {
         }
         try {
             val positionAdds = ArrayList<PositionAdd>()
+            var skippedSynthetic = 0
             for (line in lines) {
+                // Синтетические uuid добавок (mod:…) не существуют в номенклатуре Эвотор —
+                // не кладём «ручную» позицию без НДС/типа (фискальный риск).
+                if (line.productUuid.startsWith("mod:")) {
+                    skippedSynthetic++
+                    continue
+                }
                 // Берём настоящий товар Эвотор (НДС, тип, код, единица измерения — как в нативном меню);
                 // цену подставляем ту же рублёвую, что видел бариста. Запасной путь — позиция «вручную».
                 val item = try { InventoryApi.getProductByUuid(activity, line.productUuid) as? ProductItem.Product } catch (_: Throwable) { null }
@@ -41,6 +48,10 @@ object SellLauncher {
                     Position.Builder.newInstance(UUID.randomUUID().toString(), line.productUuid, line.name, Measure("шт", 0, 0), line.priceRub, line.quantity)
                 }
                 positionAdds.add(PositionAdd(builder.build()))
+            }
+            if (positionAdds.isEmpty()) {
+                onDone(false, if (skippedSynthetic > 0) "Нет позиций с товаром Эвотор (добавки без uuid)" else "Корзина пуста")
+                return
             }
             val card = CardSession.get(activity)
             CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks)

@@ -5,19 +5,24 @@ import android.view.View
 import java.math.BigDecimal
 import java.math.RoundingMode
 
-/** Общие цвета и мелкие помощники кассового UI (токены 6.7: бренд #002FA7, светлые нейтральные, оранжевый — только подарок/акция). */
+/**
+ * Токены UI кассы 6.7 — в паритете с PWA app.67coffee.ru:
+ * brand #002FA7, page #F6F3EE, surface white.
+ * Литералы здесь — единый runtime-источник (View-код без Context);
+ * XML colors.xml / themes.xml совпадают с этими значениями.
+ */
 object UiKit {
     val BRAND = 0xFF002FA7.toInt()
     val SOFT = 0xFFEEF4FF.toInt()
-    val PAGE = 0xFFF5F7FB.toInt()
-    val INK = 0xFF1E293B.toInt()
-    val HINT = 0xFF475569.toInt()
-    val LINE = 0xFFCBD5E1.toInt()
+    /** Тёплый фон страницы = PWA body #F6F3EE */
+    val PAGE = 0xFFF6F3EE.toInt()
+    val INK = 0xFF0B1220.toInt()
+    val HINT = 0xFF3D4A5C.toInt()
+    val LINE = 0xFFD6D0C8.toInt()
     val WHITE = 0xFFFFFFFF.toInt()
-    val OK = 0xFF1E6B4A.toInt()
-    /** Цена по акции (красная) — только когда есть `#old=`. */
+    val OK = 0xFF2B7D5B.toInt()
     val PROMO = 0xFFB3261E.toInt()
-    val SKELETON = 0xFFE2E8F0.toInt()
+    val SKELETON = 0xFFE8E4DE.toInt()
 
     fun rub(v: BigDecimal): String {
         val s = v.setScale(2, RoundingMode.HALF_UP)

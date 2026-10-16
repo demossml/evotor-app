@@ -34,6 +34,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.NestedScrollView
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetBehavior
@@ -43,6 +44,7 @@ import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLine
+import ru.sixthcup.evotor.data.CatalogCache
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.InventoryRepository
@@ -77,7 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var query = ""
     private var group: String? = null
 
-    private var screen: Screen = Screen.CARD
+    private var screen: Screen = Screen.ORDER
     private var resolving = false
     private var input: EditText? = null
     private var notice: String? = null
@@ -162,8 +164,8 @@ class MainActivity : AppCompatActivity() {
 
             screen = when {
                 PendingPayment.active(this) -> Screen.PAYMENT
-                CardSession.get(this)?.code?.isNotEmpty() == true || !Cart.isEmpty() -> Screen.ORDER
-                else -> Screen.CARD
+                // Витрина по умолчанию (PWA-like); карта — chip/sheet, не стартовый экран
+                else -> Screen.ORDER
             }
             loadProducts()
             safeRender()
@@ -188,7 +190,10 @@ class MainActivity : AppCompatActivity() {
         val ctx = applicationContext
         thread(name = "catalog-load") {
             val inv = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
-            val known = lastEnrich
+            val known = lastEnrich ?: CatalogCache.load(ctx)
+            if (lastEnrich == null && known != null) {
+                // restore RAM pointer for subsequent merges this process
+            }
             val first = when {
                 inv != null && known != null -> CatalogApi.merge(inv, known)
                 inv != null -> CatalogApi.applySoftFocus(inv)
@@ -197,12 +202,14 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 productsLoading = false
+                if (known != null) lastEnrich = known
                 if (first == null) { if (products.isEmpty()) productsError = true } else products = first
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
             if (inv == null) return@thread
             val enrich = try { CatalogApi.fetch(null) } catch (e: Throwable) { Log.e(TAG, "enrich", e); CatalogApi.Payload(emptyMap(), emptyList()) }
             if (enrich.byUuid.isEmpty()) return@thread
+            CatalogCache.save(ctx, enrich)
             val merged = CatalogApi.merge(inv, enrich)
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
@@ -397,7 +404,17 @@ class MainActivity : AppCompatActivity() {
         val ad = CatalogAdapter(CatalogCallbacks(onTap = { onProductTap(it) }, onInfo = { showRecipe(it) }, onRetry = { loadProducts() }))
         adapter = ad
         val rv = RecyclerView(this).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
+            layoutManager = GridLayoutManager(this@MainActivity, 2).also { gm ->
+                gm.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                    override fun getSpanSize(position: Int): Int {
+                        val row = ad.currentList.getOrNull(position) ?: return 2
+                        return when (row) {
+                            is CatalogRow.Item -> 1
+                            else -> 2 // focus, header, skeleton, state
+                        }
+                    }
+                }
+            }
             adapter = ad
             itemAnimator = null              // без анимаций макета при bind/diff
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -930,13 +947,13 @@ class MainActivity : AppCompatActivity() {
         const val SEARCH_MIN_ITEMS = 12
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-        val BRAND = 0xFF002FA7.toInt()
-        val SOFT = 0xFFEEF4FF.toInt()
-        val PAGE = 0xFFF5F7FB.toInt()
-        val INK = 0xFF1E293B.toInt()
-        val HINT = 0xFF475569.toInt()
-        val LINE = 0xFFCBD5E1.toInt()
-        val WHITE = 0xFFFFFFFF.toInt()
+        val BRAND = UiKit.BRAND
+        val SOFT = UiKit.SOFT
+        val PAGE = UiKit.PAGE
+        val INK = UiKit.INK
+        val HINT = UiKit.HINT
+        val LINE = UiKit.LINE
+        val WHITE = UiKit.WHITE
     }
 }
 
