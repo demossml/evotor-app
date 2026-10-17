@@ -176,18 +176,19 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         // PWA-like tile: photo on top, name + price below (2-column grid parent)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(8), dp(8), dp(8), dp(8))
-        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
+        box.background = UiKit.rounded(d, UiKit.WHITE, 20, UiKit.LINE)
         box.isClickable = true; box.isFocusable = true
-        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply {
+        box.contentDescription = "Товар меню"
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, dp(208)).apply {
             width = MATCH
             setMargins(dp(4), dp(4), dp(4), dp(4))
         }
 
         val photoBox = FrameLayout(ctx)
-        thumb.setCorner(14)
+        thumb.setCorner(16)
         photoBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
         // square photo via 1:1 — fixed height ~ half column on ST5
-        val photoH = dp(120)
+        val photoH = dp(100)
         box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
         thumbPx = (photoH * 2).coerceIn(240, 480)
 
@@ -198,19 +199,19 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         })
 
         name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
-        name.minLines = 2; name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
+        name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
         name.setPadding(0, dp(8), 0, 0)
         box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        meta.textSize = 15f; meta.setTypeface(null, Typeface.BOLD); meta.setTextColor(UiKit.INK)
+        meta.textSize = 16f; meta.setTypeface(null, Typeface.BOLD); meta.setTextColor(UiKit.BRAND)
         meta.maxLines = 1; meta.ellipsize = TextUtils.TruncateAt.END
         box.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
 
         info.text = "i"; info.textSize = 12f; info.gravity = Gravity.CENTER
         info.setTextColor(UiKit.BRAND); info.setTypeface(null, Typeface.BOLD)
         info.background = UiKit.rounded(d, UiKit.WHITE, 14, UiKit.BRAND)
-        info.visibility = View.GONE
-        box.addView(info, LinearLayout.LayoutParams(dp(28), dp(28)).apply { topMargin = dp(4) })
+        info.visibility = View.INVISIBLE
+        box.addView(info, LinearLayout.LayoutParams(dp(28), dp(24)).apply { topMargin = dp(4) })
 
         box.setOnClickListener { item?.let(cb.onTap) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }
@@ -223,7 +224,7 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         val m = when { p.isCombo -> "комбо"; p.freeEligible -> "стакан"; else -> null }
         meta.text = priceText(p, m)
         thumb.bind(p.name, p.imageUrl, thumbPx)
-        info.visibility = if (p.recipe.isNullOrBlank()) View.GONE else View.VISIBLE
+        info.visibility = if (p.recipe.isNullOrBlank()) View.INVISIBLE else View.VISIBLE
         info.contentDescription = "Рецепт: " + p.name
         bindQty()
     }
@@ -273,9 +274,9 @@ private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.Vie
         val box = itemView as LinearLayout
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(8), dp(8), dp(8), dp(8))
-        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
+        box.background = UiKit.rounded(d, UiKit.WHITE, 20, UiKit.LINE)
         box.isClickable = true; box.isFocusable = true
-        box.layoutParams = RecyclerView.LayoutParams(dp(136), WRAP).apply { rightMargin = dp(8) }
+        box.layoutParams = RecyclerView.LayoutParams(dp(144), WRAP).apply { rightMargin = dp(8) }
 
         thumb.setCorner(12)
         val photo = FrameLayout(ctx)
@@ -289,10 +290,10 @@ private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.Vie
         photo.addView(qty, FrameLayout.LayoutParams(WRAP, dp(28), Gravity.TOP or Gravity.END).apply { topMargin = dp(4); rightMargin = dp(4) })
         box.addView(photo, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        name.textSize = 13f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
+        name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
         name.minLines = 2; name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
         box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
-        price.textSize = 14f; price.setTypeface(null, Typeface.BOLD); price.setTextColor(UiKit.BRAND)
+        price.textSize = 15f; price.setTypeface(null, Typeface.BOLD); price.setTextColor(UiKit.BRAND)
         price.maxLines = 1; price.ellipsize = TextUtils.TruncateAt.END
         box.addView(price, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
 

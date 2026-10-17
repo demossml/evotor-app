@@ -98,6 +98,10 @@ class MainActivity : AppCompatActivity() {
     private var lastEnrich: CatalogApi.Payload? = null
     private var payButton: Button? = null
     private var cartButton: Button? = null
+    private var cartSidebar: LinearLayout? = null
+    private var cartSidebarRows: LinearLayout? = null
+    private var cartSidebarTotal: TextView? = null
+    private var wideLayout: Boolean = false
     private var cartDialog: BottomSheetDialog? = null
     private var checkoutDialog: BottomSheetDialog? = null
 
@@ -184,9 +188,10 @@ class MainActivity : AppCompatActivity() {
      * Сеть больше не блокирует первый показ каталога.
      */
     private var catalogLoadedAt = 0L
+    private var catalogAttemptAt = 0L
 
     private fun loadProducts() {
-        catalogLoadedAt = System.currentTimeMillis()
+        catalogAttemptAt = System.currentTimeMillis()
         val gen = ++catalogGen
         productsLoading = products.isEmpty(); productsError = false
         if (screen == Screen.ORDER) refreshChromeAndRows(false)
@@ -205,6 +210,8 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 productsLoading = false
+                // Mark refresh only after local Evotor inventory was actually read successfully.
+                if (inv != null) catalogLoadedAt = System.currentTimeMillis()
                 if (known != null) lastEnrich = known
                 if (first == null) { if (products.isEmpty()) productsError = true } else products = first
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
@@ -239,6 +246,7 @@ class MainActivity : AppCompatActivity() {
         searchRunnable?.let { handler.removeCallbacks(it) }
         searchView = null; chipsScroll = null; chipsRow = null; chipViews.clear(); groupsCache = emptyList()
         recycler = null; adapter = null; payButton = null; cartButton = null
+        cartSidebar = null; cartSidebarRows = null; cartSidebarTotal = null; wideLayout = false
         scroll.visibility = View.VISIBLE; orderPane.visibility = View.GONE
         when (screen) { Screen.CARD -> renderCard(); Screen.ORDER -> renderOrder(); Screen.PAYMENT -> renderPayment() }
         topBar.visibility = if (topBar.childCount == 0) View.GONE else View.VISIBLE
@@ -360,29 +368,40 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderOrder() {
         val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
-        scroll.visibility = View.GONE; orderPane.visibility = View.VISIBLE
+        scroll.visibility = View.GONE
+        orderPane.visibility = View.VISIBLE
+        wideLayout = resources.configuration.screenWidthDp >= 600
+        cartSidebar = null; cartSidebarRows = null; cartSidebarTotal = null
 
-        // Верхняя полоса: карта/лояльность + «Ещё» в одну строку 48 dp.
+        // Карта всегда на виду. Сохраняем компактную шапку для маленького терминала.
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         head.addView(cardChip(card, clickable = true), LinearLayout.LayoutParams(0, dp(48), 1f))
         val more = button("Ещё", false, 44) { }
         more.setOnClickListener { showMore(more, card) }
         more.textSize = 14f
-        head.addView(more, LinearLayout.LayoutParams(dp(64), dp(44)).apply { leftMargin = dp(8) })
+        head.addView(more, LinearLayout.LayoutParams(dp(58), dp(44)).apply { leftMargin = dp(8) })
         topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
         notice?.let { topBar.addView(banner(it, noticeKind, 14f).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6) }) }
 
+        val content = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP }
+        val catalogColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(2), 0, 0)
+        }
+        content.addView(catalogColumn, LinearLayout.LayoutParams(0, MATCH, 1f))
+
         val search = EditText(this).apply {
-            hint = "Поиск по названию"
+            hint = "Поиск напитка или десерта"
             isSingleLine = true
             textSize = 15f
             setTextColor(INK); setHintTextColor(HINT)
             imeOptions = EditorInfo.IME_ACTION_DONE
-            background = rounded(WHITE, 12, LINE)
-            setPadding(dp(12), 0, dp(12), 0)
+            background = rounded(WHITE, 16, LINE)
+            setPadding(dp(14), 0, dp(14), 0)
             setText(query)
+            minHeight = dp(48)
+            contentDescription = "Поиск по меню"
         }
-        // Debounce 180 мс: пересчёт строк не на каждую букву.
         search.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -395,53 +414,111 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
         searchView = search
-        orderPane.addView(search, LinearLayout.LayoutParams(MATCH, dp(44)).apply { bottomMargin = dp(6) })
+        catalogColumn.addView(search, LinearLayout.LayoutParams(MATCH, dp(48)).apply { bottomMargin = dp(8) })
 
-        // Чипы закреплены над списком и не пересоздаются при выборе (меняется только стиль).
-        val strip = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; clipToPadding = false; overScrollMode = View.OVER_SCROLL_NEVER }
+        val strip = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; clipToPadding = false; overScrollMode = View.OVER_SCROLL_NEVER
+        }
         val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         strip.addView(chips)
         chipsScroll = strip; chipsRow = chips
-        orderPane.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(6) })
+        catalogColumn.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
 
         val ad = CatalogAdapter(CatalogCallbacks(onTap = { onProductTap(it) }, onInfo = { showRecipe(it) }, onRetry = { loadProducts() }))
         adapter = ad
+        val screenWidth = resources.configuration.screenWidthDp
+        val columns = if (screenWidth >= 800) 3 else 2
         val rv = RecyclerView(this).apply {
-            layoutManager = GridLayoutManager(this@MainActivity, 2).also { gm ->
+            layoutManager = GridLayoutManager(this@MainActivity, columns).also { gm ->
                 gm.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
                     override fun getSpanSize(position: Int): Int {
-                        val row = ad.currentList.getOrNull(position) ?: return 2
-                        return when (row) {
-                            is CatalogRow.Item -> 1
-                            else -> 2 // focus, header, skeleton, state
-                        }
+                        val row = ad.currentList.getOrNull(position) ?: return columns
+                        return when (row) { is CatalogRow.Item -> 1; else -> columns }
                     }
                 }
             }
             adapter = ad
-            itemAnimator = null              // без анимаций макета при bind/diff
+            itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
             clipToPadding = false
             setPadding(0, dp(2), 0, dp(8))
             setHasFixedSize(true)
             setItemViewCacheSize(8)
+            contentDescription = "Каталог товаров"
         }
         recycler = rv
-        orderPane.addView(rv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        catalogColumn.addView(rv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        if (wideLayout) {
+            content.addView(buildCartSidebar(), LinearLayout.LayoutParams(dp(if (screenWidth >= 800) 260 else 220), MATCH).apply {
+                leftMargin = dp(12)
+            })
+        }
+        orderPane.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
         refreshChromeAndRows(false)
 
-        // Нижняя полоса: одна строка 52 dp — «Корзина · N · сумма» и «К оплате».
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val cartBtn = button("Корзина пуста", false, 52) { showCart() }
-        cartBtn.textSize = 15f; cartBtn.maxLines = 1; cartBtn.ellipsize = TextUtils.TruncateAt.END
+        cartBtn.textSize = 14f; cartBtn.maxLines = 1; cartBtn.ellipsize = TextUtils.TruncateAt.END
         cartButton = cartBtn
         val pay = button("К оплате", true, 52) { showUpsellThenCheckout(card) }
         pay.textSize = 15f; pay.maxLines = 1
         payButton = pay
-        row.addView(cartBtn, LinearLayout.LayoutParams(0, dp(52), 1f))
-        row.addView(pay, LinearLayout.LayoutParams(dp(124), dp(52)).apply { leftMargin = dp(8) })
+        row.addView(cartBtn, LinearLayout.LayoutParams(0, dp(52), if (wideLayout) 0f else 1f).apply {
+            if (wideLayout) width = 0
+        })
+        if (wideLayout) cartBtn.visibility = View.GONE
+        row.addView(pay, LinearLayout.LayoutParams(if (wideLayout) MATCH else dp(124), dp(52)).apply {
+            if (!wideLayout) leftMargin = dp(8)
+        })
         bottomBar.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
         updateBar()
+    }
+
+    /** Постоянная корзина для широких экранов; редактирование остаётся в проверенном bottom sheet. */
+    private fun buildCartSidebar(): View {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(WHITE, 20, LINE)
+        }
+        panel.addView(text("Ваш заказ", 18f, INK, true), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
+        panel.addView(text("Позиции обновляются автоматически", 12f, HINT, false), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val rowsScroll = ScrollView(this).apply {
+            isFillViewport = false; overScrollMode = View.OVER_SCROLL_NEVER
+            addView(rows, ScrollView.LayoutParams(MATCH, WRAP))
+        }
+        panel.addView(rowsScroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        val total = text("Итого 0 ₽", 18f, BRAND, true).apply {
+            setPadding(0, dp(12), 0, dp(8)); gravity = Gravity.END
+        }
+        panel.addView(total, LinearLayout.LayoutParams(MATCH, WRAP))
+        panel.addView(button("Изменить заказ", false, 48) { showCart() }, LinearLayout.LayoutParams(MATCH, dp(48)))
+        cartSidebar = panel; cartSidebarRows = rows; cartSidebarTotal = total
+        refreshCartSidebar()
+        return panel
+    }
+
+    private fun refreshCartSidebar() {
+        val rows = cartSidebarRows ?: return
+        rows.removeAllViews()
+        val lines = Cart.all()
+        if (lines.isEmpty()) {
+            rows.addView(text("Корзина пока пуста", 15f, HINT, false).apply {
+                setPadding(0, dp(8), 0, dp(8))
+            })
+        } else {
+            lines.forEach { line ->
+                val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, dp(8)) }
+                row.addView(text(line.name, 14f, INK, true).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
+                row.addView(text("×${line.quantity.stripTrailingZeros().toPlainString()}  ·  ${rub(line.lineTotal())}", 14f, HINT, false))
+                rows.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+                val divider = View(this).apply { setBackgroundColor(LINE) }
+                rows.addView(divider, LinearLayout.LayoutParams(MATCH, dp(1)))
+            }
+        }
+        cartSidebarTotal?.text = "Итого  ${rub(Cart.gross())}"
     }
 
     /** Поиск/чипы (если набор групп изменился) + строки списка. */
@@ -538,9 +615,22 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        box.addView(text(p.name, 18f, BRAND, true))
-        box.addView(text("Добавки (по желанию)", 14f, HINT, false).apply { setPadding(0, dp(4), 0, dp(8)) })
+        val productPhoto = ThumbView(this).apply { setCorner(18); bind(p.name, p.imageUrl, 480) }
+        box.addView(productPhoto, LinearLayout.LayoutParams(MATCH, dp(124)).apply { bottomMargin = dp(12) })
+        box.addView(text(p.name, 20f, INK, true))
+        box.addView(text("${rub(p.priceRub)} · Настройте напиток", 15f, BRAND, true).apply { setPadding(0, dp(4), 0, dp(8)) })
         val selected = linkedMapOf<Int, Int>()
+        val total = text("Итого: ${rub(p.priceRub)}", 18f, BRAND, true).apply {
+            setPadding(dp(12), dp(10), dp(12), dp(10)); background = rounded(SOFT, 16, null)
+        }
+        fun updateModifierTotal() {
+            val additions = p.toppings.fold(BigDecimal.ZERO) { sum, top ->
+                sum.add(top.priceRub.multiply(BigDecimal(selected[top.id] ?: 0)))
+            }
+            total.text = "Итого: ${rub(p.priceRub.add(additions))}"
+        }
+        box.addView(total, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        box.addView(text("Добавки (по желанию)", 14f, HINT, false).apply { setPadding(0, dp(4), 0, dp(8)) })
         val groups = p.toppings.groupBy { it.groupKey }
         groups.forEach { (gk, list) ->
             box.addView(text(toppingGroupLabel(gk), 13f, HINT, true).apply { setPadding(0, dp(6), 0, dp(4)) })
@@ -558,12 +648,14 @@ class MainActivity : AppCompatActivity() {
                     val n = (selected[top.id] ?: 0) - 1
                     if (n <= 0) selected.remove(top.id) else selected[top.id] = n
                     qty.text = "${selected[top.id] ?: 0}"
+                    updateModifierTotal()
                 }
                 val plus = button("+", false, 48) {
                     val n = (selected[top.id] ?: 0) + 1
                     if (n <= top.maxCount) {
                         selected[top.id] = n
                         qty.text = "$n"
+                        updateModifierTotal()
                     }
                 }
                 if (!sellable) { minus.isEnabled = false; plus.isEnabled = false; minus.alpha = 0.4f; plus.alpha = 0.4f }
@@ -574,8 +666,10 @@ class MainActivity : AppCompatActivity() {
                 box.addView(row)
             }
         }
-        box.addView(button("В заказ", true, 52) {
-            Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
+        box.addView(button("В чек · добавить", true, 52) {
+            val config = selected.filterValues { it > 0 }.toSortedMap()
+            val cartKey = if (config.isEmpty()) p.uuid else p.uuid + "#mods:" + config.entries.joinToString(",") { "${it.key}x${it.value}" }
+            Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible, cartKey))
             p.toppings.forEach { top ->
                 val n = selected[top.id] ?: return@forEach
                 if (n <= 0) return@forEach
@@ -585,7 +679,7 @@ class MainActivity : AppCompatActivity() {
             onCartChanged()
             dialog.dismiss()
         }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(12) })
-        box.addView(button("Без добавок", false, 48) {
+        box.addView(button("Добавить без опций", false, 48) {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
             dialog.dismiss()
@@ -615,6 +709,7 @@ class MainActivity : AppCompatActivity() {
             alpha = if (empty) 0.5f else 1f
         }
         cartButton?.apply { isEnabled = !empty; alpha = if (empty) 0.6f else 1f }
+        refreshCartSidebar()
     }
 
     /** Компактная «таблетка» карты: строка 1 — карта/прогресс/кэшбэк, строка 2 — статус (подарок, нет связи). */
@@ -630,7 +725,7 @@ class MainActivity : AppCompatActivity() {
             maxLines = 1; ellipsize = TextUtils.TruncateAt.END
         }
         if (card == null) {
-            box.addView(line("Без карты", 15f, INK, true))
+            box.addView(line("6.7 Coffee · без карты", 15f, INK, true))
             if (clickable) box.addView(line("Нажмите, чтобы ввести карту", 12f, HINT, false))
         } else {
             val main = when {
@@ -713,9 +808,9 @@ class MainActivity : AppCompatActivity() {
                         setOnClickListener { onClick(); onCartChanged(); fill() }
                     }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(4) })
                 }
-                small("−", "Уменьшить") { Cart.setQty(line.productUuid, line.quantity.subtract(BigDecimal.ONE)) }
+                small("−", "Уменьшить") { Cart.setQty(line.cartKey.ifBlank { line.productUuid }, line.quantity.subtract(BigDecimal.ONE)) }
                 small("+", "Увеличить") { Cart.add(line.copy(quantity = BigDecimal.ONE)) }
-                small("×", "Удалить") { Cart.remove(line.productUuid) }
+                small("×", "Удалить") { Cart.remove(line.cartKey.ifBlank { line.productUuid }) }
                 box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
             }
             if (lines.isNotEmpty()) box.addView(text("Итого: ${rub(Cart.gross())}", 18f, INK, true).apply { setPadding(0, dp(4), 0, dp(12)) })
@@ -914,7 +1009,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun button(label: String, primary: Boolean, heightDp: Int, onClick: () -> Unit) = Button(this).apply {
         text = label; textSize = 16f; transformationMethod = null; minHeight = dp(heightDp); minimumHeight = dp(heightDp)
-        if (primary) { background = rounded(BRAND, 12, BRAND); setTextColor(WHITE) } else { background = rounded(WHITE, 12, BRAND); setTextColor(BRAND) }
+        if (primary) { background = rounded(BRAND, 16, BRAND); setTextColor(WHITE) } else { background = rounded(WHITE, 16, LINE); setTextColor(BRAND) }
         setOnClickListener { onClick() }
     }
 
@@ -951,7 +1046,7 @@ class MainActivity : AppCompatActivity() {
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
         if (::root.isInitialized && PendingPayment.active(this) && screen != Screen.PAYMENT) { screen = Screen.PAYMENT; safeRender() }
         // Каталог/цены не должны «залёживаться» на кассе, которая днями не закрывает приложение.
-        if (::root.isInitialized && products.isNotEmpty() && System.currentTimeMillis() - catalogLoadedAt > CATALOG_STALE_MS) loadProducts()
+        if (::root.isInitialized && products.isNotEmpty() && System.currentTimeMillis() - catalogLoadedAt > CATALOG_STALE_MS && System.currentTimeMillis() - catalogAttemptAt > CATALOG_STALE_MS) loadProducts()
     }
 
     override fun onPause() { try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}; super.onPause() }

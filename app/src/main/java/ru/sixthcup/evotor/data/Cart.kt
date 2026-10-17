@@ -12,6 +12,8 @@ data class CartLine(
     val quantity: BigDecimal = BigDecimal.ONE,
     val recipe: String? = null,
     val freeEligible: Boolean = false,
+    /** UI/cart identity; differs from productUuid for the same drink with different modifiers. Never sent to Evotor. */
+    val cartKey: String = "",
 ) {
     fun lineTotal(): BigDecimal = priceRub.multiply(quantity)
 }
@@ -46,28 +48,38 @@ object Cart {
 
     fun all(): List<CartLine> = lines.values.toList()
     fun isEmpty() = lines.isEmpty()
-    fun qty(productUuid: String): Int = lines[productUuid]?.quantity?.toInt() ?: 0
+    /** Quantity badge sums configured variants of the same catalog product. */
+    fun qty(productUuid: String): Int = lines.values.filter { it.productUuid == productUuid }.sumOf { it.quantity.toInt() }
     fun count(): Int = lines.values.sumOf { it.quantity.toInt() }
 
     fun clear() { lines.clear(); save() }
 
     fun add(line: CartLine) {
         if (!isSellable(line.productUuid)) return
-        val old = lines[line.productUuid]
-        if (old == null) lines[line.productUuid] = line
-        else lines[line.productUuid] = old.copy(quantity = old.quantity.add(line.quantity))
+        val key = line.cartKey.ifBlank { line.productUuid }
+        val normalized = line.copy(cartKey = key)
+        val old = lines[key]
+        if (old == null) lines[key] = normalized
+        else lines[key] = old.copy(quantity = old.quantity.add(line.quantity))
         save()
     }
 
-    fun remove(productUuid: String) {
-        lines.remove(productUuid)
+    /** Remove a specific cart line. Legacy callers may still pass a product UUID. */
+    fun remove(cartKeyOrProductUuid: String) {
+        if (lines.remove(cartKeyOrProductUuid) == null) {
+            val matches = lines.filterValues { it.productUuid == cartKeyOrProductUuid }.keys.toList()
+            matches.forEach { lines.remove(it) }
+        }
         save()
     }
 
-    fun setQty(productUuid: String, qty: BigDecimal) {
-        val old = lines[productUuid] ?: return
-        if (qty <= BigDecimal.ZERO) lines.remove(productUuid)
-        else lines[productUuid] = old.copy(quantity = qty)
+    /** Update a specific cart line; a product UUID remains supported for legacy single-line carts. */
+    fun setQty(cartKeyOrProductUuid: String, qty: BigDecimal) {
+        val key = if (lines.containsKey(cartKeyOrProductUuid)) cartKeyOrProductUuid else
+            lines.entries.firstOrNull { it.value.productUuid == cartKeyOrProductUuid }?.key ?: return
+        val old = lines[key] ?: return
+        if (qty <= BigDecimal.ZERO) lines.remove(key)
+        else lines[key] = old.copy(quantity = qty)
         save()
     }
 
@@ -79,7 +91,8 @@ object Cart {
         try {
             val arr = JSONArray()
             lines.values.forEach { l ->
-                arr.put(JSONObject().put("u", l.productUuid).put("n", l.name).put("p", l.priceRub.toPlainString())
+                arr.put(JSONObject().put("u", l.productUuid).put("k", l.cartKey.ifBlank { l.productUuid })
+                    .put("n", l.name).put("p", l.priceRub.toPlainString())
                     .put("q", l.quantity.toPlainString()).put("r", l.recipe ?: JSONObject.NULL).put("f", l.freeEligible))
             }
             c.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
@@ -100,10 +113,14 @@ object Cart {
                 val line = CartLine(
                     productUuid = o.getString("u"), name = o.getString("n"), priceRub = BigDecimal(o.getString("p")),
                     quantity = BigDecimal(o.getString("q")), recipe = if (o.isNull("r")) null else o.getString("r"),
-                    freeEligible = o.optBoolean("f"),
+                    freeEligible = o.optBoolean("f"), cartKey = o.optString("k", o.getString("u")),
                 )
                 // Корзины, сохранённые старой версией, могли содержать «mod:…» — в чек они не уходят.
-                if (isSellable(line.productUuid)) lines[line.productUuid] = line
+                if (isSellable(line.productUuid)) {
+                    val key = line.cartKey.ifBlank { line.productUuid }
+                    val old = lines[key]
+                    lines[key] = if (old == null) line.copy(cartKey = key) else old.copy(quantity = old.quantity.add(line.quantity))
+                }
             }
         } catch (_: Throwable) {
             lines.clear()
