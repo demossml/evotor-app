@@ -10,6 +10,7 @@ import ru.sixthcup.evotor.data.UpsellItem
 import java.math.BigDecimal
 import java.net.HttpURLConnection
 import java.net.URL
+import android.util.Log
 
 /**
  * Каталог 6.7 (топинги, фото, upsell, категории, фокус) через HTTPS/прокси Эвотор.
@@ -48,13 +49,22 @@ object CatalogApi {
             conn.readTimeout = 8000
             conn.setRequestProperty("Accept", "application/json")
             if (!storeUuid.isNullOrBlank()) conn.setRequestProperty("X-Evotor-Store-Uuid", storeUuid)
+            // No Authorization in APK: Evotor Cloud injects it when installed from cabinet.
+            // Backend allows catalog without token unless EVOTOR_PROXY_ENFORCE=1.
             val status = conn.responseCode
             val body = (if (status in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
             conn.disconnect()
-            if (status !in 200..299) return Payload(emptyMap(), emptyList())
-            parse(body)
-        } catch (_: Throwable) {
+            if (status !in 200..299) {
+                Log.w("CatalogApi", "catalog HTTP $status len=${body.length}")
+                return Payload(emptyMap(), emptyList())
+            }
+            val parsed = parse(body)
+            val withPhoto = parsed.byUuid.values.count { !it.imageUrl.isNullOrBlank() }
+            Log.i("CatalogApi", "catalog ok products=${parsed.byUuid.size} withImageUrl=$withPhoto")
+            parsed
+        } catch (e: Throwable) {
+            Log.e("CatalogApi", "catalog fetch failed", e)
             Payload(emptyMap(), emptyList())
         }
     }

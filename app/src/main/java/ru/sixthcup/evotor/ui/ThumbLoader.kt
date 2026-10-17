@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.LruCache
+import ru.sixthcup.evotor.BuildConfig
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -65,8 +66,9 @@ object ThumbLoader {
 
     /** Показать миниатюру в view: из памяти — сразу, иначе — в фоне. Размер px — целевая сторона view. */
     fun load(view: ThumbView, url: String?, px: Int): Request? {
-        val u = url?.trim().orEmpty()
-        if (!u.startsWith("https://", ignoreCase = true)) { view.setBitmap(null); return null }
+        val raw = url?.trim().orEmpty()
+        val u = normalizeProxyImageUrl(raw)
+        if (u == null || !u.startsWith("https://", ignoreCase = true)) { view.setBitmap(null); return null }
         val key = "$u@$px"
         mem.get(key)?.let { view.setBitmap(it); return null }
         view.setBitmap(null)
@@ -83,6 +85,36 @@ object ThumbLoader {
             main.post { if (!req.cancelled && bmp != null) req.target.setBitmap(bmp) }
         }
         return req
+    }
+
+    /**
+     * Older admin records store /uploads/<file> (or an absolute URL ending in that path).
+     * Resolve those to the authenticated /api/devices/images endpoint, which is covered by
+     * the Evotor Cloud proxy URL mask. Never fetch local /uploads directly from the terminal.
+     */
+    private fun normalizeProxyImageUrl(raw: String): String? {
+        if (raw.isBlank()) return null
+        val base = BuildConfig.API_BASE_URL.trimEnd('/')
+        return try {
+            val api = URL(base)
+            val parsed = if (raw.startsWith("https://", ignoreCase = true) || raw.startsWith("http://", ignoreCase = true)) {
+                URL(raw)
+            } else {
+                URL(api, raw)
+            }
+            val sameHost = parsed.host.equals(api.host, ignoreCase = true) && parsed.port == api.port
+            val path = parsed.path
+            val uploadMatch = Regex("^/?uploads/([a-zA-Z0-9._-]+)$").matchEntire(path)
+            if (uploadMatch != null && sameHost) {
+                URL(api, "/api/devices/images/${uploadMatch.groupValues[1]}").toString()
+            } else if (path.startsWith("/api/devices/images/") && sameHost) {
+                parsed.toString()
+            } else if (!raw.startsWith("http://", ignoreCase = true) && !raw.startsWith("https://", ignoreCase = true) && path.startsWith("/api/devices/images/")) {
+                URL(api, path).toString()
+            } else {
+                parsed.toString()
+            }
+        } catch (_: Throwable) { null }
     }
 
     private fun fetch(url: String, px: Int): Bitmap? {
