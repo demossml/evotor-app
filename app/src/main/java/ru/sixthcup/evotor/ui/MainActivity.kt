@@ -487,7 +487,7 @@ class MainActivity : AppCompatActivity() {
         val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val rowsScroll = ScrollView(this).apply {
             isFillViewport = false; overScrollMode = View.OVER_SCROLL_NEVER
-            addView(rows, ScrollView.LayoutParams(MATCH, WRAP))
+            addView(rows, FrameLayout.LayoutParams(MATCH, WRAP))
         }
         panel.addView(rowsScroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
         val total = text("Итого 0 ₽", 18f, BRAND, true).apply {
