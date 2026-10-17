@@ -198,7 +198,7 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         })
 
         name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
-        name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
+        name.minLines = 2; name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
         name.setPadding(0, dp(8), 0, 0)
         box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
 

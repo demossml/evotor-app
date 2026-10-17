@@ -35,7 +35,7 @@ object SellLauncher {
             for (line in lines) {
                 // Синтетические uuid добавок (mod:…) не существуют в номенклатуре Эвотор —
                 // не кладём «ручную» позицию без НДС/типа (фискальный риск).
-                if (line.productUuid.startsWith("mod:")) {
+                if (!Cart.isSellable(line.productUuid)) {
                     skippedSynthetic++
                     continue
                 }

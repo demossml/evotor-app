@@ -183,7 +183,10 @@ class MainActivity : AppCompatActivity() {
      * (2) backend /api/devices/catalog (сеть) → фото, топинги, upsell добавляются поверх без перерисовки всего.
      * Сеть больше не блокирует первый показ каталога.
      */
+    private var catalogLoadedAt = 0L
+
     private fun loadProducts() {
+        catalogLoadedAt = System.currentTimeMillis()
         val gen = ++catalogGen
         productsLoading = products.isEmpty(); productsError = false
         if (screen == Screen.ORDER) refreshChromeAndRows(false)
@@ -520,7 +523,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onProductTap(p: CatalogProduct) {
-        if (p.toppings.isNotEmpty()) showToppingsSheet(p)
+        // Лист добавок нужен, только если хотя бы одну можно пробить в чек (есть товар Эвотор).
+        if (p.toppings.any { !it.evotorUuid.isNullOrBlank() }) showToppingsSheet(p)
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
@@ -539,31 +543,34 @@ class MainActivity : AppCompatActivity() {
         val selected = linkedMapOf<Int, Int>()
         val groups = p.toppings.groupBy { it.groupKey }
         groups.forEach { (gk, list) ->
-            box.addView(text(gk, 13f, HINT, true).apply { setPadding(0, dp(6), 0, dp(4)) })
+            box.addView(text(toppingGroupLabel(gk), 13f, HINT, true).apply { setPadding(0, dp(6), 0, dp(4)) })
             list.forEach { top ->
+                // Без товара Эвотор добавку нельзя пробить в чек — не даём выбрать, чтобы сумма совпадала с чеком.
+                val sellable = !top.evotorUuid.isNullOrBlank()
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(0, dp(4), 0, dp(4))
                 }
-                val label = text("${top.name} · ${rub(top.priceRub)}", 15f, INK, false)
-                val qty = text("0", 15f, BRAND, true)
-                val minus = button("−", false, 40) {
+                val label = text(if (sellable) "${top.name} · ${rub(top.priceRub)}" else "${top.name} — нет в кассе Эвотор", 15f, if (sellable) INK else HINT, false)
+                val qty = text("0", 15f, BRAND, true).apply { gravity = Gravity.CENTER; fontFeatureSettings = "tnum" }
+                val minus = button("−", false, 48) {
                     val n = (selected[top.id] ?: 0) - 1
                     if (n <= 0) selected.remove(top.id) else selected[top.id] = n
                     qty.text = "${selected[top.id] ?: 0}"
                 }
-                val plus = button("+", false, 40) {
+                val plus = button("+", false, 48) {
                     val n = (selected[top.id] ?: 0) + 1
                     if (n <= top.maxCount) {
                         selected[top.id] = n
                         qty.text = "$n"
                     }
                 }
+                if (!sellable) { minus.isEnabled = false; plus.isEnabled = false; minus.alpha = 0.4f; plus.alpha = 0.4f }
                 row.addView(label, LinearLayout.LayoutParams(0, WRAP, 1f))
-                row.addView(minus, LinearLayout.LayoutParams(dp(40), dp(40)))
-                row.addView(qty, LinearLayout.LayoutParams(dp(28), WRAP))
-                row.addView(plus, LinearLayout.LayoutParams(dp(40), dp(40)))
+                row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(48)))
+                row.addView(qty, LinearLayout.LayoutParams(dp(32), WRAP))
+                row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(48)))
                 box.addView(row)
             }
         }
@@ -572,7 +579,7 @@ class MainActivity : AppCompatActivity() {
             p.toppings.forEach { top ->
                 val n = selected[top.id] ?: return@forEach
                 if (n <= 0) return@forEach
-                val uuid = top.evotorUuid?.takeIf { it.isNotBlank() } ?: "mod:${top.id}"
+                val uuid = top.evotorUuid?.takeIf { it.isNotBlank() } ?: return@forEach
                 Cart.add(CartLine(uuid, "${top.name} (${p.name})", top.priceRub, BigDecimal(n), null, false))
             }
             onCartChanged()
@@ -587,6 +594,14 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(box)
         dialog.setContentView(scroll)
         dialog.show()
+    }
+
+    private fun toppingGroupLabel(key: String): String = when (key.lowercase()) {
+        "milk" -> "Молоко"
+        "syrup" -> "Сиропы"
+        "topping" -> "Добавки"
+        "extra", "other" -> "Другое"
+        else -> key
     }
 
     /** Корзина изменилась: обновить плашки «×N» (payload, без перебинда) и нижнюю полосу. */
@@ -851,8 +866,14 @@ class MainActivity : AppCompatActivity() {
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
     }
 
+    /** Защита от двойного нажатия «Оплатить»: второй вызов, пока первый не завершился, игнорируется. */
+    private var paying = false
+
     private fun pay(free: Boolean, spend: Boolean, amount: Long) {
+        if (paying) return
+        paying = true
         SellLauncher.openSellReceipt(this, free, spend, amount) { ok, msg ->
+            paying = false
             if (ok) {
                 PendingPayment.set(this)
                 screen = Screen.PAYMENT
@@ -929,6 +950,8 @@ class MainActivity : AppCompatActivity() {
         try { val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN); if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED) else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f) } catch (_: Throwable) {}
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
         if (::root.isInitialized && PendingPayment.active(this) && screen != Screen.PAYMENT) { screen = Screen.PAYMENT; safeRender() }
+        // Каталог/цены не должны «залёживаться» на кассе, которая днями не закрывает приложение.
+        if (::root.isInitialized && products.isNotEmpty() && System.currentTimeMillis() - catalogLoadedAt > CATALOG_STALE_MS) loadProducts()
     }
 
     override fun onPause() { try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}; super.onPause() }
@@ -945,6 +968,7 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val TAG = "SixthCup"
         const val SEARCH_MIN_ITEMS = 12
+        const val CATALOG_STALE_MS = 5 * 60 * 1000L
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         val BRAND = UiKit.BRAND

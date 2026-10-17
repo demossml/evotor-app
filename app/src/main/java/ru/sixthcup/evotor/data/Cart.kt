@@ -26,6 +26,14 @@ object Cart {
     private const val KEY_AT = "at"
     private const val TTL_MS = 30 * 60 * 1000L
 
+    /**
+     * Синтетические id добавок, у которых нет товара в номенклатуре Эвотор (backend не прислал evotorUuid).
+     * Такая позиция не может попасть в фискальный чек, поэтому в корзину её класть нельзя: иначе гость видит
+     * и «платит» сумму, которой в чеке нет.
+     */
+    const val SYNTHETIC_PREFIX = "mod:"
+    fun isSellable(productUuid: String): Boolean = !productUuid.startsWith(SYNTHETIC_PREFIX)
+
     private val lines = linkedMapOf<String, CartLine>()
     private var ctx: Context? = null
 
@@ -44,6 +52,7 @@ object Cart {
     fun clear() { lines.clear(); save() }
 
     fun add(line: CartLine) {
+        if (!isSellable(line.productUuid)) return
         val old = lines[line.productUuid]
         if (old == null) lines[line.productUuid] = line
         else lines[line.productUuid] = old.copy(quantity = old.quantity.add(line.quantity))
@@ -93,7 +102,8 @@ object Cart {
                     quantity = BigDecimal(o.getString("q")), recipe = if (o.isNull("r")) null else o.getString("r"),
                     freeEligible = o.optBoolean("f"),
                 )
-                lines[line.productUuid] = line
+                // Корзины, сохранённые старой версией, могли содержать «mod:…» — в чек они не уходят.
+                if (isSellable(line.productUuid)) lines[line.productUuid] = line
             }
         } catch (_: Throwable) {
             lines.clear()
