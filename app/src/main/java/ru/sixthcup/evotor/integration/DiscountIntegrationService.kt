@@ -30,6 +30,17 @@ class DiscountIntegrationService : IntegrationService() {
                 try {
                     val info = CardSession.get(applicationContext)
                     if (info == null || info.code.isEmpty()) {
+                        // Без карты гостя остаётся только выгода комбо — она не требует резерва.
+                        val comboOnly = CheckoutChoice.comboRub(applicationContext)
+                        if (comboOnly.signum() > 0) {
+                            val grossNoCard = receiptUnitPrices().fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
+                            if (grossNoCard.signum() > 0) {
+                                callback.onResult(
+                                    ReceiptDiscountEventResult(comboOnly.min(grossNoCard), null, emptyList(), null),
+                                )
+                                return
+                            }
+                        }
                         callback.skip()
                         return
                     }
@@ -43,7 +54,9 @@ class DiscountIntegrationService : IntegrationService() {
                     val calc = DiscountCalc.compute(gross, eligibleUnitPrices, reserved, CheckoutChoice.free(applicationContext), info.freeAvailable, requestedCb, info.cashbackKopecks)
                     val freeDiscount = calc.free
                     val cbRub = calc.cashback
-                    val total = calc.total
+                    // Скидка комбо — фиксированная выгода набора (позиции в чеке реальные, цена полная).
+                    val comboRub = CheckoutChoice.comboRub(applicationContext)
+                    val total = calc.total.add(comboRub).min(gross)
                     val sc = CardSession.sc(info, freeDiscount.signum() > 0, cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong())
                     callback.onResult(
                         ReceiptDiscountEventResult(total, SetExtra(JSONObject().put("sc", sc)), emptyList(), null),

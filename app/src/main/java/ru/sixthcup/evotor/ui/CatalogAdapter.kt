@@ -213,7 +213,7 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         val box = itemView as LinearLayout
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(0, 0, 0, 0)
-        box.background = UiKit.rounded(d, UiKit.WHITE, 18, UiKit.LINE)
+        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
         box.isClickable = true
         box.isFocusable = true
         box.contentDescription = "Товар меню"
@@ -233,7 +233,7 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         }
         thumb.setCorner(0)
         photoBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
-        val photoH = dp(96)
+        val photoH = dp(80)
         box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
         thumbPx = (photoH * 2).coerceIn(200, 400)
 
@@ -241,7 +241,7 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         flag.textSize = 7f
         flag.setTypeface(null, Typeface.BOLD)
         flag.setTextColor(UiKit.INK_2)
-        flag.setPadding(dp(6), dp(3), dp(6), dp(3))
+        flag.setPadding(dp(4), dp(2), dp(4), dp(2))
         flag.background = UiKit.rounded(d, 0xE0FFFFFF.toInt(), 5, null)
         flag.visibility = View.GONE
         photoBox.addView(flag, FrameLayout.LayoutParams(WRAP, WRAP).apply {
@@ -251,20 +251,20 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
 
         // tile-qty top-right (ink, not brand pill)
         qty = TextView(ctx).apply {
-            textSize = 9f
+            textSize = 8.5f
             setTypeface(null, Typeface.BOLD)
             setTextColor(UiKit.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(6), 0, dp(6), 0)
-            minWidth = dp(25)
-            minHeight = dp(19)
+            setPadding(dp(5), 0, dp(5), 0)
+            minWidth = dp(22)
+            minHeight = dp(17)
             background = UiKit.rounded(d, UiKit.INK, 6, null)
             visibility = View.GONE
             elevation = 2f * d
         }
-        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(19)).apply {
+        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(17)).apply {
             gravity = Gravity.TOP or Gravity.END
-            topMargin = dp(7); rightMargin = dp(7)
+            topMargin = dp(5); rightMargin = dp(5)
         })
 
         // tile-controls bottom-right of media
@@ -294,33 +294,33 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         // store refs for visibility
         minusBtn.text = "−"
         plusBtn.text = "+"
-        controls.addView(minus, LinearLayout.LayoutParams(dp(30), dp(30)).apply { rightMargin = dp(4) })
-        controls.addView(plus, LinearLayout.LayoutParams(dp(30), dp(30)))
+        controls.addView(minus, LinearLayout.LayoutParams(dp(26), dp(26)).apply { rightMargin = dp(3) })
+        controls.addView(plus, LinearLayout.LayoutParams(dp(26), dp(26)))
         // keep field refs for bindQty visibility of minus
         minusBtn.tag = minus
         plusBtn.tag = plus
         photoBox.addView(controls, FrameLayout.LayoutParams(WRAP, WRAP).apply {
             gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = dp(7); rightMargin = dp(7)
+            bottomMargin = dp(5); rightMargin = dp(5)
         })
 
         // tile-body
         val body = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(9))
+            setPadding(dp(10), dp(7), dp(10), dp(8))
         }
-        name.textSize = 12.5f
+        name.textSize = 12f
         name.setTypeface(null, Typeface.BOLD)
         name.setTextColor(UiKit.INK)
         name.maxLines = 1
         name.ellipsize = TextUtils.TruncateAt.END
         body.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
-        meta.textSize = 9f
+        meta.textSize = 8.5f
         meta.setTextColor(UiKit.MUTED)
         meta.maxLines = 1
         meta.ellipsize = TextUtils.TruncateAt.END
         body.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(1) })
-        price.textSize = 14f
+        price.textSize = 13.5f
         price.setTypeface(null, Typeface.BOLD)
         price.setTextColor(UiKit.INK)
         price.maxLines = 1
@@ -434,7 +434,7 @@ private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.Vie
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), 0, dp(4), 0)
         }
-        name.textSize = 11.5f
+        name.textSize = 12f
         name.setTypeface(null, Typeface.BOLD)
         name.setTextColor(UiKit.INK)
         name.maxLines = 1
@@ -499,7 +499,7 @@ private class SkeletonVH(ctx: Context) : RecyclerView.ViewHolder(LinearLayout(ct
         box.orientation = LinearLayout.HORIZONTAL
         box.gravity = Gravity.CENTER_VERTICAL
         box.setPadding(dp(8), dp(6), dp(8), dp(6))
-        box.background = UiKit.rounded(d, UiKit.WHITE, 14, UiKit.LINE)
+        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
         box.layoutParams = RecyclerView.LayoutParams(MATCH, dp(64)).apply { bottomMargin = dp(6) }
         box.addView(View(ctx).apply { background = UiKit.rounded(d, UiKit.SKELETON, 26, null) }, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(10) })
         val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }

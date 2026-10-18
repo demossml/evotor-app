@@ -45,6 +45,16 @@ object UiKit {
     val SKELETON = 0xFFE8E4DE.toInt()
     val BAD = DANGER
 
+    // Shape — base.css: --r-s 10 / --r-m 14 / --r-l 20 / --r-xl 26 / --r-pill
+    const val R_S = 10
+    const val R_M = 14
+    const val R_L = 20
+    const val R_XL = 26
+    const val R_PILL = 999
+
+    /** Тап-зона пальцем по правилам index: не меньше 48 dp. */
+    const val TAP = 48
+
     fun rub(v: BigDecimal): String {
         val s = v.setScale(2, RoundingMode.HALF_UP)
         return (if (s.remainder(BigDecimal.ONE).signum() == 0) s.toBigInteger().toString() else s.toPlainString()) + " ₽"
@@ -58,4 +68,42 @@ object UiKit {
             cornerRadius = radiusDp * density
             if (stroke != null) setStroke(maxOf(1, density.toInt()), stroke)
         }
+
+    /**
+     * Прогресс чашек `.lc-dots` из index: `goal` сегментов, заполнены `cups`,
+     * последний незаполненный рисуется пунктиром как «подарок впереди».
+     */
+    fun loyaltyDots(
+        context: android.content.Context,
+        cups: Int,
+        goal: Int,
+        onColor: Int = PAGE,
+        offColor: Int = 0x38000000,
+        giftOutline: Int = 0x8CF6F3EE.toInt(),
+    ): android.widget.LinearLayout {
+        val density = context.resources.displayMetrics.density
+        val row = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+        }
+        val filledCount = minOf(maxOf(cups, 0), goal)
+        repeat(maxOf(goal, 1)) { i ->
+            val on = i < filledCount
+            val gift = i == goal - 1 && !on
+            val seg = View(context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 99 * density
+                    setColor(if (on) onColor else offColor)
+                    if (gift) setStroke(maxOf(1, density.toInt()), giftOutline)
+                }
+            }
+            row.addView(
+                seg,
+                android.widget.LinearLayout.LayoutParams(0, (6 * density).toInt(), 1f).apply {
+                    if (i > 0) marginStart = (5 * density).toInt()
+                },
+            )
+        }
+        return row
+    }
 }

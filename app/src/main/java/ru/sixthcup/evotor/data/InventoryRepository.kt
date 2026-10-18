@@ -30,7 +30,29 @@ data class CatalogProduct(
     val toppings: List<Topping> = emptyList(),
     val upsell: List<UpsellItem> = emptyList(),
     val countsAsCupServer: Boolean? = null,
-)
+    /** `#group=` — варианты одного напитка (размеры) собираются в одну плитку. */
+    val variantGroup: String? = null,
+    /** `#size=` — объём варианта в мл. */
+    val sizeMl: Int? = null,
+    /** `#opt=` — товар-опция: milk | syrup | sugar | extra. */
+    val optGroup: String? = null,
+    /** `#optlabel=` — подпись опции, если отличается от названия товара. */
+    val optLabel: String? = null,
+    /** `#default` — вариант, который показывается на плитке. */
+    val defaultVariant: Boolean = false,
+    /** Есть ли у позиции выбор опций (объём/молоко/сироп). Для выпечки — false. */
+    val supportsMods: Boolean = false,
+    /** `#drink=` — uuid напитка в составе комбо. */
+    val comboDrinkUuid: String? = null,
+    /** `#food=` — uuid выпечки в составе комбо. */
+    val comboFoodUuid: String? = null,
+) {
+    /** Товар-определение комбо: продаётся не сам, а набором из двух позиций со скидкой. */
+    val isComboDefinition: Boolean get() = comboDrinkUuid != null && comboFoodUuid != null
+
+    /** Название для опции: подпись из `#optlabel=` или имя товара. */
+    val optionLabel: String get() = optLabel ?: name
+}
 
 data class Topping(
     val id: Int,
@@ -89,12 +111,22 @@ object InventoryRepository {
         }
         return raw.map { p ->
             val g = p.parentUuid?.let { groups[it] }
+            val drink = FreeCupRules.isEligible(p.name, g, p.description)
             p.copy(
                 groupName = g,
-                freeEligible = FreeCupRules.isEligible(p.name, g, p.description),
+                freeEligible = drink,
+                // #mods/#nomods из админки перекрывают эвристику «напиток/еда».
+                supportsMods = ProductMarkers.modsFlag(p.description) ?: drink,
                 featured = ProductMarkers.isFocus(p.description) || ProductMarkers.isCombo(p.name, p.description),
                 isCombo = ProductMarkers.isCombo(p.name, p.description),
                 oldPriceRub = ProductMarkers.oldPriceRub(p.description),
+                variantGroup = ProductMarkers.variantGroup(p.description),
+                sizeMl = ProductMarkers.sizeMl(p.description),
+                optGroup = ProductMarkers.optGroup(p.description),
+                optLabel = ProductMarkers.optLabel(p.description),
+                defaultVariant = ProductMarkers.isDefaultVariant(p.description),
+                comboDrinkUuid = ProductMarkers.comboRefs(p.description)?.first,
+                comboFoodUuid = ProductMarkers.comboRefs(p.description)?.second,
                 // Рецепт без служебных меток (#focus/#old=…); description остаётся «сырым» для FreeCupRules.
                 recipe = ProductMarkers.cleanDescription(p.description),
             )

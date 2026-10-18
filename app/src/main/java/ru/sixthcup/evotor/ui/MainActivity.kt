@@ -45,9 +45,13 @@ import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLine
+import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.CatalogCache
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.Combo
+import ru.sixthcup.evotor.data.Combos
+import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.net.LoyaltyApi
@@ -73,14 +77,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var orderPane: LinearLayout
 
     private var products: List<CatalogProduct> = emptyList()
+    /** Витрина: один напиток = одна плитка, размеры — вариантами внутри item-sheet. */
+    private var variantModel: DrinkVariants.Model = DrinkVariants.Model()
+    /** Комбо из номенклатуры (товар-определение с `#drink=`/`#food=`). */
+    private var combos: List<Combo> = emptyList()
     private var upsellDefault: List<UpsellItem> = emptyList()
     private var productsLoading = false
     private var productsError = false
     private var catalogGen = 0
-    private var query = ""
     private var group: String? = null
     /** UI only (index order-type); not sent to Evotor. */
     private var orderType: String = "С собой"
+    /** Рекомендации показываем один раз за заказ (index: state.recShown). */
+    private var recShown = false
 
     private var screen: Screen = Screen.ORDER
     /** shift-page sub-view: home | ops | timesheet | team | stats | breaks | close */
@@ -104,7 +113,6 @@ class MainActivity : AppCompatActivity() {
     private var lastCardCode: String? = null   // только в памяти процесса, на диск не пишется
     private var lastCardLabel: String? = null
 
-    private var searchView: EditText? = null
     private var chipsScroll: HorizontalScrollView? = null
     private var chipsRow: LinearLayout? = null
     private val chipViews = ArrayList<Pair<String?, TextView>>()
@@ -117,6 +125,7 @@ class MainActivity : AppCompatActivity() {
     private var cartButton: Button? = null
     private var cartBarRoot: View? = null
     private var emptyCartBarRoot: View? = null
+    private var repeatOrderView: View? = null
     private var cartCountView: TextView? = null
     private var cartTotalView: TextView? = null
     private var cartSubView: TextView? = null
@@ -212,6 +221,12 @@ class MainActivity : AppCompatActivity() {
     private var catalogLoadedAt = 0L
     private var catalogAttemptAt = 0L
 
+    private fun setProducts(list: List<CatalogProduct>) {
+        products = list
+        variantModel = DrinkVariants.build(list)
+        combos = Combos.from(list)
+    }
+
     private fun loadProducts() {
         catalogAttemptAt = System.currentTimeMillis()
         val gen = ++catalogGen
@@ -238,7 +253,8 @@ class MainActivity : AppCompatActivity() {
                     lastEnrich = known
                     upsellDefault = known.upsellDefault
                 }
-                if (first == null) { if (products.isEmpty()) productsError = true } else products = first
+                if (first == null) { if (products.isEmpty()) productsError = true } else setProducts(first)
+                CheckoutChoice.saveCombo(this, comboDiscountRub())
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
             if (inv == null) return@thread
@@ -250,6 +266,8 @@ class MainActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 lastEnrich = enrich
                 products = merged
+                variantModel = DrinkVariants.build(merged)
+                combos = Combos.from(merged)
                 upsellDefault = enrich.upsellDefault
                 val withTop = merged.count { it.toppings.isNotEmpty() }
                 val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
@@ -272,8 +290,9 @@ class MainActivity : AppCompatActivity() {
         dismissSheets()
         root.removeAllViews(); topBar.removeAllViews(); bottomBar.removeAllViews(); orderPane.removeAllViews()
         searchRunnable?.let { handler.removeCallbacks(it) }
-        searchView = null; chipsScroll = null; chipsRow = null; chipViews.clear(); groupsCache = emptyList()
-        recycler = null; adapter = null; payButton = null; cartButton = null; cartBarRoot = null; emptyCartBarRoot = null; cartCountView = null; cartTotalView = null; cartSubView = null
+        chipsScroll = null; chipsRow = null; chipViews.clear(); groupsCache = emptyList()
+        recycler = null; adapter = null; payButton = null; cartButton = null; cartBarRoot = null; emptyCartBarRoot = null
+        repeatOrderView = null; cartCountView = null; cartTotalView = null; cartSubView = null
         cartSidebar = null; cartSidebarRows = null; cartSidebarTotal = null; wideLayout = false
         scroll.visibility = View.VISIBLE; orderPane.visibility = View.GONE
         when (screen) {
@@ -648,12 +667,6 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(catalogColumn, LinearLayout.LayoutParams(0, MATCH, 1f))
 
-        // searchrow 1:1 index: [.search icon+input+clear] [scan-btn]
-        // scan-btn → openGuest (как в app.js: $("#scanBtn").addEventListener("click", openGuest))
-        catalogColumn.addView(buildSearchRow(), LinearLayout.LayoutParams(MATCH, dp(48)).apply {
-            topMargin = dp(4); bottomMargin = dp(8)
-        })
-
         val strip = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false; clipToPadding = false; overScrollMode = View.OVER_SCROLL_NEVER
         }
@@ -667,20 +680,27 @@ class MainActivity : AppCompatActivity() {
             onInfo = { showRecipe(it) },
             onRetry = { loadProducts() },
             onInc = { prod ->
-                if (prod.toppings.isNotEmpty()) showToppingsSheet(prod)
+                // Комбо нельзя добавить одной позицией: набор собирается из реальных товаров.
+                val combo = combos.firstOrNull { it.id == prod.uuid }
+                if (combo != null) showComboSheet(combo)
+                else if (variantModel.hasChoice(prod)) showItemSheet(prod)
                 else {
                     Cart.add(CartLine(prod.uuid, prod.name, prod.priceRub, BigDecimal.ONE, prod.recipe, prod.freeEligible))
                     onCartChanged()
                 }
             },
             onDec = { prod ->
-                Cart.decProduct(prod.uuid)
-                onCartChanged()
+                // У комбо плюс/минус не трогаем: набор удаляется целиком из чека.
+                if (combos.none { it.id == prod.uuid }) {
+                    Cart.decProduct(prod.uuid)
+                    onCartChanged()
+                }
             },
         ))
         adapter = ad
         val screenWidth = resources.configuration.screenWidthDp
-        val columns = if (screenWidth >= 800) 3 else 2
+        // Две колонки на 5″, три на 7″/10″: крупнее, чем в 4-колоночном варианте, но мельче исходных.
+        val columns = if (screenWidth >= 520) 3 else 2
         val rv = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@MainActivity, columns).also { gm ->
                 gm.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
@@ -712,7 +732,7 @@ class MainActivity : AppCompatActivity() {
 
         // cartbar 1:1 index (.cartbar / .empty-cartbar)
         bottomBar.setBackgroundColor(PAGE)
-        bottomBar.setPadding(dp(11), dp(6), dp(11), dp(10))
+        bottomBar.setPadding(dp(11), dp(2), dp(11), dp(4))
         bottomBar.elevation = 0f
         bottomBar.addView(buildCartBar(card), LinearLayout.LayoutParams(MATCH, WRAP))
         updateBar()
@@ -761,12 +781,11 @@ class MainActivity : AppCompatActivity() {
                 rows.addView(divider, LinearLayout.LayoutParams(MATCH, dp(1)))
             }
         }
-        cartSidebarTotal?.text = "Итого  ${rub(Cart.gross())}"
+        cartSidebarTotal?.text = "Итого  ${rub(cartTotalRub())}"
     }
 
     /** Поиск/чипы (если набор групп изменился) + строки списка. */
     private fun refreshChromeAndRows(toTop: Boolean) {
-        searchView?.visibility = if (products.size > SEARCH_MIN_ITEMS) View.VISIBLE else View.GONE
         // Группы: из Evotor parent + из merge categoryName (6.7).
         val groups = products.mapNotNull { it.groupName?.takeIf { n -> n.isNotBlank() } }
             .distinct()
@@ -782,7 +801,8 @@ class MainActivity : AppCompatActivity() {
     private fun rebuildChips() {
         val row = chipsRow ?: return
         row.removeAllViews(); chipViews.clear()
-        if (group != null && group !in groupsCache) group = null
+        if (group == GROUP_COMBOS && combos.isEmpty()) group = null
+        if (group != null && group != GROUP_COMBOS && group !in groupsCache) group = null
         fun add(label: String, value: String?) {
             val tv = TextView(this).apply {
                 text = label
@@ -800,9 +820,11 @@ class MainActivity : AppCompatActivity() {
             chipViews.add(value to tv)
         }
         add("Всё", null)
+        if (combos.isNotEmpty()) add("Комбо", GROUP_COMBOS)
         groupsCache.forEach { add(it, it) }
         updateChipStyles()
-        chipsScroll?.visibility = if (groupsCache.isEmpty()) View.GONE else View.VISIBLE
+        chipsScroll?.visibility =
+            if (groupsCache.isEmpty() && combos.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private fun updateChipStyles() {
@@ -828,13 +850,19 @@ class MainActivity : AppCompatActivity() {
             productsError -> listOf(CatalogRow.State("err", "Каталог не загрузился.", true, "Повторить"))
             else -> listOf(CatalogRow.State("empty", "В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру.", true, null))
         }
-        val q = if (products.size > SEARCH_MIN_ITEMS) query.trim() else ""
-        val filtered = products.filter { (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true)) }
-        if (filtered.isEmpty()) {
+        val tiles = variantModel.tiles
+        val q = ""
+        // Комбо показываются плитками вместе с меню или отдельной категорией — как в index.
+        val comboTiles = if (combos.isNotEmpty() && q.isEmpty() && (group == null || group == GROUP_COMBOS))
+            combos.map { Combos.tile(it, products) } else emptyList()
+        val filtered = if (group == GROUP_COMBOS) emptyList() else tiles.filter {
+            (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true))
+        }
+        if (filtered.isEmpty() && comboTiles.isEmpty()) {
             val msg = if (q.isNotEmpty()) "Ничего не найдено по «$q»" else "В этой категории пока нет позиций"
             return listOf(CatalogRow.State("nf", msg, false, null))
         }
-        val rows = ArrayList<CatalogRow>(filtered.size + 3)
+        val rows = ArrayList<CatalogRow>(filtered.size + comboTiles.size + 4)
         if (group == null && q.isEmpty()) {
             val focus = filtered.filter { it.featured }.take(8)
             if (focus.isNotEmpty()) {
@@ -843,79 +871,89 @@ class MainActivity : AppCompatActivity() {
                 rows.add(CatalogRow.Header("Всё меню"))
             }
         }
+        if (comboTiles.isNotEmpty()) {
+            if (group == GROUP_COMBOS) rows.add(CatalogRow.Header("Комбо"))
+            comboTiles.forEach { rows.add(CatalogRow.Item(it)) }
+        }
         filtered.forEach { rows.add(CatalogRow.Item(it)) }
         return rows
     }
 
     private fun onProductTap(p: CatalogProduct) {
-        // Схему добавок показываем всегда, если backend её прислал (даже без evotorUuid — строки будут «нет в кассе»).
-        if (p.toppings.isNotEmpty()) showToppingsSheet(p)
+        combos.firstOrNull { it.id == p.uuid }?.let { showComboSheet(it); return }
+        // Есть выбор объёма/молока/сиропа — открываем item-sheet; иначе сразу в чек.
+        if (variantModel.hasChoice(p)) showItemSheet(p)
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
         }
     }
+    /**
+     * item-sheet 1:1 index: hero → название+цена → описание → теги → «в чеке уже N» →
+     * группы опций (Объём / Молоко / Сироп / Сахар / Добавки) → qty + «В чек · сумма».
+     *
+     * Цена каждой опции — PRICE_OUT реального товара Эвотор (никаких дельт на клиенте):
+     * иначе чек разойдётся с номенклатурой, а склад модификаторов не спишется.
+     * Опция без evotorUuid и с ценой > 0 недоступна — её нельзя провести фискально.
+     */
+    /**
+     * Схема опций: приоритет — товары Эвотор с метками `#opt=`;
+     * если их нет, берём топпинги из `/api/devices/catalog` (совместимость с текущим каталогом).
+     */
+    private fun optionsFor(p: CatalogProduct): OptionPicker.Opts {
+        val evotor = variantModel.options
+        if (!evotor.isEmpty) {
+            fun map(list: List<CatalogProduct>) = list.map {
+                OptionPicker.Opt(it.uuid, it.optionLabel, it.priceRub, it.uuid, it.defaultVariant)
+            }
+            return OptionPicker.Opts(
+                milk = map(evotor.milk),
+                syrup = map(evotor.syrup),
+                sugar = map(evotor.sugar),
+                extra = map(evotor.extra),
+            )
+        }
+        val byGroup = p.toppings.groupBy { it.groupKey.lowercase() }
+        fun toOpts(key: String) = byGroup[key].orEmpty().map {
+            OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() })
+        }
+        return OptionPicker.Opts(
+            milk = toOpts("milk"),
+            syrup = toOpts("syrup"),
+            sugar = toOpts("sugar"),
+            extra = toOpts("topping") + toOpts("extra") + toOpts("other"),
+        )
+    }
 
     /**
-     * item-sheet 1:1 index: hero, intro (name+price+desc), opt groups from toppings,
-     * foot qty + «В чек · sum». Логика корзины/Evotor uuid — без изменений.
+     * item-sheet 1:1 index: hero → название+цена → описание → теги → «в чеке уже N» →
+     * опции → qty + «В чек · сумма».
      */
-    private fun showToppingsSheet(p: CatalogProduct) {
+    private fun showItemSheet(p: CatalogProduct) {
         dismissSheets()
+        val variants = variantModel.variantsOf(p)
+        val opts = if (p.supportsMods) optionsFor(p) else OptionPicker.Opts()
+
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-
-        // item-hero
-        val hero = FrameLayout(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xFFF7F2E9.toInt(), 0xFFECE3D6.toInt())
-            )
-        }
-        val photo = ThumbView(this).apply { setCorner(0); bind(p.name, p.imageUrl, 480) }
-        hero.addView(photo, FrameLayout.LayoutParams(MATCH, MATCH))
-        if (p.featured || p.isCombo) {
-            val flag = TextView(this).apply {
-                text = if (p.isCombo) "КОМБО" else "ХИТ"
-                textSize = 7f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(UiKit.INK_2)
-                setPadding(dp(6), dp(3), dp(6), dp(3))
-                background = rounded(0xEBFFFFFF.toInt(), 5, null)
-            }
-            hero.addView(flag, FrameLayout.LayoutParams(WRAP, WRAP).apply {
-                gravity = Gravity.TOP or Gravity.START
-                topMargin = dp(12); leftMargin = dp(16)
-            })
-        }
-        val close = TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
-            background = rounded(0xE6FFFFFF.toInt(), 22, null)
-            isClickable = true
-            contentDescription = "Закрыть"
-            setOnClickListener { dialog.dismiss() }
-        }
-        hero.addView(close, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
-            gravity = Gravity.TOP or Gravity.END
-            topMargin = dp(10); rightMargin = dp(12)
-        })
-        root.addView(hero, LinearLayout.LayoutParams(MATCH, dp(128)))
+        root.addView(buildItemHero(p) { dialog.dismiss() }, LinearLayout.LayoutParams(MATCH, dp(150)))
 
         val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(16))
+            setPadding(dp(16), dp(14), dp(16), dp(16))
         }
         scroll.addView(body)
         root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        // intro
+        val priceView = TextView(this).apply {
+            textSize = 17f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+        }
         val titleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.TOP
@@ -926,43 +964,34 @@ class MainActivity : AppCompatActivity() {
             setTypeface(null, Typeface.BOLD)
             setTextColor(INK)
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        titleRow.addView(TextView(this).apply {
-            text = rub(p.priceRub)
-            textSize = 17f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
+        titleRow.addView(priceView)
         body.addView(titleRow)
-        val desc = p.recipe?.takeIf { it.isNotBlank() }
-        if (desc != null) {
+
+        p.recipe?.takeIf { it.isNotBlank() }?.let { desc ->
             body.addView(TextView(this).apply {
                 text = desc
                 textSize = 10.5f
                 setTextColor(UiKit.MUTED)
-                setPadding(0, dp(3), 0, 0)
+                setLineSpacing(0f, 1.25f)
+                setPadding(0, dp(4), 0, 0)
             })
         }
-        val tags = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(7), 0, 0)
-        }
-        listOfNotNull(
-            p.groupName?.takeIf { it.isNotBlank() },
-            if (p.freeEligible) "6.7" else null,
-        ).forEach { t ->
-            tags.addView(TextView(this).apply {
-                text = t.uppercase()
-                textSize = 8f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(UiKit.MUTED)
-                setPadding(dp(5), dp(2), dp(5), dp(2))
-                background = rounded(WHITE, 4, LINE)
-            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(5) })
-        }
+        val tags = itemTags(p)
         if (tags.childCount > 0) body.addView(tags)
 
-        val selected = linkedMapOf<Int, Int>()
-        var qty = 1
+        val existing = Cart.all()
+            .filter { it.productUuid in variants.map { v -> v.uuid } }
+            .fold(BigDecimal.ZERO) { acc, l -> acc.add(l.quantity) }
+        if (existing.signum() > 0) {
+            body.addView(TextView(this).apply {
+                text = "В чеке уже $existing порц. Новая сохранится отдельной позицией."
+                textSize = 10f
+                setTextColor(UiKit.INK_2)
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = rounded(UiKit.SURFACE_2, 12, LINE)
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
+        }
+
         val addBtn = TextView(this).apply {
             textSize = 12.5f
             setTypeface(null, Typeface.BOLD)
@@ -980,74 +1009,20 @@ class MainActivity : AppCompatActivity() {
             setTextColor(INK)
             minWidth = dp(28)
         }
+        var qty = 1
 
-        fun liveTotal(): BigDecimal {
-            val add = p.toppings.fold(BigDecimal.ZERO) { s, top ->
-                s.add(top.priceRub.multiply(BigDecimal(selected[top.id] ?: 0)))
-            }
-            return p.priceRub.add(add).multiply(BigDecimal(qty))
-        }
-        fun paintTotal() {
-            addBtn.text = "В чек · ${rub(liveTotal())}"
-        }
-        paintTotal()
+        val picker = OptionPicker(this)
+        picker.bind(variants, opts, p)
+        body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        val groups = p.toppings.groupBy { it.groupKey }
-        groups.forEach { (gk, list) ->
-            body.addView(TextView(this).apply {
-                text = toppingGroupLabel(gk)
-                textSize = 12f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(INK)
-                setPadding(0, dp(15), 0, dp(7))
-            })
-            list.forEach { top ->
-                val sellable = !top.evotorUuid.isNullOrBlank()
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(6), 0, dp(6))
-                }
-                val label = TextView(this).apply {
-                    text = if (sellable) {
-                        if (top.priceRub.signum() > 0) "${top.name} · +${rub(top.priceRub)}" else top.name
-                    } else {
-                        "${top.name} — нет в кассе Эвотор"
-                    }
-                    textSize = 13f
-                    setTextColor(if (sellable) INK else UiKit.MUTED)
-                }
-                val toggle = TextView(this).apply {
-                    gravity = Gravity.CENTER
-                    textSize = 16f
-                    minWidth = dp(44)
-                    minHeight = dp(44)
-                }
-                fun paint() {
-                    val on = (selected[top.id] ?: 0) > 0
-                    toggle.text = if (on) "✓" else "+"
-                    toggle.setTextColor(if (on) WHITE else UiKit.INK_2)
-                    toggle.background = rounded(if (on) INK else WHITE, 12, if (on) INK else LINE)
-                }
-                paint()
-                if (sellable) {
-                    toggle.setOnClickListener {
-                        if ((selected[top.id] ?: 0) > 0) selected.remove(top.id)
-                        else selected[top.id] = 1
-                        paint()
-                        paintTotal()
-                    }
-                } else {
-                    toggle.alpha = 0.35f
-                    toggle.isEnabled = false
-                }
-                row.addView(label, LinearLayout.LayoutParams(0, WRAP, 1f))
-                row.addView(toggle, LinearLayout.LayoutParams(dp(44), dp(44)))
-                body.addView(row)
-            }
+        fun paint() {
+            priceView.text = rub(picker.unitPrice())
+            addBtn.text = "В чек · ${rub(picker.unitPrice().multiply(BigDecimal(qty)))}"
+            qtyLabel.text = qty.toString()
         }
+        picker.onChange = { paint() }
+        paint()
 
-        // foot: qty + add
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1069,27 +1044,35 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { act() }
         }
         qtyWrap.addView(qBtn("−") {
-            if (qty > 1) { qty -= 1; qtyLabel.text = qty.toString(); paintTotal() }
+            if (qty > 1) { qty -= 1; paint() }
         }, LinearLayout.LayoutParams(dp(44), dp(48)))
         qtyWrap.addView(qtyLabel, LinearLayout.LayoutParams(WRAP, dp(48)))
         qtyWrap.addView(qBtn("+") {
-            if (qty < 99) { qty += 1; qtyLabel.text = qty.toString(); paintTotal() }
+            if (qty < 99) { qty += 1; paint() }
         }, LinearLayout.LayoutParams(dp(44), dp(48)))
         foot.addView(qtyWrap, LinearLayout.LayoutParams(WRAP, dp(48)).apply { rightMargin = dp(10) })
         foot.addView(addBtn, LinearLayout.LayoutParams(0, dp(50), 1f))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
         addBtn.setOnClickListener {
-            val config = selected.filterValues { it > 0 }.toSortedMap()
-            val cartKey = if (config.isEmpty()) p.uuid
-            else p.uuid + "#mods:" + config.entries.joinToString(",") { "${it.key}x${it.value}" }
+            val variant = picker.selectedVariant ?: return@setOnClickListener
+            val signature = picker.signature().ifBlank { variant.uuid }
             repeat(qty) {
-                Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible, cartKey))
-                p.toppings.forEach { top ->
-                    val n = selected[top.id] ?: return@forEach
-                    if (n <= 0) return@forEach
-                    val uuid = top.evotorUuid?.takeIf { it.isNotBlank() } ?: return@forEach
-                    Cart.add(CartLine(uuid, "${top.name} (${p.name})", top.priceRub, BigDecimal(n), null, false))
+                Cart.add(
+                    CartLine(
+                        variant.uuid,
+                        variant.name,
+                        variant.priceRub,
+                        BigDecimal.ONE,
+                        picker.modsText(),
+                        variant.freeEligible,
+                        signature,
+                    ),
+                )
+                // Каждая опция с товаром Эвотор — отдельная позиция: склад и отчётность сходятся.
+                picker.chosen().forEach { o ->
+                    val uuid = o.evotorUuid?.takeIf { it.isNotBlank() } ?: return@forEach
+                    Cart.add(CartLine(uuid, "${o.label} (${variant.name})", o.price, BigDecimal.ONE))
                 }
             }
             onCartChanged()
@@ -1102,25 +1085,430 @@ class MainActivity : AppCompatActivity() {
         dialog.behavior.skipCollapsed = true
     }
 
-    private fun toppingGroupLabel(key: String): String = when (key.lowercase()) {
-        "milk" -> "Молоко"
-        "syrup" -> "Сиропы"
-        "topping" -> "Добавки"
-        "extra", "other" -> "Другое"
-        else -> key
+    /**
+     * combo-sheet 1:1 index: два фото со «+», название и цена набора, выгода,
+     * состав (напиток + выпечка), опции напитка, «В заказ · цена».
+     *
+     * В чек уходят две реальные позиции; выгода — скидкой на чек.
+     */
+    private fun showComboSheet(combo: Combo, editingGroupId: String? = null) {
+        dismissSheets()
+        val drink = products.firstOrNull { it.uuid == combo.drinkUuid }
+        val food = products.firstOrNull { it.uuid == combo.foodUuid }
+        if (drink == null || food == null) {
+            notice = "Комбо «${combo.name}»: в каталоге нет состава"
+            noticeKind = Kind.ERROR
+            safeRender()
+            return
+        }
+        val variants = variantModel.variantsOf(drink)
+        val opts = if (drink.supportsMods) optionsFor(drink) else OptionPicker.Opts()
+
+        val dialog = BottomSheetDialog(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(WHITE)
+        }
+
+        // ── hero: два фото + «+» ──
+        val hero = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xFFF7F2E9.toInt(), 0xFFECE3D6.toInt()),
+            )
+        }
+        val pics = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(18), dp(24), dp(18))
+        }
+        pics.addView(ThumbView(this).apply { setCorner(14); bind(drink.name, drink.imageUrl, 360) },
+            LinearLayout.LayoutParams(0, MATCH, 1f).apply { rightMargin = dp(10) })
+        pics.addView(TextView(this).apply {
+            text = "+"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(UiKit.MUTED)
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(24), WRAP))
+        pics.addView(ThumbView(this).apply { setCorner(14); bind(food.name, food.imageUrl, 360) },
+            LinearLayout.LayoutParams(0, MATCH, 1f).apply { leftMargin = dp(10) })
+        hero.addView(pics, FrameLayout.LayoutParams(MATCH, MATCH))
+        hero.addView(TextView(this).apply {
+            text = "КОМБО"
+            textSize = 7f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(UiKit.INK_2)
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            background = rounded(0xEBFFFFFF.toInt(), 5, null)
+        }, FrameLayout.LayoutParams(WRAP, WRAP).apply {
+            gravity = Gravity.TOP or Gravity.START
+            topMargin = dp(12); leftMargin = dp(16)
+        })
+        hero.addView(TextView(this).apply {
+            text = "✕"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(UiKit.INK_2)
+            background = rounded(0xE6FFFFFF.toInt(), 22, null)
+            isClickable = true
+            contentDescription = "Закрыть"
+            setOnClickListener { dialog.dismiss() }
+        }, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = dp(10); rightMargin = dp(12)
+        })
+        root.addView(hero, LinearLayout.LayoutParams(MATCH, dp(150)))
+
+        val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+        }
+        scroll.addView(body)
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        val priceView = TextView(this).apply {
+            textSize = 17f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+        }
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+        }
+        titleRow.addView(TextView(this).apply {
+            text = combo.name
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        titleRow.addView(priceView)
+        body.addView(titleRow)
+
+        combo.desc?.takeIf { it.isNotBlank() }?.let { d ->
+            body.addView(TextView(this).apply {
+                text = d
+                textSize = 10.5f
+                setTextColor(UiKit.MUTED)
+                setLineSpacing(0f, 1.25f)
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+
+        // выгода
+        val oldSum = combo.drinkBasePriceRub.add(combo.foodPriceRub)
+        body.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = rounded(UiKit.SUCCESS_SOFT, 12, null)
+            addView(TextView(this@MainActivity).apply {
+                text = "Выгода"
+                textSize = 10f
+                setTextColor(UiKit.SUCCESS)
+            }, LinearLayout.LayoutParams(0, WRAP, 1f))
+            addView(TextView(this@MainActivity).apply {
+                text = "−" + rub(combo.discountRub)
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(UiKit.SUCCESS)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = rub(oldSum)
+                textSize = 10f
+                setTextColor(UiKit.MUTED)
+                paintFlags = paintFlags or android.graphics.Paint.STRIKE_THRU_TEXT_FLAG
+            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(8) })
+        }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
+
+        // состав
+        val compHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(16), 0, dp(7))
+        }
+        compHeader.addView(TextView(this).apply {
+            text = "Состав комбо"
+            textSize = 9f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(UiKit.INK_2)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        compHeader.addView(TextView(this).apply {
+            text = "2 позиции в чеке"
+            textSize = 8.5f
+            setTextColor(UiKit.MUTED)
+        })
+        body.addView(compHeader)
+
+        fun compRow(p: CatalogProduct, detail: String?, price: BigDecimal) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(6), 0, dp(6))
+            }
+            row.addView(ThumbView(this).apply { setCorner(8); bind(p.name, p.imageUrl, 200) },
+                LinearLayout.LayoutParams(dp(34), dp(34)))
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(9), 0, dp(6), 0)
+            }
+            col.addView(TextView(this).apply {
+                text = p.name
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(INK)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            col.addView(TextView(this).apply {
+                text = detail.orEmpty()
+                textSize = 9f
+                setTextColor(UiKit.MUTED)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            row.addView(TextView(this).apply {
+                text = rub(price)
+                textSize = 11f
+                setTextColor(UiKit.INK_2)
+            })
+            body.addView(row)
+        }
+
+        val foodPrice = combo.foodPriceRub
+        compRow(food, null, foodPrice)
+
+        val picker = OptionPicker(this)
+        // При редактировании подставляем уже выбранный в чеке объём.
+        val editingDrink = editingGroupId?.let { gid ->
+            val uuids = variants.map { it.uuid }.toSet()
+            Cart.comboLines(gid).firstOrNull { it.productUuid in uuids }
+        }
+        val preselect = editingGroupId?.let { gid ->
+            Cart.comboLines(gid).filter { it.cartKey.contains("#opt:") }.map { it.productUuid }.toSet()
+        }.orEmpty()
+        picker.bind(
+            variants,
+            opts,
+            editingDrink?.let { line -> variants.firstOrNull { it.uuid == line.productUuid } } ?: drink,
+            preselect,
+        )
+        // строка напитка обновляется вместе с опциями
+        val drinkRowHost = LinearLayout(this)
+        body.addView(drinkRowHost, LinearLayout.LayoutParams(MATCH, WRAP))
+        fun paintDrinkRow() {
+            drinkRowHost.removeAllViews()
+            val v = picker.selectedVariant ?: drink
+            val detail = picker.modsText().ifBlank { null }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(6), 0, dp(6))
+            }
+            row.addView(ThumbView(this).apply { setCorner(8); bind(v.name, v.imageUrl, 200) },
+                LinearLayout.LayoutParams(dp(34), dp(34)))
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(9), 0, dp(6), 0)
+            }
+            col.addView(TextView(this).apply {
+                text = v.name
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(INK)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            if (detail != null) col.addView(TextView(this).apply {
+                text = detail
+                textSize = 9f
+                setTextColor(UiKit.MUTED)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            row.addView(TextView(this).apply {
+                text = rub(v.priceRub)
+                textSize = 11f
+                setTextColor(UiKit.INK_2)
+            })
+            drinkRowHost.addView(row)
+        }
+        paintDrinkRow()
+        body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val addBtn = TextView(this).apply {
+            textSize = 12.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(WHITE)
+            gravity = Gravity.CENTER
+            background = rounded(BRAND, 14, null)
+            isClickable = true
+            isFocusable = true
+        }
+        fun paint() {
+            val total = picker.unitPrice().add(foodPrice)
+            priceView.text = rub(total.subtract(combo.discountRub))
+            addBtn.text = (if (editingGroupId != null) "Сохранить · " else "В заказ · ") +
+                rub(total.subtract(combo.discountRub))
+        }
+        picker.onChange = { paintDrinkRow(); paint() }
+        paint()
+
+        val foot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(12))
+            setBackgroundColor(WHITE)
+            elevation = 4f * resources.displayMetrics.density
+        }
+        foot.addView(addBtn, LinearLayout.LayoutParams(MATCH, dp(50)))
+        root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        addBtn.setOnClickListener {
+            val variant = picker.selectedVariant ?: drink
+            val groupId = editingGroupId ?: ("combo-" + System.nanoTime())
+            if (editingGroupId != null) Cart.removeComboGroup(editingGroupId)
+            val mods = picker.modsText()
+            Cart.add(
+                CartLine(
+                    productUuid = variant.uuid,
+                    name = variant.name,
+                    priceRub = variant.priceRub,
+                    quantity = BigDecimal.ONE,
+                    recipe = mods,
+                    freeEligible = variant.freeEligible,
+                    cartKey = "$groupId#drink",
+                    comboGroupId = groupId,
+                    comboId = combo.id,
+                ),
+            )
+            Cart.add(
+                CartLine(
+                    productUuid = food.uuid,
+                    name = food.name,
+                    priceRub = food.priceRub,
+                    quantity = BigDecimal.ONE,
+                    recipe = null,
+                    freeEligible = food.freeEligible,
+                    cartKey = "$groupId#food",
+                    comboGroupId = groupId,
+                    comboId = combo.id,
+                ),
+            )
+            picker.chosen().forEach { o ->
+                val uuid = o.evotorUuid?.takeIf { it.isNotBlank() } ?: return@forEach
+                Cart.add(
+                    CartLine(
+                        productUuid = uuid,
+                        name = "${o.label} (${variant.name})",
+                        priceRub = o.price,
+                        quantity = BigDecimal.ONE,
+                        cartKey = "$groupId#opt:$uuid",
+                        comboGroupId = groupId,
+                        comboId = combo.id,
+                    ),
+                )
+            }
+            onCartChanged()
+            dialog.dismiss()
+        }
+
+        dialog.setContentView(root)
+        dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
     }
 
+    /** hero item-sheet: фото, флаг «Хит/Комбо», крестик. */
+    private fun buildItemHero(p: CatalogProduct, onClose: () -> Unit): View {
+        val hero = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xFFF7F2E9.toInt(), 0xFFECE3D6.toInt()),
+            )
+        }
+        hero.addView(ThumbView(this).apply { setCorner(0); bind(p.name, p.imageUrl, 480) }, FrameLayout.LayoutParams(MATCH, MATCH))
+        val badge = when {
+            p.isCombo -> "КОМБО"
+            p.featured -> "ХИТ"
+            else -> null
+        }
+        if (badge != null) {
+            hero.addView(TextView(this).apply {
+                text = badge
+                textSize = 7f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(UiKit.INK_2)
+                setPadding(dp(6), dp(3), dp(6), dp(3))
+                background = rounded(0xEBFFFFFF.toInt(), 5, null)
+            }, FrameLayout.LayoutParams(WRAP, WRAP).apply {
+                gravity = Gravity.TOP or Gravity.START
+                topMargin = dp(12); leftMargin = dp(16)
+            })
+        }
+        hero.addView(TextView(this).apply {
+            text = "✕"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(UiKit.INK_2)
+            background = rounded(0xE6FFFFFF.toInt(), 22, null)
+            isClickable = true
+            contentDescription = "Закрыть"
+            setOnClickListener { onClose() }
+        }, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = dp(10); rightMargin = dp(12)
+        })
+        return hero
+    }
+
+    /** Теги позиции: группа Эвотор + метка «6.7» для напитков. */
+    private fun itemTags(p: CatalogProduct): LinearLayout {
+        val tags = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        listOfNotNull(
+            p.groupName?.takeIf { it.isNotBlank() },
+            if (p.freeEligible) "6.7" else null,
+        ).forEach { t ->
+            tags.addView(TextView(this).apply {
+                text = t.uppercase()
+                textSize = 8f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(UiKit.MUTED)
+                setPadding(dp(5), dp(2), dp(5), dp(2))
+                background = rounded(WHITE, 4, LINE)
+            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(5) })
+        }
+        return tags
+    }
+
+    /** Скидка комбо по текущей корзине (рубли). */
+    private fun comboDiscountRub(): BigDecimal = Combos.discountFor(Cart.all(), combos)
+
+    /** Итог к оплате: сумма реальных позиций минус выгода комбо. */
+    private fun cartTotalRub(): BigDecimal = Cart.gross().subtract(comboDiscountRub()).max(BigDecimal.ZERO)
+
     /** Корзина изменилась: обновить плашки «×N» (payload, без перебинда) и нижнюю полосу. */
-    private fun onCartChanged() { adapter?.refreshQty(); updateBar() }
+    private fun onCartChanged() {
+        if (Cart.isEmpty()) recShown = false
+        adapter?.refreshQty()
+        updateBar()
+        // Скидку комбо читает DiscountIntegrationService при открытии чека.
+        CheckoutChoice.saveCombo(this, comboDiscountRub())
+    }
 
     private fun updateBar() {
         val empty = Cart.isEmpty()
-        val n = Cart.count()
+        val n = cartLineCount(Cart.all())
         cartCountView?.text = n.toString()
-        cartTotalView?.text = rub(Cart.gross())
+        cartTotalView?.text = rub(cartTotalRub())
         cartSubView?.text = "Чек · ${orderType.lowercase()}"
         cartBarRoot?.visibility = if (empty) View.GONE else View.VISIBLE
         emptyCartBarRoot?.visibility = if (empty) View.VISIBLE else View.GONE
+        repeatOrderView?.visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
         val cta = cartBarRoot?.tag as? View
         cta?.isEnabled = !empty
         cta?.alpha = if (empty) 0.5f else 1f
@@ -1160,6 +1548,29 @@ class MainActivity : AppCompatActivity() {
             setTextColor(UiKit.MUTED)
         })
         empty.addView(emptyText, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val repeat = TextView(this).apply {
+            text = "Повторить"
+            textSize = 10.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(BRAND)
+            gravity = Gravity.CENTER
+            setPadding(dp(12), 0, dp(12), 0)
+            background = rounded(WHITE, 12, LINE)
+            isClickable = true
+            contentDescription = "Повторить прошлый заказ"
+            visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
+            setOnClickListener {
+                if (Cart.repeatLast()) {
+                    onCartChanged()
+                } else {
+                    notice = "Повторить нечего — прошлый заказ не сохранён"
+                    noticeKind = Kind.WARN
+                    safeRender()
+                }
+            }
+        }
+        repeatOrderView = repeat
+        empty.addView(repeat, LinearLayout.LayoutParams(WRAP, dp(38)).apply { leftMargin = dp(8) })
         empty.setOnClickListener { /* index: open cart overlay even if empty */ showCart() }
         emptyCartBarRoot = empty
         wrap.addView(empty, LinearLayout.LayoutParams(MATCH, dp(62)))
@@ -1240,117 +1651,6 @@ class MainActivity : AppCompatActivity() {
         return wrap
     }
 
-    /** Компактная «таблетка» карты: строка 1 — карта/прогресс/кэшбэк, строка 2 — статус (подарок, нет связи). */
-    /**
-     * searchrow из index.html / app.css:
-     * flex gap 8; search h=48 r=14 surface+line; placeholder «Найти напиток»;
-     * clear ✕ при непустом query; scan-btn 48×48 → openGuest (Screen.CARD).
-     * Фильтрация каталога — прежняя (query + refreshRows). Железо-сканер — ScannerReceiver.
-     */
-    private fun buildSearchRow(): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val searchWrap = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(8), 0)
-            background = rounded(WHITE, 14, LINE)
-            minimumHeight = dp(48)
-            elevation = 1f * resources.displayMetrics.density
-        }
-        // search icon (circle + handle), color muted
-        val icon = TextView(this).apply {
-            text = "⌕"
-            textSize = 16f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-            contentDescription = null
-        }
-        searchWrap.addView(icon, LinearLayout.LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(9) })
-
-        val field = EditText(this).apply {
-            hint = "Найти напиток"
-            isSingleLine = true
-            textSize = 12.5f
-            setTextColor(INK)
-            setHintTextColor(UiKit.MUTED)
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            background = null
-            setPadding(0, 0, 0, 0)
-            setText(query)
-            minHeight = dp(48)
-            contentDescription = "Поиск по меню"
-        }
-        val clear = TextView(this).apply {
-            text = "✕"
-            textSize = 13f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(UiKit.SURFACE_2)
-            }
-            visibility = if (query.isNotEmpty()) View.VISIBLE else View.GONE
-            contentDescription = "Очистить поиск"
-            isClickable = true
-            isFocusable = true
-        }
-        clear.setOnClickListener {
-            field.setText("")
-            query = ""
-            clear.visibility = View.GONE
-            refreshRows(true)
-            field.requestFocus()
-        }
-        field.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                query = s?.toString().orEmpty()
-                clear.visibility = if (query.isNotEmpty()) View.VISIBLE else View.GONE
-                searchRunnable?.let { handler.removeCallbacks(it) }
-                val r = Runnable { refreshRows(true) }
-                searchRunnable = r
-                handler.postDelayed(r, 180)
-            }
-            override fun afterTextChanged(s: android.text.Editable?) {}
-        })
-        searchView = field
-        searchWrap.addView(field, LinearLayout.LayoutParams(0, MATCH, 1f))
-        searchWrap.addView(clear, LinearLayout.LayoutParams(dp(24), dp(24)).apply { leftMargin = dp(4) })
-
-        row.addView(searchWrap, LinearLayout.LayoutParams(0, dp(48), 1f))
-
-        val scan = FrameLayout(this).apply {
-            background = rounded(WHITE, 14, LINE)
-            elevation = 1f * resources.displayMetrics.density
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Сканировать карту гостя"
-            setOnClickListener {
-                // index: openGuest — экран/поток карты гостя
-                notice = null
-                screen = Screen.CARD
-                safeRender()
-            }
-        }
-        val scanIcon = TextView(this).apply {
-            text = "▣"
-            textSize = 18f
-            setTextColor(INK)
-            gravity = Gravity.CENTER
-        }
-        scan.addView(scanIcon, FrameLayout.LayoutParams(dp(21), dp(21), Gravity.CENTER))
-        row.addView(scan, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
-        return row
-    }
-
-    /**
-     * pos-head из index.html:
-     * [logo 34] [6.7 Coffee + shift-chip] ........ [guest-chip]
-     * shift-chip → Screen.SHIFT (хаб смены из index).
-     */
     private fun buildPosHead(card: CardInfo?): View {
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1442,21 +1742,8 @@ class MainActivity : AppCompatActivity() {
                 else -> "${card.paidCups} из ${card.cupsForFree} чашек"
             }
         }
-        val avatar = TextView(this).apply {
-            text = letter
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(if (empty) UiKit.INK_2 else WHITE)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                if (empty) {
-                    setColor(UiKit.SURFACE_2)
-                    setStroke(dp(1), UiKit.LINE_STRONG)
-                } else {
-                    setColor(INK)
-                }
-            }
+        val avatar = AvatarView(this).apply {
+            bind(letter, solid = !empty, textSp = 12.5f)
         }
         box.addView(avatar, LinearLayout.LayoutParams(dp(33), dp(33)))
         val meta = LinearLayout(this).apply {
@@ -1538,6 +1825,232 @@ class MainActivity : AppCompatActivity() {
      * Upsell track — из upsellDefault, только товары с evotorUuid в каталоге.
      * orderType — только подпись UI, в Эвотор не уходит.
      */
+    /** Строк в чеке: комбо-группа считается одной позицией (как `cartLineCount` в index). */
+    private fun cartLineCount(lines: List<CartLine>): Int =
+        lines.count { it.comboGroupId == null } + lines.mapNotNull { it.comboGroupId }.distinct().size
+
+    /** Карточка комбо в чеке: название набора, цена со скидкой, состав, «Изменить»/удалить. */
+    private fun buildComboCartCard(groupId: String): View {
+        val rows = Cart.comboLines(groupId)
+        val combo = rows.firstOrNull()?.comboId?.let { id -> combos.firstOrNull { it.id == id } }
+        val componentSum = rows.fold(BigDecimal.ZERO) { acc, l -> acc.add(l.lineTotal()) }
+        val price = combo?.let { componentSum.subtract(it.discountRub) } ?: componentSum
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(UiKit.SURFACE_2, 14, LINE)
+        }
+
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val badgeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        badgeRow.addView(TextView(this).apply {
+            text = "КОМБО"
+            textSize = 7f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(UiKit.WHITE)
+            setPadding(dp(5), dp(2), dp(5), dp(2))
+            background = rounded(BRAND, 4, null)
+        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(6) })
+        badgeRow.addView(TextView(this).apply {
+            text = combo?.name ?: "Комбо"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        titleCol.addView(badgeRow)
+
+        if (combo != null && combo.discountRub.signum() > 0) {
+            titleCol.addView(TextView(this).apply {
+                text = "выгода ${rub(combo.discountRub)} · ${rub(componentSum)}"
+                textSize = 9f
+                setTextColor(UiKit.MUTED)
+                setPadding(0, dp(2), 0, 0)
+            })
+        }
+        head.addView(titleCol, LinearLayout.LayoutParams(0, WRAP, 1f))
+        head.addView(TextView(this).apply {
+            text = rub(price)
+            textSize = 12.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(INK)
+        })
+        head.addView(TextView(this).apply {
+            text = "✕"
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setTextColor(UiKit.MUTED)
+            isClickable = true
+            contentDescription = "Удалить комбо"
+            setOnClickListener {
+                Cart.removeComboGroup(groupId)
+                onCartChanged()
+                showCart()
+            }
+        }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(4) })
+        card.addView(head)
+
+        rows.filterNot { it.cartKey.contains("#opt:") }.forEach { l ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(this).apply {
+                text = l.name
+                textSize = 10.5f
+                setTextColor(UiKit.INK_2)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            if (!l.recipe.isNullOrBlank()) col.addView(TextView(this).apply {
+                text = l.recipe
+                textSize = 8.5f
+                setTextColor(UiKit.MUTED)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            row.addView(TextView(this).apply {
+                text = rub(l.lineTotal())
+                textSize = 9.5f
+                setTextColor(UiKit.MUTED)
+            })
+            card.addView(row)
+        }
+
+        if (combo != null) {
+            card.addView(TextView(this).apply {
+                text = "Изменить опции"
+                textSize = 9.5f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(BRAND)
+                setPadding(0, dp(8), 0, 0)
+                isClickable = true
+                setOnClickListener {
+                    showComboSheet(combo, groupId)
+                }
+            })
+        }
+        return card
+    }
+    /**
+     * Лояльность в чеке (index `.loyalty-card`): тёмная карта с чашками и бонусами.
+     * Без карты — пунктирная плашка «Привязать карту гостя».
+     * Список бонусов/подарка остаётся на экране «К оплате»: там же решается резерв.
+     */
+    private fun buildCartLoyalty(card: CardInfo?): View {
+        if (card == null || card.code.isEmpty()) {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(11), dp(12), dp(11))
+                background = rounded(UiKit.SURFACE_2, 14, UiKit.LINE_STRONG)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    dismissSheets()
+                    screen = Screen.CARD
+                    safeRender()
+                }
+            }
+            box.addView(TextView(this).apply {
+                text = "+"
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(BRAND)
+                background = rounded(WHITE, 15, LINE)
+            }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { rightMargin = dp(9) })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(this).apply {
+                text = "Привязать карту гостя"
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(INK)
+            })
+            col.addView(TextView(this).apply {
+                text = "Чашки и бонусы спишутся в этом чеке"
+                textSize = 8.5f
+                setTextColor(UiKit.MUTED)
+            })
+            box.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            box.addView(TextView(this).apply {
+                text = "Сканировать"
+                textSize = 9.5f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(UiKit.INK_2)
+                gravity = Gravity.CENTER
+                setPadding(dp(10), 0, dp(10), 0)
+                background = rounded(WHITE, 8, LINE)
+            }, LinearLayout.LayoutParams(WRAP, dp(32)))
+            return box
+        }
+
+        val goal = card.cupsForFree.coerceAtLeast(1)
+        val cups = minOf(card.paidCups, goal)
+        val left = (goal - cups).coerceAtLeast(0)
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(11), dp(12), dp(12))
+            background = rounded(UiKit.INK, 16, null)
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val code = card.cardCode.ifBlank { "Карта" }
+        top.addView(AvatarView(this).apply { bind(code, solid = true, textSp = 10f) },
+            LinearLayout.LayoutParams(dp(24), dp(24)).apply { rightMargin = dp(7) })
+        top.addView(TextView(this).apply {
+            text = code
+            textSize = 11.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(0xFFF6F3EE.toInt())
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (card.cashbackKopecks > 0) {
+            top.addView(TextView(this).apply {
+                text = "${card.cashbackKopecks / 100} бонусов"
+                textSize = 9.5f
+                setTextColor(0xB3F6F3EE.toInt())
+            })
+        }
+        box.addView(top)
+
+        box.addView(TextView(this).apply {
+            text = if (card.freeAvailable > 0) "Подарок доступен" else "$cups из $goal чашек"
+            textSize = 10.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(0xFFF6F3EE.toInt())
+            setPadding(0, dp(9), 0, 0)
+        })
+        box.addView(TextView(this).apply {
+            text = when {
+                card.freeStatus == "OFFLINE" -> "Нет связи · бонусы недоступны"
+                card.freeAvailable > 0 -> "1 бесплатный напиток"
+                else -> "$left до подарка"
+            }
+            textSize = 8.5f
+            setTextColor(0xB3F6F3EE.toInt())
+            setPadding(0, dp(2), 0, 0)
+        })
+        box.addView(
+            UiKit.loyaltyDots(this, cups, goal, onColor = 0xFFF6F3EE.toInt()),
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) },
+        )
+        return box
+    }
+
     private fun showCart() {
         dismissSheets()
         val dialog = BottomSheetDialog(this)
@@ -1682,13 +2195,13 @@ class MainActivity : AppCompatActivity() {
         fun fill() {
             body.removeAllViews()
             val lines = Cart.all()
-            val n = Cart.count()
+            val n = cartLineCount(lines)
             countBadge.text = n.toString()
             countBadge.visibility = if (n > 0) View.VISIBLE else View.GONE
             subTv.text = "Чек · ${orderType.lowercase()}"
             clearBtn.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
             foot.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
-            footTotal.text = rub(Cart.gross())
+            footTotal.text = rub(cartTotalRub())
             goPay.setOnClickListener {
                 dialog.dismiss()
                 val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
@@ -1736,7 +2249,13 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
+            val renderedCombos = HashSet<String>()
             lines.forEach { line ->
+                val gid = line.comboGroupId
+                if (gid != null) {
+                    if (renderedCombos.add(gid)) body.addView(buildComboCartCard(gid))
+                    return@forEach
+                }
                 val key = line.cartKey.ifBlank { line.productUuid }
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -1884,6 +2403,10 @@ class MainActivity : AppCompatActivity() {
                 body.addView(track, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
             }
 
+            body.addView(buildCartLoyalty(CardSession.get(this)), LinearLayout.LayoutParams(MATCH, WRAP).apply {
+                topMargin = dp(14)
+            })
+
             // note from index
             body.addView(TextView(this).apply {
                 text = "Позиции уйдут в фискальный чек Эвотора. Оплата — на штатном экране терминала."
@@ -1905,7 +2428,20 @@ class MainActivity : AppCompatActivity() {
     // ── Экран 3: «К оплате» с лояльностью ──
 
 
+    /** Есть ли в чеке еда — тогда рекомендации не нужны (index: !hasFood()). */
+    private fun hasFoodInCart(): Boolean {
+        val byUuid = products.associateBy { it.uuid }
+        return Cart.all().any { line ->
+            val p = byUuid[line.productUuid] ?: return@any false
+            !p.supportsMods && !p.freeEligible
+        }
+    }
+
     private fun showUpsellThenCheckout(card: CardInfo?) {
+        if (recShown || hasFoodInCart()) {
+            checkout(card)
+            return
+        }
         val inCart = Cart.all().map { it.productUuid }.toSet()
         val candidates = LinkedHashMap<String, UpsellItem>()
         fun resolveUuid(u: UpsellItem): String? {
@@ -1926,13 +2462,12 @@ class MainActivity : AppCompatActivity() {
             val id = resolveUuid(u) ?: return@forEach
             candidates.putIfAbsent(id, u.copy(evotorUuid = id))
         }
-        val list = candidates.entries
-            .filter { (uuid, _) -> Cart.qty(uuid) == 0 || true }
-            .take(6)
+        val list = candidates.entries.take(3)
         if (list.isEmpty()) {
             checkout(card)
             return
         }
+        recShown = true
 
         // rec-sheet 1:1 index
         dismissSheets()
@@ -1996,7 +2531,7 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
         }
         fun paintPay() {
-            payCta.text = "К оплате · ${rub(Cart.gross())}"
+            payCta.text = "К оплате · ${rub(cartTotalRub())}"
         }
         paintPay()
 
@@ -2007,6 +2542,10 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(10), dp(10), dp(10), dp(10))
                 background = rounded(WHITE, 14, LINE)
             }
+            row.addView(ThumbView(this).apply {
+                setCorner(10)
+                bind(u.name, u.imageUrl ?: products.firstOrNull { it.uuid == uuid }?.imageUrl, 160)
+            }, LinearLayout.LayoutParams(dp(46), dp(46)).apply { rightMargin = dp(10) })
             val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             info.addView(TextView(this).apply {
                 text = u.name
@@ -2016,6 +2555,15 @@ class MainActivity : AppCompatActivity() {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             })
+            products.firstOrNull { it.uuid == uuid }?.recipe?.takeIf { it.isNotBlank() }?.let { meta ->
+                info.addView(TextView(this).apply {
+                    text = meta
+                    textSize = 9.5f
+                    setTextColor(UiKit.MUTED)
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+            }
             info.addView(TextView(this).apply {
                 text = rub(u.priceRub)
                 textSize = 12f
@@ -2252,10 +2800,13 @@ class MainActivity : AppCompatActivity() {
                 gross, eligiblePrices, reserved, useGift, card.freeAvailable,
                 if (useCb) card.cashbackKopecks else 0L, card.cashbackKopecks,
             )
+            val combo = comboDiscountRub()
+            val dueNow = gross.subtract(r.total).subtract(combo).max(BigDecimal.ZERO)
             totals.text = "Итого ${rub(gross)}" +
+                (if (combo.signum() > 0) "\nКомбо −${rub(combo)}" else "") +
                 (if (r.free.signum() > 0) "\nПодарок −${rub(r.free)}" else "") +
                 (if (r.cashback.signum() > 0) "\nКэшбэк −${rub(r.cashback)}" else "") +
-                "\nК оплате: ${rub(gross.subtract(r.total))}"
+                "\nК оплате: ${rub(dueNow)}"
         }
         recompute()
 
@@ -2308,6 +2859,8 @@ class MainActivity : AppCompatActivity() {
     private fun pay(free: Boolean, spend: Boolean, amount: Long) {
         if (paying) return
         paying = true
+        // Выгода комбо должна быть уже записана: её применяет DiscountIntegrationService.
+        CheckoutChoice.saveCombo(this, comboDiscountRub())
         SellLauncher.openSellReceipt(this, free, spend, amount) { ok, msg ->
             paying = false
             if (ok) {
@@ -3557,7 +4110,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(8), dp(6), dp(8), 0)
         })
         panel.addView(TextView(this).apply {
-            text = rub(Cart.gross())
+            text = rub(cartTotalRub())
             textSize = 22f
             setTypeface(null, Typeface.BOLD)
             setTextColor(INK)
@@ -3571,6 +4124,14 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(UiKit.MUTED)
                 gravity = Gravity.CENTER
                 setPadding(0, dp(6), 0, 0)
+            })
+            panel.addView(TextView(this).apply {
+                // Чашки начисляет сервер по SELL: не обещаем цифру, которую не можем подтвердить.
+                text = "Чашки и бонусы обновятся после синхронизации чека"
+                textSize = 9.5f
+                setTextColor(UiKit.MUTED)
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(4), dp(8), 0)
             })
         }
         root.addView(panel, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
@@ -3620,6 +4181,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 // lastCardCode stays in process memory for quick re-use
                 CardSession.clear(this@MainActivity)
+                Cart.rememberAsLast()
                 Cart.clear()
                 PendingPayment.clear(this@MainActivity)
                 notice = null
@@ -3706,7 +4268,7 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val TAG = "SixthCup"
-        const val SEARCH_MIN_ITEMS = 12
+        const val GROUP_COMBOS = "@combos"
         const val CATALOG_STALE_MS = 5 * 60 * 1000L
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
