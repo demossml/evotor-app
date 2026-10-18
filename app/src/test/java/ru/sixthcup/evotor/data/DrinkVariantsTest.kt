@@ -47,6 +47,28 @@ class DrinkVariantsTest {
     }
 
     @Test
+    fun `size is parsed from different name formats`() {
+        val formats = listOf(
+            "Капучино 250 мл" to 250,
+            "Капучино 350мл" to 350,
+            "Капучино (450 мл)" to 450,
+            "Капучино 250" to 250,
+            "Капучино 0,3 л" to 300,
+            "Капучино 0.4 л" to 400,
+        )
+        for ((name, size) in formats) {
+            val model = DrinkVariants.build(
+                listOf(
+                    product("a", name, 200),
+                    product("b", "Капучино ${size + 100} мл", 300),
+                ),
+            )
+            assertEquals("не сгруппировалось: $name", 1, model.tiles.size)
+            assertEquals("неверный объём: $name", size, model.variantsOf(model.tiles.first()).first().sizeMl)
+        }
+    }
+
+    @Test
     fun `explicit group marker wins over name parsing`() {
         val model = DrinkVariants.build(
             listOf(

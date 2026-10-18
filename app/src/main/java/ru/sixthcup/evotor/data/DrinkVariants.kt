@@ -59,13 +59,47 @@ object DrinkVariants {
      * Возвращает ключ авто-группы (по названию без объёма) и объём в мл.
      */
     private fun autoVariant(p: CatalogProduct): Pair<String, Int>? {
-        val base = p.name.replace(SIZE_SUFFIX, "").trim()
-        val size = p.sizeMl ?: SIZE_IN_NAME.find(p.name.trim())?.groupValues?.get(2)?.toIntOrNull() ?: return null
+        val hit = parseSize(p.name)
+        val size = p.sizeMl ?: hit?.ml ?: return null
+        val base = hit?.base ?: p.name.trim()
         if (base.isEmpty() || size <= 0) return null
         // «Капучино» без объёма в названии и без #size — группировать не по чему.
-        if (base == p.name.trim() && p.sizeMl == null) return null
+        if (hit == null && p.sizeMl == null) return null
         return AUTO_PREFIX + base.lowercase() to size
     }
+
+    /** Объём, найденный в названии: база без объёма + мл. */
+    private data class SizeHit(val base: String, val ml: Int)
+
+    /**
+     * Разбор объёма из названия в порядке приоритета:
+     *  - «Капучино 250 мл», «Капучино 250мл», «Капучино (250 ML)»;
+     *  - «Капучино 0,3 л», «Капучино 0.4 л» → мл;
+     *  - «Капучино 250» — число в конце без единиц (≥ 50, чтобы не поймать «2 шт»).
+     */
+    private fun parseSize(name: String): SizeHit? {
+        val raw = name.trim()
+        ML_NAME.find(raw)?.let { m ->
+            val base = cleanBase(m.groupValues[1])
+            val ml = m.groupValues[2].toIntOrNull()
+            if (base.isNotEmpty() && ml != null && ml > 0) return SizeHit(base, ml)
+        }
+        LITRE_NAME.find(raw)?.let { m ->
+            val base = cleanBase(m.groupValues[1])
+            val litres = (m.groupValues[2] + "." + m.groupValues[3]).toDoubleOrNull()
+            val ml = litres?.times(1000)?.toInt()
+            if (base.isNotEmpty() && ml != null && ml > 0) return SizeHit(base, ml)
+        }
+        BARE_NAME.find(raw)?.let { m ->
+            val base = cleanBase(m.groupValues[1])
+            val ml = m.groupValues[2].toIntOrNull()
+            if (base.isNotEmpty() && ml != null && ml >= 50) return SizeHit(base, ml)
+        }
+        return null
+    }
+
+    private fun cleanBase(s: String): String =
+        s.trim().trimEnd(',', ';', ':', '-', '–', '—', '(', '[', ' ').trim()
 
     fun build(products: List<CatalogProduct>): Model {
         val options = Options(
@@ -88,10 +122,11 @@ object DrinkVariants {
             if (key == null) {
                 singles.add(p)
             } else {
-                val withSize = if (p.sizeMl == null && auto != null) {
-                    p.copy(sizeMl = auto.second, variantGroup = key)
-                } else {
+                // variantGroup обязателен для tileKey(): иначе группа не найдётся на витрине.
+                val withSize = if (p.variantGroup != null) {
                     p
+                } else {
+                    p.copy(sizeMl = p.sizeMl ?: auto?.second, variantGroup = key)
                 }
                 grouped.getOrPut(key) { ArrayList() }.add(withSize)
             }
@@ -122,15 +157,17 @@ object DrinkVariants {
 
     /** «Капучино 450 мл» → «Капучино»: на плитке объём не дублируется. */
     fun groupName(p: CatalogProduct): String =
-        p.name.replace(SIZE_SUFFIX, "").trim().ifEmpty { p.name }
+        parseSize(p.name)?.base?.takeIf { it.isNotEmpty() } ?: p.name
 
     fun sizeLabel(sizeMl: Int?): String? = sizeMl?.let { "$it мл" }
 
     /** Подпись варианта в item-sheet: «350 мл», иначе название товара. */
     fun variantLabel(p: CatalogProduct): String = sizeLabel(p.sizeMl) ?: p.optionLabel
 
-    private val SIZE_SUFFIX = Regex("""\s*\d{2,4}\s*(мл|ml)\.?\s*$""", RegexOption.IGNORE_CASE)
-
     /** «Капучино 350 мл» → base = «Капучино», size = 350. */
-    private val SIZE_IN_NAME = Regex("""^(.*?)\s+(\d{2,4})\s*(мл|ml)\.?\s*$""", RegexOption.IGNORE_CASE)
+    private val ML_NAME = Regex("""^(.*?)[\s(\[\-–—]*(\d{2,4})\s*(?:мл|ml)\.?[)\]\s.]*$""", RegexOption.IGNORE_CASE)
+
+    private val LITRE_NAME = Regex("""^(.*?)[\s(\[\-–—]*(\d)[.,](\d{1,2})\s*(?:л|l)\.?[)\]\s.]*$""", RegexOption.IGNORE_CASE)
+
+    private val BARE_NAME = Regex("""^(.*?)[\s(\[\-–—]+(\d{2,4})[)\]\s.]*$""")
 }

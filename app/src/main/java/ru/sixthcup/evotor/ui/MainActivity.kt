@@ -225,6 +225,13 @@ class MainActivity : AppCompatActivity() {
         products = list
         variantModel = DrinkVariants.build(list)
         combos = Combos.from(list)
+        // Диагностика разметки: видно, какие группы размеров собрались из номенклатуры.
+        val groups = variantModel.variantsByKey.filterValues { it.size > 1 }
+        Log.i(
+            TAG,
+            "catalog: products=${list.size} tiles=${variantModel.tiles.size} sizeGroups=${groups.size} " +
+                groups.entries.take(8).joinToString { "${it.key}(${it.value.size})" },
+        )
     }
 
     private fun loadProducts() {
