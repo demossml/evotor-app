@@ -2,6 +2,7 @@ package ru.sixthcup.evotor.ui
 
 import android.content.Context
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.text.SpannableStringBuilder
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
@@ -152,25 +153,58 @@ class CatalogAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogRow,
 
 // ───────────────────────── holders ─────────────────────────
 
-private class HeaderVH(ctx: Context) : RecyclerView.ViewHolder(TextView(ctx)) {
-    private val tv = itemView as TextView
+/** Заголовки секций index: «Сейчас берут» = eyebrow, «Всё меню» = menu-title. */
+private class HeaderVH(ctx: Context) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
+    private val title = TextView(ctx)
+    private val aside = TextView(ctx)
     init {
         val d = ctx.resources.displayMetrics.density
-        tv.textSize = 15f; tv.setTypeface(null, Typeface.BOLD); tv.setTextColor(UiKit.INK)
-        tv.setPadding(0, (6 * d).toInt(), 0, (6 * d).toInt())
-        tv.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+        fun dp(v: Int) = (v * d).toInt()
+        val box = itemView as LinearLayout
+        box.orientation = LinearLayout.HORIZONTAL
+        box.gravity = Gravity.BOTTOM
+        box.setPadding(0, dp(10), 0, dp(4))
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+        title.setTypeface(null, Typeface.BOLD)
+        title.maxLines = 1
+        aside.textSize = 9.5f
+        aside.setTextColor(UiKit.MUTED)
+        aside.maxLines = 1
+        aside.gravity = Gravity.END
+        box.addView(title, LinearLayout.LayoutParams(0, WRAP, 1f))
+        box.addView(aside, LinearLayout.LayoutParams(WRAP, WRAP))
     }
-    fun bind(r: CatalogRow.Header) { tv.text = r.title }
+    fun bind(r: CatalogRow.Header) {
+        val t = r.title
+        // index: focus section uses uppercase eyebrow «Сейчас берут»
+        if (t.equals("Сейчас берут", ignoreCase = true) || t.equals("Фокус", ignoreCase = true)) {
+            title.text = "СЕЙЧАС БЕРУТ"
+            title.textSize = 9.5f
+            title.setTextColor(UiKit.MUTED)
+            title.letterSpacing = 0.12f
+            aside.text = ""
+            aside.visibility = View.GONE
+        } else {
+            title.text = if (t.equals("Меню", ignoreCase = true)) "Всё меню" else t
+            title.textSize = 14.5f
+            title.setTextColor(UiKit.INK)
+            title.letterSpacing = -0.015f
+            aside.visibility = View.VISIBLE
+            aside.text = ""
+        }
+    }
 }
 
 private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
     val thumb = ThumbView(ctx)
     private val name = TextView(ctx)
     private val meta = TextView(ctx)
+    private val price = TextView(ctx)
+    private val flag = TextView(ctx)
     private val qty: TextView
-    private val info = TextView(ctx)
-    private val stepper: LinearLayout
-    private val qtyLabel: TextView
+    private val plusBtn = TextView(ctx)
+    private val minusBtn = TextView(ctx)
+    private val controls: LinearLayout
     private var item: CatalogProduct? = null
     private val thumbPx: Int
     init {
@@ -178,101 +212,161 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         fun dp(v: Int) = (v * d).toInt()
         val box = itemView as LinearLayout
         box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(8), dp(8), dp(8), dp(8))
-        box.background = UiKit.rounded(d, UiKit.WHITE, 20, UiKit.LINE)
-        box.isClickable = true; box.isFocusable = true
+        box.setPadding(0, 0, 0, 0)
+        box.background = UiKit.rounded(d, UiKit.WHITE, 18, UiKit.LINE)
+        box.isClickable = true
+        box.isFocusable = true
         box.contentDescription = "Товар меню"
+        box.elevation = 1f * d
         box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply {
             width = MATCH
-            setMargins(dp(4), dp(4), dp(4), dp(4))
+            // menu-grid gap 9px → ~4.5 each side
+            setMargins(dp(5), dp(5), dp(5), dp(5))
         }
 
-        val photoBox = FrameLayout(ctx)
-        thumb.setCorner(16)
+        // tile-media height 96, warm gradient
+        val photoBox = FrameLayout(ctx).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xFFF4EFE6.toInt(), 0xFFECE4D8.toInt())
+            )
+        }
+        thumb.setCorner(0)
         photoBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
-        val photoH = dp(100)
+        val photoH = dp(96)
         box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
-        thumbPx = (photoH * 2).coerceIn(240, 480)
+        thumbPx = (photoH * 2).coerceIn(200, 400)
 
-        qty = qtyPill(ctx, d)
-        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(28)).apply {
-            gravity = Gravity.TOP or Gravity.END
-            topMargin = dp(6); rightMargin = dp(6)
+        // tile-flag top-left
+        flag.textSize = 7f
+        flag.setTypeface(null, Typeface.BOLD)
+        flag.setTextColor(UiKit.INK_2)
+        flag.setPadding(dp(6), dp(3), dp(6), dp(3))
+        flag.background = UiKit.rounded(d, 0xE0FFFFFF.toInt(), 5, null)
+        flag.visibility = View.GONE
+        photoBox.addView(flag, FrameLayout.LayoutParams(WRAP, WRAP).apply {
+            gravity = Gravity.TOP or Gravity.START
+            topMargin = dp(7); leftMargin = dp(7)
         })
 
-        name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
-        name.minLines = 2; name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
-        name.setPadding(0, dp(8), 0, 0)
-        box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
+        // tile-qty top-right (ink, not brand pill)
+        qty = TextView(ctx).apply {
+            textSize = 9f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(UiKit.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(6), 0, dp(6), 0)
+            minWidth = dp(25)
+            minHeight = dp(19)
+            background = UiKit.rounded(d, UiKit.INK, 6, null)
+            visibility = View.GONE
+            elevation = 2f * d
+        }
+        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(19)).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = dp(7); rightMargin = dp(7)
+        })
 
-        meta.textSize = 16f; meta.setTypeface(null, Typeface.BOLD); meta.setTextColor(UiKit.BRAND)
-        meta.maxLines = 1; meta.ellipsize = TextUtils.TruncateAt.END
-        box.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
-
-        info.text = "i"; info.textSize = 12f; info.gravity = Gravity.CENTER
-        info.setTextColor(UiKit.BRAND); info.setTypeface(null, Typeface.BOLD)
-        info.background = UiKit.rounded(d, UiKit.WHITE, 14, UiKit.BRAND)
-        info.visibility = View.INVISIBLE
-        box.addView(info, LinearLayout.LayoutParams(dp(28), dp(24)).apply { topMargin = dp(4) })
-
-        stepper = LinearLayout(ctx).apply {
+        // tile-controls bottom-right of media
+        controls = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
         }
-        fun stepBtn(label: String, onClick: () -> Unit) = TextView(ctx).apply {
+        fun ctl(label: String, plus: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
             text = label
-            textSize = 20f
+            textSize = 16f
             gravity = Gravity.CENTER
-            setTextColor(UiKit.BRAND)
-            setTypeface(null, Typeface.BOLD)
-            background = UiKit.rounded(d, UiKit.SOFT, 12, UiKit.LINE)
-            minWidth = dp(44); minHeight = dp(40)
+            setTypeface(null, Typeface.NORMAL)
+            background = if (plus) {
+                UiKit.rounded(d, UiKit.INK, 15, UiKit.INK)
+            } else {
+                UiKit.rounded(d, 0xF5FFFFFF.toInt(), 15, UiKit.LINE)
+            }
+            setTextColor(if (plus) UiKit.WHITE else UiKit.INK)
+            elevation = 2f * d
             setOnClickListener { onClick() }
         }
-        qtyLabel = TextView(ctx).apply {
-            textSize = 15f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK)
-            setTypeface(null, Typeface.BOLD)
-            fontFeatureSettings = "tnum"
-            minWidth = dp(36)
+        minusBtn.apply {
+            // filled below via ctl helper pattern
         }
-        stepper.addView(stepBtn("−") { item?.let(cb.onDec) }, LinearLayout.LayoutParams(dp(44), dp(40)))
-        stepper.addView(qtyLabel, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6); rightMargin = dp(6) })
-        stepper.addView(stepBtn("+") { item?.let(cb.onInc) }, LinearLayout.LayoutParams(dp(44), dp(40)))
-        box.addView(stepper, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
+        val minus = ctl("−", false) { item?.let(cb.onDec) }
+        val plus = ctl("+", true) { item?.let(cb.onInc) }
+        // store refs for visibility
+        minusBtn.text = "−"
+        plusBtn.text = "+"
+        controls.addView(minus, LinearLayout.LayoutParams(dp(30), dp(30)).apply { rightMargin = dp(4) })
+        controls.addView(plus, LinearLayout.LayoutParams(dp(30), dp(30)))
+        // keep field refs for bindQty visibility of minus
+        minusBtn.tag = minus
+        plusBtn.tag = plus
+        photoBox.addView(controls, FrameLayout.LayoutParams(WRAP, WRAP).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = dp(7); rightMargin = dp(7)
+        })
+
+        // tile-body
+        val body = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(9))
+        }
+        name.textSize = 12.5f
+        name.setTypeface(null, Typeface.BOLD)
+        name.setTextColor(UiKit.INK)
+        name.maxLines = 1
+        name.ellipsize = TextUtils.TruncateAt.END
+        body.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
+        meta.textSize = 9f
+        meta.setTextColor(UiKit.MUTED)
+        meta.maxLines = 1
+        meta.ellipsize = TextUtils.TruncateAt.END
+        body.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(1) })
+        price.textSize = 14f
+        price.setTypeface(null, Typeface.BOLD)
+        price.setTextColor(UiKit.INK)
+        price.maxLines = 1
+        price.ellipsize = TextUtils.TruncateAt.END
+        body.addView(price, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
+        box.addView(body, LinearLayout.LayoutParams(MATCH, WRAP))
 
         box.setOnClickListener { item?.let(cb.onTap) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }
-        info.setOnClickListener { item?.let(cb.onInfo) }
     }
 
     fun bind(p: CatalogProduct) {
         item = p
         name.text = p.name
-        val m = when { p.isCombo -> "комбо"; p.freeEligible -> "стакан"; else -> null }
-        meta.text = priceText(p, m)
+        meta.text = when {
+            p.isCombo -> "Комбо"
+            !p.groupName.isNullOrBlank() -> p.groupName
+            p.freeEligible -> "Напиток"
+            else -> ""
+        }
+        meta.visibility = if (meta.text.isNullOrEmpty()) View.GONE else View.VISIBLE
+        price.text = priceText(p)
+        // tile-flag only for real badges we know from data (combo / featured hit)
+        when {
+            p.isCombo -> { flag.text = "КОМБО"; flag.visibility = View.VISIBLE }
+            p.featured -> { flag.text = "ХИТ"; flag.visibility = View.VISIBLE }
+            else -> flag.visibility = View.GONE
+        }
         thumb.bind(p.name, p.imageUrl, thumbPx)
-        info.visibility = if (p.recipe.isNullOrBlank()) View.INVISIBLE else View.VISIBLE
-        info.contentDescription = "Рецепт: " + p.name
         bindQty()
     }
 
     fun bindQty() {
-        val p = item ?: return
-        applyQty(qty, p.uuid)
-        val n = Cart.qty(p.uuid)
+        val uuid = item?.uuid ?: return
+        val n = Cart.qty(uuid)
         if (n > 0) {
-            stepper.visibility = View.VISIBLE
-            qtyLabel.text = n.toString()
+            qty.text = "×$n"
+            qty.visibility = View.VISIBLE
         } else {
-            stepper.visibility = View.GONE
+            qty.visibility = View.GONE
         }
+        val minus = minusBtn.tag as? View
+        minus?.visibility = if (n > 0) View.VISIBLE else View.GONE
     }
 }
 
-/** Строка с горизонтальной каруселью «Фокус»; внутри свой ListAdapter + DiffUtil. */
 private class FocusRowVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewHolder(RecyclerView(ctx)) {
     private val rv = itemView as RecyclerView
     private val adapter = FocusAdapter(cb)
@@ -300,53 +394,96 @@ private class FocusAdapter(private val cb: CatalogCallbacks) : ListAdapter<Catal
     fun refreshQty() { if (itemCount > 0) notifyItemRangeChanged(0, itemCount, QTY) }
 }
 
-/** Карточка «Фокус»: фото 120×88 dp сверху (запрос 288 px), название ≤2 строк, цена (+ старая). */
-private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
+/** focus-card 1:1 index: 158×74, img 53×58, name 11.5, price 11, badge, + */
+private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewHolder(FrameLayout(ctx)) {
     val thumb = ThumbView(ctx)
     private val name = TextView(ctx)
     private val price = TextView(ctx)
-    private val combo = TextView(ctx)
+    private val badge = TextView(ctx)
+    private val addBtn = TextView(ctx)
     private val qty: TextView
     private var item: CatalogProduct? = null
     init {
         val d = ctx.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
-        val box = itemView as LinearLayout
-        box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(8), dp(8), dp(8), dp(8))
-        box.background = UiKit.rounded(d, UiKit.WHITE, 20, UiKit.LINE)
-        box.isClickable = true; box.isFocusable = true
-        box.layoutParams = RecyclerView.LayoutParams(dp(144), WRAP).apply { rightMargin = dp(8) }
+        val root = itemView as FrameLayout
+        root.layoutParams = RecyclerView.LayoutParams(dp(158), dp(74)).apply { rightMargin = dp(8) }
 
-        thumb.setCorner(12)
-        val photo = FrameLayout(ctx)
-        photo.addView(thumb, FrameLayout.LayoutParams(MATCH, dp(88)))
-        combo.text = "Комбо"; combo.textSize = 11f; combo.setTypeface(null, Typeface.BOLD); combo.setTextColor(UiKit.WHITE)
-        combo.setPadding(dp(6), dp(1), dp(6), dp(1))
-        combo.background = UiKit.rounded(d, UiKit.BRAND, 8, null)
-        combo.visibility = View.GONE
-        photo.addView(combo, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { leftMargin = dp(4); bottomMargin = dp(4) })
+        val box = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(7), dp(7), dp(8), dp(7))
+            background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
+            isClickable = true
+            isFocusable = true
+            elevation = 1f * d
+        }
+        root.addView(box, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        val imgBox = FrameLayout(ctx).apply {
+            background = GradientDrawable().apply {
+                setColor(0xFFF2ECE1.toInt())
+                cornerRadius = 11 * d
+            }
+        }
+        thumb.setCorner(11)
+        imgBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
+        box.addView(imgBox, LinearLayout.LayoutParams(dp(53), dp(58)))
+
+        val textCol = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), 0, dp(4), 0)
+        }
+        name.textSize = 11.5f
+        name.setTypeface(null, Typeface.BOLD)
+        name.setTextColor(UiKit.INK)
+        name.maxLines = 1
+        name.ellipsize = TextUtils.TruncateAt.END
+        textCol.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
+        price.textSize = 11f
+        price.setTypeface(null, Typeface.BOLD)
+        price.setTextColor(UiKit.INK_2)
+        price.maxLines = 1
+        textCol.addView(price, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
+        badge.textSize = 7f
+        badge.setTypeface(null, Typeface.BOLD)
+        badge.setTextColor(UiKit.INK_2)
+        badge.setPadding(dp(4), dp(2), dp(4), dp(2))
+        badge.background = UiKit.rounded(d, 0xFFF3EEE5.toInt(), 4, UiKit.LINE)
+        badge.visibility = View.GONE
+        textCol.addView(badge, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(2) })
+        box.addView(textCol, LinearLayout.LayoutParams(0, WRAP, 1f))
+
+        addBtn.text = "+"
+        addBtn.textSize = 14f
+        addBtn.gravity = Gravity.CENTER
+        addBtn.setTextColor(UiKit.MUTED)
+        addBtn.background = UiKit.rounded(d, 0xD9FFFFFF.toInt(), 10, UiKit.LINE)
+        root.addView(addBtn, FrameLayout.LayoutParams(dp(20), dp(20)).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = dp(6)
+            rightMargin = dp(6)
+        })
+
         qty = qtyPill(ctx, d)
-        photo.addView(qty, FrameLayout.LayoutParams(WRAP, dp(28), Gravity.TOP or Gravity.END).apply { topMargin = dp(4); rightMargin = dp(4) })
-        box.addView(photo, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
-        name.minLines = 2; name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
-        box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
-        price.textSize = 15f; price.setTypeface(null, Typeface.BOLD); price.setTextColor(UiKit.BRAND)
-        price.maxLines = 1; price.ellipsize = TextUtils.TruncateAt.END
-        box.addView(price, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
+        root.addView(qty, FrameLayout.LayoutParams(WRAP, dp(22)).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = dp(6)
+            rightMargin = dp(6)
+        })
 
         box.setOnClickListener { item?.let(cb.onTap) }
+        addBtn.setOnClickListener { item?.let(cb.onInc) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }
     }
 
     fun bind(p: CatalogProduct) {
         item = p
         name.text = p.name
-        price.text = priceText(p)
-        combo.visibility = if (p.isCombo) View.VISIBLE else View.GONE
-        thumb.bind(p.name, p.imageUrl, 288)
+        price.text = UiKit.rub(p.priceRub)
+        badge.visibility = if (p.isCombo) View.VISIBLE else View.GONE
+        badge.text = if (p.isCombo) "КОМБО" else ""
+        thumb.bind(p.name, p.imageUrl, 160)
         bindQty()
     }
 

@@ -1,16 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- PWA app.67coffee.ru parity -->
+    <!-- index-design / base.css parity -->
     <color name="brand">#002FA7</color>
+    <color name="brand_deep">#00227A</color>
+    <color name="brand_soft">#E9EDFB</color>
     <color name="brand_mid">#1A6EFF</color>
-    <color name="brand_soft">#EEF4FF</color>
     <color name="page">#F6F3EE</color>
+    <color name="page_deep">#EFE9E0</color>
     <color name="surface">#FFFFFF</color>
-    <color name="ink">#0B1220</color>
-    <color name="ink_secondary">#3D4A5C</color>
-    <color name="line">#D6D0C8</color>
-    <color name="ok">#2B7D5B</color>
-    <color name="bad">#E53935</color>
+    <color name="surface_2">#FBF9F5</color>
+    <color name="ink">#17140F</color>
+    <color name="ink_secondary">#464036</color>
+    <color name="muted">#776F61</color>
+    <color name="line">#E7DFD3</color>
+    <color name="line_strong">#D7CCBC</color>
+    <color name="ok">#1C7A4B</color>
+    <color name="ok_soft">#E3F1E8</color>
+    <color name="warn">#A2551F</color>
+    <color name="warn_soft">#F9E9DC</color>
+    <color name="bad">#A52A2A</color>
+    <color name="bad_soft">#F8E4E1</color>
     <color name="promo">#B3261E</color>
     <color name="skeleton">#E8E4DE</color>
     <color name="white">#FFFFFF</color>

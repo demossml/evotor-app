@@ -6,23 +6,44 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 
 /**
- * Токены UI кассы 6.7 — в паритете с PWA app.67coffee.ru:
- * brand #002FA7, page #F6F3EE, surface white.
- * Литералы здесь — единый runtime-источник (View-код без Context);
- * XML colors.xml / themes.xml совпадают с этими значениями.
+ * Токены UI кассы 6.7 — 100% parity с index-design (assets/base.css).
+ * Klein-синий только на primary CTA; тёплая бумага на фоне; белые карточки.
  */
 object UiKit {
+    // Brand
     val BRAND = 0xFF002FA7.toInt()
-    val SOFT = 0xFFEEF4FF.toInt()
-    /** Тёплый фон страницы = PWA body #F6F3EE */
-    val PAGE = 0xFFF6F3EE.toInt()
-    val INK = 0xFF0B1220.toInt()
-    val HINT = 0xFF3D4A5C.toInt()
-    val LINE = 0xFFD6D0C8.toInt()
-    val WHITE = 0xFFFFFFFF.toInt()
-    val OK = 0xFF2B7D5B.toInt()
+    val BRAND_DEEP = 0xFF00227A.toInt()
+    val BRAND_SOFT = 0xFFE9EDFB.toInt()
+
+    // Surfaces
+    val PAGE = 0xFFF6F3EE.toInt()       // --bg
+    val PAGE_DEEP = 0xFFEFE9E0.toInt()  // --bg-deep
+    val SURFACE = 0xFFFFFFFF.toInt()    // --surface
+    val SURFACE_2 = 0xFFFBF9F5.toInt()  // --surface-2
+
+    // Ink
+    val INK = 0xFF17140F.toInt()        // --ink
+    val INK_2 = 0xFF464036.toInt()      // --ink-2
+    val MUTED = 0xFF776F61.toInt()      // --muted
+    val LINE = 0xFFE7DFD3.toInt()       // --line
+    val LINE_STRONG = 0xFFD7CCBC.toInt() // --line-strong
+
+    // Semantic
+    val SUCCESS = 0xFF1C7A4B.toInt()
+    val SUCCESS_SOFT = 0xFFE3F1E8.toInt()
+    val WARN = 0xFFA2551F.toInt()
+    val WARN_SOFT = 0xFFF9E9DC.toInt()
+    val DANGER = 0xFFA52A2A.toInt()
+    val DANGER_SOFT = 0xFFF8E4E1.toInt()
+
+    // Legacy aliases (call sites)
+    val SOFT = BRAND_SOFT
+    val HINT = INK_2
+    val WHITE = SURFACE
+    val OK = SUCCESS
     val PROMO = 0xFFB3261E.toInt()
     val SKELETON = 0xFFE8E4DE.toInt()
+    val BAD = DANGER
 
     fun rub(v: BigDecimal): String {
         val s = v.setScale(2, RoundingMode.HALF_UP)
@@ -31,9 +52,10 @@ object UiKit {
 
     fun dp(view: View, v: Int): Int = (v * view.resources.displayMetrics.density).toInt()
 
-    fun rounded(density: Float, color: Int, radiusDp: Int, stroke: Int?): GradientDrawable = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = radiusDp * density
-        if (stroke != null) setStroke(maxOf(1, density.toInt()), stroke)
-    }
+    fun rounded(density: Float, color: Int, radiusDp: Int, stroke: Int?): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusDp * density
+            if (stroke != null) setStroke(maxOf(1, density.toInt()), stroke)
+        }
 }

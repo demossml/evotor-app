@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- index-design assets/logo-67-tile.svg simplified: brand tile -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="34dp"
+    android:height="34dp"
+    android:viewportWidth="128"
+    android:viewportHeight="128">
+    <path
+        android:fillColor="#002FA7"
+        android:pathData="M28,0 h72 a28,28 0 0 1 28,28 v72 a28,28 0 0 1 -28,28 h-72 a28,28 0 0 1 -28,-28 v-72 a28,28 0 0 1 28,-28 z"/>
+    <path
+        android:fillColor="#F6F3EE"
+        android:pathData="M36,28 L52,32 L44,68 L28,64 Z"/>
+    <path
+        android:fillColor="#F6F3EE"
+        android:pathData="M28,68 h44 v44 H28 Z"/>
+    <path
+        android:fillColor="#F6F3EE"
+        android:pathData="M66,30 h44 v18 H66 Z"/>
+    <path
+        android:fillColor="#F6F3EE"
+        android:pathData="M76,48 h34 l-12,62 H76 Z"/>
+</vector>
