@@ -212,7 +212,10 @@ class MainActivity : AppCompatActivity() {
                 productsLoading = false
                 // Mark refresh only after local Evotor inventory was actually read successfully.
                 if (inv != null) catalogLoadedAt = System.currentTimeMillis()
-                if (known != null) lastEnrich = known
+                if (known != null) {
+                    lastEnrich = known
+                    upsellDefault = known.upsellDefault
+                }
                 if (first == null) { if (products.isEmpty()) productsError = true } else products = first
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
@@ -226,6 +229,9 @@ class MainActivity : AppCompatActivity() {
                 lastEnrich = enrich
                 products = merged
                 upsellDefault = enrich.upsellDefault
+                val withTop = merged.count { it.toppings.isNotEmpty() }
+                val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
+                Log.i(TAG, "enrich ok products=${merged.size} withToppings=$withTop sellableToppings=$withSellable upsellDefault=${enrich.upsellDefault.size}")
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
         }
@@ -424,7 +430,22 @@ class MainActivity : AppCompatActivity() {
         chipsScroll = strip; chipsRow = chips
         catalogColumn.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
 
-        val ad = CatalogAdapter(CatalogCallbacks(onTap = { onProductTap(it) }, onInfo = { showRecipe(it) }, onRetry = { loadProducts() }))
+        val ad = CatalogAdapter(CatalogCallbacks(
+            onTap = { onProductTap(it) },
+            onInfo = { showRecipe(it) },
+            onRetry = { loadProducts() },
+            onInc = { prod ->
+                if (prod.toppings.isNotEmpty()) showToppingsSheet(prod)
+                else {
+                    Cart.add(CartLine(prod.uuid, prod.name, prod.priceRub, BigDecimal.ONE, prod.recipe, prod.freeEligible))
+                    onCartChanged()
+                }
+            },
+            onDec = { prod ->
+                Cart.decProduct(prod.uuid)
+                onCartChanged()
+            },
+        ))
         adapter = ad
         val screenWidth = resources.configuration.screenWidthDp
         val columns = if (screenWidth >= 800) 3 else 2
@@ -600,8 +621,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onProductTap(p: CatalogProduct) {
-        // Лист добавок нужен, только если хотя бы одну можно пробить в чек (есть товар Эвотор).
-        if (p.toppings.any { !it.evotorUuid.isNullOrBlank() }) showToppingsSheet(p)
+        // Схему добавок показываем всегда, если backend её прислал (даже без evotorUuid — строки будут «нет в кассе»).
+        if (p.toppings.isNotEmpty()) showToppingsSheet(p)
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
@@ -643,26 +664,32 @@ class MainActivity : AppCompatActivity() {
                     setPadding(0, dp(4), 0, dp(4))
                 }
                 val label = text(if (sellable) "${top.name} · ${rub(top.priceRub)}" else "${top.name} — нет в кассе Эвотор", 15f, if (sellable) INK else HINT, false)
-                val qty = text("0", 15f, BRAND, true).apply { gravity = Gravity.CENTER; fontFeatureSettings = "tnum" }
-                val minus = button("−", false, 48) {
-                    val n = (selected[top.id] ?: 0) - 1
-                    if (n <= 0) selected.remove(top.id) else selected[top.id] = n
-                    qty.text = "${selected[top.id] ?: 0}"
-                    updateModifierTotal()
+                // Toggle only: add once or remove — no 1/2/3 steppers for barista speed.
+                val toggle = text("＋", 18f, BRAND, true).apply {
+                    gravity = Gravity.CENTER
+                    minWidth = dp(48); minHeight = dp(48)
+                    background = rounded(SOFT, 12, LINE)
                 }
-                val plus = button("+", false, 48) {
-                    val n = (selected[top.id] ?: 0) + 1
-                    if (n <= top.maxCount) {
-                        selected[top.id] = n
-                        qty.text = "$n"
+                fun paintToggle() {
+                    val on = (selected[top.id] ?: 0) > 0
+                    toggle.text = if (on) "✓" else "＋"
+                    toggle.setTextColor(if (on) WHITE else BRAND)
+                    toggle.background = rounded(if (on) BRAND else SOFT, 12, if (on) BRAND else LINE)
+                }
+                paintToggle()
+                if (sellable) {
+                    toggle.setOnClickListener {
+                        if ((selected[top.id] ?: 0) > 0) selected.remove(top.id)
+                        else selected[top.id] = 1
+                        paintToggle()
                         updateModifierTotal()
                     }
+                } else {
+                    toggle.alpha = 0.35f
+                    toggle.isEnabled = false
                 }
-                if (!sellable) { minus.isEnabled = false; plus.isEnabled = false; minus.alpha = 0.4f; plus.alpha = 0.4f }
                 row.addView(label, LinearLayout.LayoutParams(0, WRAP, 1f))
-                row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(48)))
-                row.addView(qty, LinearLayout.LayoutParams(dp(32), WRAP))
-                row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(48)))
+                row.addView(toggle, LinearLayout.LayoutParams(dp(48), dp(48)))
                 box.addView(row)
             }
         }
@@ -830,17 +857,26 @@ class MainActivity : AppCompatActivity() {
     private fun showUpsellThenCheckout(card: CardInfo?) {
         val inCart = Cart.all().map { it.productUuid }.toSet()
         val candidates = LinkedHashMap<String, UpsellItem>()
+        fun resolveUuid(u: UpsellItem): String? {
+            u.evotorUuid?.takeIf { it.isNotBlank() }?.let { return it }
+            // Fallback: map productId from catalog enrich → evotor uuid already in menu
+            val pid = u.productId
+            if (pid <= 0) return null
+            lastEnrich?.byUuid?.forEach { (uuid, e) -> if (e.productId == pid) return uuid }
+            products.firstOrNull { it.name.equals(u.name, ignoreCase = true) }?.uuid?.let { return it }
+            return null
+        }
         products.forEach { p ->
             if (p.uuid in inCart) p.upsell.forEach { u ->
-                val id = u.evotorUuid ?: return@forEach
-                if (id !in inCart) candidates[id] = u
+                val id = resolveUuid(u) ?: return@forEach
+                if (id !in inCart || true) candidates[id] = u.copy(evotorUuid = id)
             }
         }
         upsellDefault.forEach { u ->
-            val id = u.evotorUuid ?: return@forEach
-            if (id !in inCart) candidates.putIfAbsent(id, u)
+            val id = resolveUuid(u) ?: return@forEach
+            candidates.putIfAbsent(id, u.copy(evotorUuid = id))
         }
-        val list = candidates.values.take(5)
+        val list = candidates.entries.take(6)
         if (list.isEmpty()) {
             checkout(card)
             return
@@ -852,21 +888,39 @@ class MainActivity : AppCompatActivity() {
         }
         box.addView(text("Добавить к заказу?", 18f, BRAND, true))
         box.addView(text("Рекомендации", 14f, HINT, false).apply { setPadding(0, dp(4), 0, dp(8)) })
-        list.forEach { u ->
+
+        list.forEach { (uuid, u) ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(8), dp(8), dp(8), dp(8))
                 background = rounded(WHITE, 12, LINE)
             }
-            row.addView(text("${u.name}\n${rub(u.priceRub)}", 15f, INK, false), LinearLayout.LayoutParams(0, WRAP, 1f))
-            row.addView(button("+", true, 44) {
-                Cart.add(CartLine(u.evotorUuid!!, u.name, u.priceRub, BigDecimal.ONE, null, false))
-                updateBar()
-                Toast.makeText(this, "Добавлено: ${u.name}", Toast.LENGTH_SHORT).show()
-            }, LinearLayout.LayoutParams(dp(56), dp(44)))
+            row.addView(
+                text("${u.name}\n${rub(u.priceRub)}", 15f, INK, false),
+                LinearLayout.LayoutParams(0, WRAP, 1f),
+            )
+            val qtyTv = text(Cart.qty(uuid).toString(), 16f, BRAND, true).apply {
+                gravity = Gravity.CENTER
+                fontFeatureSettings = "tnum"
+                minWidth = dp(36)
+            }
+            fun refreshQty() { qtyTv.text = Cart.qty(uuid).toString() }
+            fun stepBtn(label: String, act: () -> Unit) = button(label, false, 44) {
+                act()
+                onCartChanged()
+                refreshQty()
+            }
+            row.addView(stepBtn("−") {
+                Cart.decProduct(uuid)
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            row.addView(qtyTv, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(4); rightMargin = dp(4) })
+            row.addView(stepBtn("+") {
+                Cart.add(CartLine(uuid, u.name, u.priceRub, BigDecimal.ONE, null, false))
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
             box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
         }
+
         box.addView(button("К оплате", true, 52) {
             dialog.dismiss()
             checkout(card)

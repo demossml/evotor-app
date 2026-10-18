@@ -50,6 +50,8 @@ class CatalogCallbacks(
     val onTap: (CatalogProduct) -> Unit,
     val onInfo: (CatalogProduct) -> Unit,
     val onRetry: () -> Unit,
+    val onInc: (CatalogProduct) -> Unit = {},
+    val onDec: (CatalogProduct) -> Unit = {},
 )
 
 private const val QTY = "qty"
@@ -167,19 +169,20 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
     private val meta = TextView(ctx)
     private val qty: TextView
     private val info = TextView(ctx)
+    private val stepper: LinearLayout
+    private val qtyLabel: TextView
     private var item: CatalogProduct? = null
     private val thumbPx: Int
     init {
         val d = ctx.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val box = itemView as LinearLayout
-        // PWA-like tile: photo on top, name + price below (2-column grid parent)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(8), dp(8), dp(8), dp(8))
         box.background = UiKit.rounded(d, UiKit.WHITE, 20, UiKit.LINE)
         box.isClickable = true; box.isFocusable = true
         box.contentDescription = "Товар меню"
-        box.layoutParams = RecyclerView.LayoutParams(MATCH, dp(208)).apply {
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply {
             width = MATCH
             setMargins(dp(4), dp(4), dp(4), dp(4))
         }
@@ -187,7 +190,6 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         val photoBox = FrameLayout(ctx)
         thumb.setCorner(16)
         photoBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
-        // square photo via 1:1 — fixed height ~ half column on ST5
         val photoH = dp(100)
         box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
         thumbPx = (photoH * 2).coerceIn(240, 480)
@@ -199,7 +201,7 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         })
 
         name.textSize = 14f; name.setTypeface(null, Typeface.BOLD); name.setTextColor(UiKit.INK)
-        name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
+        name.minLines = 2; name.maxLines = 2; name.ellipsize = TextUtils.TruncateAt.END
         name.setPadding(0, dp(8), 0, 0)
         box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -212,6 +214,34 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         info.background = UiKit.rounded(d, UiKit.WHITE, 14, UiKit.BRAND)
         info.visibility = View.INVISIBLE
         box.addView(info, LinearLayout.LayoutParams(dp(28), dp(24)).apply { topMargin = dp(4) })
+
+        stepper = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+        }
+        fun stepBtn(label: String, onClick: () -> Unit) = TextView(ctx).apply {
+            text = label
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setTextColor(UiKit.BRAND)
+            setTypeface(null, Typeface.BOLD)
+            background = UiKit.rounded(d, UiKit.SOFT, 12, UiKit.LINE)
+            minWidth = dp(44); minHeight = dp(40)
+            setOnClickListener { onClick() }
+        }
+        qtyLabel = TextView(ctx).apply {
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(UiKit.INK)
+            setTypeface(null, Typeface.BOLD)
+            fontFeatureSettings = "tnum"
+            minWidth = dp(36)
+        }
+        stepper.addView(stepBtn("−") { item?.let(cb.onDec) }, LinearLayout.LayoutParams(dp(44), dp(40)))
+        stepper.addView(qtyLabel, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6); rightMargin = dp(6) })
+        stepper.addView(stepBtn("+") { item?.let(cb.onInc) }, LinearLayout.LayoutParams(dp(44), dp(40)))
+        box.addView(stepper, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
 
         box.setOnClickListener { item?.let(cb.onTap) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }
@@ -229,7 +259,17 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
         bindQty()
     }
 
-    fun bindQty() { item?.let { applyQty(qty, it.uuid) } }
+    fun bindQty() {
+        val p = item ?: return
+        applyQty(qty, p.uuid)
+        val n = Cart.qty(p.uuid)
+        if (n > 0) {
+            stepper.visibility = View.VISIBLE
+            qtyLabel.text = n.toString()
+        } else {
+            stepper.visibility = View.GONE
+        }
+    }
 }
 
 /** Строка с горизонтальной каруселью «Фокус»; внутри свой ListAdapter + DiffUtil. */

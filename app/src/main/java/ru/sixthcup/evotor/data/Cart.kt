@@ -83,7 +83,16 @@ object Cart {
         save()
     }
 
-    fun gross(): BigDecimal =
+    /** Remove one unit of a catalog product (any cartKey variant). */
+    fun decProduct(productUuid: String) {
+        val entry = lines.entries.lastOrNull { it.value.productUuid == productUuid } ?: return
+        val q = entry.value.quantity
+        if (q <= BigDecimal.ONE) lines.remove(entry.key)
+        else lines[entry.key] = entry.value.copy(quantity = q.subtract(BigDecimal.ONE))
+        save()
+    }
+
+        fun gross(): BigDecimal =
         lines.values.fold(BigDecimal.ZERO) { acc, l -> acc.add(l.lineTotal()) }
 
     private fun save() {
