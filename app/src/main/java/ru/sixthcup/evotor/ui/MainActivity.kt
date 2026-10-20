@@ -261,7 +261,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (inv == null) return@thread
             val enrich = try { CatalogApi.fetch(null) } catch (e: Throwable) { Log.e(TAG, "enrich", e); CatalogApi.Payload(emptyMap(), emptyList()) }
-            if (enrich.byUuid.isEmpty()) return@thread
+            if (enrich.byUuid.isEmpty() && enrich.byName.isEmpty()) return@thread
             CatalogCache.save(ctx, enrich)
             val merged = CatalogApi.merge(inv, enrich)
             runOnUiThread {
@@ -273,7 +273,7 @@ class MainActivity : AppCompatActivity() {
                 upsellDefault = enrich.upsellDefault
                 val withTop = merged.count { it.toppings.isNotEmpty() }
                 val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
-                Log.i(TAG, "enrich ok products=${merged.size} withToppings=$withTop sellableToppings=$withSellable upsellDefault=${enrich.upsellDefault.size}")
+                Log.i(TAG, "enrich ok products=${merged.size} matchedUuid=${enrich.byUuid.size} matchedName=${enrich.byName.size} withToppings=$withTop sellableToppings=$withSellable upsellDefault=${enrich.upsellDefault.size}")
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
         }
@@ -904,7 +904,7 @@ class MainActivity : AppCompatActivity() {
         val known = setOf("milk", "молоко", "syrup", "сироп", "sugar", "сахар", "topping", "extra", "other", "добавки", "добавка")
         fun toOpts(vararg keys: String) = keys.flatMap { k ->
             byGroup[k].orEmpty().map {
-                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() })
+                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() }, required = it.required)
             }
         }
         val restExtra = byGroup
@@ -912,7 +912,7 @@ class MainActivity : AppCompatActivity() {
             .values
             .flatten()
             .map {
-                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() })
+                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() }, required = it.required)
             }
         // Merge Evotor #opt= inventory items with backend toppings (do not drop one for the other).
         return OptionPicker.Opts(

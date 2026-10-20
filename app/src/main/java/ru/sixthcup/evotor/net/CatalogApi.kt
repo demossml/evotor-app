@@ -9,6 +9,7 @@ import ru.sixthcup.evotor.data.ProductMarkers
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
 import java.math.BigDecimal
+import java.text.Normalizer
 import java.net.HttpURLConnection
 import java.net.URL
 import android.util.Log
@@ -26,10 +27,13 @@ object CatalogApi {
         val upsellDefault: List<UpsellItem>,
         /** Имена категорий из 6.7 (для чипов, если Evotor groups пустые). */
         val categoryNames: List<String> = emptyList(),
+        /** Fallback for legacy/store UUID mismatches: only unique normalized product names are used. */
+        val byName: Map<String, Enrich> = emptyMap(),
     )
 
     data class Enrich(
         val productId: Int,
+        val name: String? = null,
         val imageUrl: String?,
         val recipe: String?,
         val countsAsCup: Boolean?,
@@ -79,9 +83,9 @@ object CatalogApi {
     }
 
     fun merge(products: List<CatalogProduct>, payload: Payload): List<CatalogProduct> {
-        if (payload.byUuid.isEmpty() && payload.categoryNames.isEmpty()) return products
+        if (payload.byUuid.isEmpty() && payload.byName.isEmpty() && payload.categoryNames.isEmpty()) return products
         val merged = products.map { p ->
-            val e = payload.byUuid[p.uuid] ?: return@map p
+            val e = payload.byUuid[p.uuid] ?: payload.byName[normalizeName(p.name)] ?: return@map p
             val featured = p.featured || e.featured ||
                 ProductMarkers.isFocus(e.description) ||
                 ProductMarkers.isCombo(p.name, e.description)
@@ -129,17 +133,20 @@ object CatalogApi {
         val root = JSONObject(body)
         val arr = root.optJSONArray("products") ?: JSONArray()
         val map = HashMap<String, Enrich>()
+        val named = LinkedHashMap<String, Enrich>()
+        val ambiguousNames = HashSet<String>()
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
             val uuid = o.optString("evotorUuid").trim()
-            if (uuid.isEmpty()) continue
+            val productName = o.optString("name").trim()
             val recipe = o.optString("recipeText").ifBlank { o.optString("recipe") }.ifBlank { null }
             val desc = o.optString("description").ifBlank { null }
             val featured = o.optBoolean("featured", false) ||
                 ProductMarkers.isFocus(desc) ||
                 ProductMarkers.isCombo(o.optString("name"), desc)
-            map[uuid] = Enrich(
+            val enrich = Enrich(
                 productId = if (o.has("productId")) o.optInt("productId") else o.optInt("id"),
+                name = productName.ifBlank { null },
                 imageUrl = o.optString("imageUrl").ifBlank { null },
                 recipe = recipe,
                 countsAsCup = if (o.has("countsAsCup")) o.optBoolean("countsAsCup") else null,
@@ -156,7 +163,13 @@ object CatalogApi {
                 sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
                 sizeUnit = o.optString("sizeUnit").ifBlank { null },
             )
+            if (uuid.isNotEmpty()) map[uuid] = enrich
+            val nameKey = normalizeName(productName)
+            if (nameKey.isNotEmpty()) {
+                if (named.containsKey(nameKey)) ambiguousNames.add(nameKey) else named[nameKey] = enrich
+            }
         }
+        ambiguousNames.forEach { named.remove(it) }
         val catNames = ArrayList<String>()
         val cats = root.optJSONArray("categories")
         if (cats != null) {
@@ -175,8 +188,14 @@ object CatalogApi {
             catNames.addAll(seen)
         }
         val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
-        return Payload(map, upsellDefault, catNames)
+        return Payload(map, upsellDefault, catNames, named)
     }
+
+    private fun normalizeName(value: String?): String = Normalizer.normalize(value.orEmpty(), Normalizer.Form.NFKC)
+        .lowercase(java.util.Locale.forLanguageTag("ru-RU"))
+        .replace('ё', 'е')
+        .replace(Regex("\\s+"), " ")
+        .trim()
 
     private fun parseToppings(a: JSONArray?): List<Topping> {
         if (a == null) return emptyList()
@@ -195,6 +214,7 @@ object CatalogApi {
                     groupKey = o.optString("groupKey", "extra"),
                     maxCount = o.optInt("maxCount", 2),
                     evotorUuid = o.optString("evotorUuid").ifBlank { null },
+                    required = o.optBoolean("required", false),
                 )
             )
         }

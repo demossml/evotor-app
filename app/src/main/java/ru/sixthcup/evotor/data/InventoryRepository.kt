@@ -65,6 +65,7 @@ data class Topping(
     val groupKey: String,
     val maxCount: Int = 2,
     val evotorUuid: String? = null,
+    val required: Boolean = false,
 )
 
 data class UpsellItem(

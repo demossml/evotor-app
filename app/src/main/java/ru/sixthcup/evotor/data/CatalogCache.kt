@@ -22,7 +22,7 @@ object CatalogCache {
                 else -> File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json").takeIf { it.isFile && it.length() > 0L }
             } ?: return null
             val root = JSONObject(src.readText())
-            val by = root.optJSONObject("byUuid") ?: return null
+            val by = root.optJSONObject("byUuid") ?: JSONObject()
             val map = linkedMapOf<String, CatalogApi.Enrich>()
             val keys = by.keys()
             while (keys.hasNext()) {
@@ -32,6 +32,7 @@ object CatalogCache {
                     if (!o.has(k) || o.isNull(k)) null else o.optString(k).takeIf { it.isNotBlank() }
                 map[uuid] = CatalogApi.Enrich(
                     productId = o.optInt("productId", 0),
+                    name = optStr("name"),
                     imageUrl = optStr("imageUrl"),
                     recipe = optStr("recipe"),
                     countsAsCup = if (o.has("countsAsCup") && !o.isNull("countsAsCup")) o.optBoolean("countsAsCup") else null,
@@ -44,7 +45,34 @@ object CatalogCache {
                     isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
                 )
             }
-            if (map.isEmpty()) return null
+            fun parseEnrich(o: JSONObject): CatalogApi.Enrich {
+                fun str(k: String): String? = if (!o.has(k) || o.isNull(k)) null else o.optString(k).takeIf { it.isNotBlank() }
+                return CatalogApi.Enrich(
+                    productId = o.optInt("productId", 0),
+                    name = str("name"),
+                    imageUrl = str("imageUrl"),
+                    recipe = str("recipe"),
+                    countsAsCup = if (o.has("countsAsCup") && !o.isNull("countsAsCup")) o.optBoolean("countsAsCup") else null,
+                    freeEligible = if (o.has("freeEligible") && !o.isNull("freeEligible")) o.optBoolean("freeEligible") else null,
+                    toppings = parseToppings(o.optJSONArray("toppings")),
+                    upsell = parseUpsell(o.optJSONArray("upsell")),
+                    categoryName = str("categoryName"),
+                    featured = o.optBoolean("featured", false),
+                    description = str("description"),
+                    isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
+                )
+            }
+            val named = linkedMapOf<String, CatalogApi.Enrich>()
+            val namedObj = root.optJSONObject("byName")
+            if (namedObj != null) {
+                val namedKeys = namedObj.keys()
+                while (namedKeys.hasNext()) {
+                    val key = namedKeys.next()
+                    val o = namedObj.getJSONObject(key)
+                    named[key] = parseEnrich(o)
+                }
+            }
+            if (map.isEmpty() && named.isEmpty()) return null
             val cats = mutableListOf<String>()
             val arr = root.optJSONArray("categoryNames")
             if (arr != null) for (i in 0 until arr.length()) {
@@ -52,19 +80,19 @@ object CatalogCache {
                 if (n.isNotBlank()) cats.add(n)
             }
             val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
-            CatalogApi.Payload(map, upsellDefault, cats)
+            CatalogApi.Payload(map, upsellDefault, cats, named)
         } catch (_: Throwable) {
             null
         }
     }
 
     fun save(ctx: Context, payload: CatalogApi.Payload) {
-        if (payload.byUuid.isEmpty()) return
+        if (payload.byUuid.isEmpty() && payload.byName.isEmpty()) return
         try {
-            val by = JSONObject()
-            for ((uuid, e) in payload.byUuid) {
+            fun enrichJson(e: CatalogApi.Enrich): JSONObject {
                 val o = JSONObject()
                     .put("productId", e.productId)
+                    .put("name", e.name ?: JSONObject.NULL)
                     .put("imageUrl", e.imageUrl ?: JSONObject.NULL)
                     .put("recipe", e.recipe ?: JSONObject.NULL)
                     .put("categoryName", e.categoryName ?: JSONObject.NULL)
@@ -75,12 +103,17 @@ object CatalogCache {
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
                 if (e.isFood != null) o.put("isFood", e.isFood)
-                by.put(uuid, o)
+                return o
             }
+            val by = JSONObject()
+            for ((uuid, e) in payload.byUuid) by.put(uuid, enrichJson(e))
+            val byName = JSONObject()
+            for ((name, e) in payload.byName) byName.put(name, enrichJson(e))
             val cats = JSONArray()
             payload.categoryNames.forEach { cats.put(it) }
             val root = JSONObject()
                 .put("byUuid", by)
+                .put("byName", byName)
                 .put("categoryNames", cats)
                 .put("upsellDefault", upsellJson(payload.upsellDefault))
             File(ctx.applicationContext.filesDir, FILE).writeText(root.toString())
@@ -98,7 +131,8 @@ object CatalogCache {
                     .put("priceRub", t.priceRub.toPlainString())
                     .put("groupKey", t.groupKey)
                     .put("maxCount", t.maxCount)
-                    .put("evotorUuid", t.evotorUuid ?: JSONObject.NULL),
+                    .put("evotorUuid", t.evotorUuid ?: JSONObject.NULL)
+                    .put("required", t.required),
             )
         }
         return a
@@ -132,6 +166,7 @@ object CatalogCache {
                     groupKey = o.optString("groupKey", "extra"),
                     maxCount = o.optInt("maxCount", 1).coerceAtLeast(1),
                     evotorUuid = o.optString("evotorUuid").ifBlank { null },
+                    required = o.optBoolean("required", false),
                 ),
             )
         }

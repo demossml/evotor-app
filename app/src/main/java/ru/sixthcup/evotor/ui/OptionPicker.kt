@@ -29,6 +29,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         val price: BigDecimal,
         val evotorUuid: String?,
         val isDefault: Boolean = false,
+        val required: Boolean = false,
     ) {
         /** Провести фискально можно только реальный товар; бесплатную схему — как подпись. */
         val sellable: Boolean get() = !evotorUuid.isNullOrBlank() || price.signum() == 0
@@ -72,15 +73,18 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         this.variant = initial?.let { want -> this.variants.firstOrNull { it.uuid == want.uuid } }
             ?: this.variants.firstOrNull { it.defaultVariant }
             ?: this.variants.firstOrNull()
-        defMilk = opts.milk.firstOrNull { it.isDefault } ?: opts.milk.firstOrNull { it.price.signum() == 0 }
-        defSyrup = opts.syrup.firstOrNull { it.isDefault } ?: opts.syrup.firstOrNull { it.price.signum() == 0 }
-        defSugar = opts.sugar.firstOrNull { it.isDefault } ?: opts.sugar.firstOrNull { it.price.signum() == 0 }
+        defMilk = opts.milk.firstOrNull { it.required && it.sellable }
+            ?: opts.milk.firstOrNull { it.isDefault } ?: opts.milk.firstOrNull { it.price.signum() == 0 }
+        defSyrup = opts.syrup.firstOrNull { it.required && it.sellable }
+            ?: opts.syrup.firstOrNull { it.isDefault } ?: opts.syrup.firstOrNull { it.price.signum() == 0 }
+        defSugar = opts.sugar.firstOrNull { it.required && it.sellable }
+            ?: opts.sugar.firstOrNull { it.isDefault } ?: opts.sugar.firstOrNull { it.price.signum() == 0 }
         // При редактировании восстанавливаем отмеченные ранее опции (в корзине они лежат отдельными строками).
         milk = opts.milk.firstOrNull { it.key in preselect } ?: defMilk
         syrup = opts.syrup.firstOrNull { it.key in preselect } ?: defSyrup
         sugar = opts.sugar.firstOrNull { it.key in preselect } ?: defSugar
         extras.clear()
-        opts.extra.filter { it.key in preselect }.forEach { extras[it.key] = it }
+        opts.extra.filter { it.key in preselect || (it.required && it.sellable) }.forEach { extras[it.key] = it }
         render()
     }
 
@@ -144,7 +148,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             header("Молоко", "включено")
             grid(opts.milk.map { o ->
                 cell(o.label, o.price, milk?.key == o.key, o.sellable, false) {
-                    milk = if (milk?.key == o.key) null else o
+                    milk = if (milk?.key == o.key && !o.required) null else o
                     render(); onChange?.invoke()
                 }
             }, 2)
@@ -153,7 +157,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             header("Сироп", "по желанию")
             grid(opts.syrup.map { o ->
                 cell(o.label, o.price, syrup?.key == o.key, o.sellable, false) {
-                    syrup = if (syrup?.key == o.key) null else o
+                    syrup = if (syrup?.key == o.key && !o.required) null else o
                     render(); onChange?.invoke()
                 }
             }, 2)
@@ -162,16 +166,18 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             header("Сахар", "в порции")
             grid(opts.sugar.map { o ->
                 cell(o.label, o.price.takeIf { it.signum() > 0 }, sugar?.key == o.key, o.sellable, false) {
-                    sugar = if (sugar?.key == o.key) null else o
+                    sugar = if (sugar?.key == o.key && !o.required) null else o
                     render(); onChange?.invoke()
                 }
             }, 3)
         }
         if (opts.extra.isNotEmpty()) {
-            header("Добавки", "можно несколько")
+            header("Добавки", if (opts.extra.any { it.required && it.sellable }) "обязательные отмечены" else "можно несколько")
             grid(opts.extra.map { o ->
                 cell(o.label, o.price, extras.containsKey(o.key), o.sellable, true) {
-                    if (extras.containsKey(o.key)) extras.remove(o.key) else extras[o.key] = o
+                    if (extras.containsKey(o.key)) {
+                        if (!o.required) extras.remove(o.key)
+                    } else extras[o.key] = o
                     render(); onChange?.invoke()
                 }
             }, 2)
