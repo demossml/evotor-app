@@ -972,15 +972,7 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(priceView)
         body.addView(titleRow)
 
-        p.recipe?.takeIf { it.isNotBlank() }?.let { desc ->
-            body.addView(TextView(this).apply {
-                text = desc
-                textSize = 10.5f
-                setTextColor(UiKit.MUTED)
-                setLineSpacing(0f, 1.3f)
-                setPadding(0, dp(3), dp(40), 0)
-            })
-        }
+        // Рецепт только по «i» / восклицательному знаку (showRecipe), не в sheet.
         val tags = itemTags(p)
         if (tags.childCount > 0) body.addView(tags)
 
@@ -1785,6 +1777,7 @@ class MainActivity : AppCompatActivity() {
             if (isFinishing || isDestroyed) return
             AlertDialog.Builder(this).setTitle(p.name).setMessage(r ?: "Рецепт для этой позиции не указан.").setPositiveButton("Закрыть", null).show()
         }
+        // recipeText с backend (после merge лежит в p.recipe) или DESCRIPTION кассы по «i».
         if (!p.recipe.isNullOrBlank()) { showText(p.recipe); return }
         val ctx = applicationContext
         thread(name = "recipe-load") {

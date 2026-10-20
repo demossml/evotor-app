@@ -134,7 +134,8 @@ object InventoryRepository {
                 comboDrinkUuid = ProductMarkers.comboRefs(p.description)?.first,
                 comboFoodUuid = ProductMarkers.comboRefs(p.description)?.second,
                 // Рецепт без служебных меток (#focus/#old=…); description остаётся «сырым» для FreeCupRules.
-                recipe = ProductMarkers.cleanDescription(p.description),
+                // Рецепт не подставляем из DESCRIPTION — только backend recipeText или по «i».
+                recipe = null,
             )
         }.sortedBy { it.name.lowercase() }
     }
