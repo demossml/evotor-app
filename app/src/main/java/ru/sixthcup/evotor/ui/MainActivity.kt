@@ -43,6 +43,11 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardSession
+import ru.sixthcup.evotor.net.ShiftApi
+import ru.sixthcup.evotor.data.OrderQueueStore
+import ru.sixthcup.evotor.data.QueueOps
+import ru.sixthcup.evotor.data.QueueOrder
+import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CheckoutChoice
@@ -98,12 +103,8 @@ class MainActivity : AppCompatActivity() {
     private var tsYear: Int = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
     private var tsMonth: Int = java.util.Calendar.getInstance().get(java.util.Calendar.MONTH) // 0-based
     private var tsSelectedDay: Int = java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_MONTH)
-    /** empty | loading | error — без демо-смен. */
-    private var tsLoadState: String = "empty"
     /** Пожелания: выбранные дни (локальный черновик до PUT API). */
     private val wishSelected = sortedSetOf<Int>()
-    /** open | draft | sent_local — без серверных accepted/declined. */
-    private var wishStatus: String = "open"
     private var wishYear: Int = 0
     private var wishMonth: Int = 0 // 0-based, целевой месяц (обычно следующий)
     private var resolving = false
@@ -133,13 +134,14 @@ class MainActivity : AppCompatActivity() {
     private var cartSidebarRows: LinearLayout? = null
     private var cartSidebarTotal: TextView? = null
     private var wideLayout: Boolean = false
+    private var cartDockFill: (() -> Unit)? = null
     private var cartDialog: BottomSheetDialog? = null
     private var checkoutDialog: BottomSheetDialog? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private var qrRunnable: Runnable? = null
 
-    private enum class Screen { CARD, ORDER, PAYMENT, SHIFT }
+    private enum class Screen { CARD, ORDER, PAYMENT, SHIFT, DONE, QUEUE }
     private enum class Kind { ERROR, WARN, INFO, OK }
 
     private val scanReceiver = object : BroadcastReceiver() {
@@ -225,13 +227,6 @@ class MainActivity : AppCompatActivity() {
         products = list
         variantModel = DrinkVariants.build(list)
         combos = Combos.from(list)
-        // Диагностика разметки: видно, какие группы размеров собрались из номенклатуры.
-        val groups = variantModel.variantsByKey.filterValues { it.size > 1 }
-        Log.i(
-            TAG,
-            "catalog: products=${list.size} tiles=${variantModel.tiles.size} sizeGroups=${groups.size} " +
-                groups.entries.take(8).joinToString { "${it.key}(${it.value.size})" },
-        )
     }
 
     private fun loadProducts() {
@@ -302,12 +297,18 @@ class MainActivity : AppCompatActivity() {
         repeatOrderView = null; cartCountView = null; cartTotalView = null; cartSubView = null
         cartSidebar = null; cartSidebarRows = null; cartSidebarTotal = null; wideLayout = false
         scroll.visibility = View.VISIBLE; orderPane.visibility = View.GONE
+        root.setPadding(dp(12), dp(8), dp(12), dp(16))
+        bottomBar.setPadding(dp(12), dp(6), dp(12), dp(6)); bottomBar.setBackgroundColor(PAGE)
         when (screen) {
             Screen.CARD -> renderCard()
             Screen.ORDER -> renderOrder()
             Screen.PAYMENT -> renderPayment()
             Screen.SHIFT -> renderShift()
+            Screen.DONE -> renderDone()
+            Screen.QUEUE -> renderQueue()
         }
+        if (screen != Screen.QUEUE) stopQueueTicker()
+        Fonts.apply(topBar); Fonts.apply(root); Fonts.apply(orderPane); Fonts.apply(bottomBar)
         topBar.visibility = if (topBar.childCount == 0) View.GONE else View.VISIBLE
         bottomBar.visibility = if (bottomBar.childCount == 0) View.GONE else View.VISIBLE
     }
@@ -316,273 +317,194 @@ class MainActivity : AppCompatActivity() {
         try { cartDialog?.dismiss() } catch (_: Throwable) {}
         try { checkoutDialog?.dismiss() } catch (_: Throwable) {}
         cartDialog = null; checkoutDialog = null
+        if (screen != Screen.CARD) {
+            val g = guestDialog
+            guestDialog = null; guestBody = null
+            try { g?.dismiss() } catch (_: Throwable) {}
+        }
     }
 
     // ── Экран 1: карта (guest-sheet 1:1 index) ──
 
-    private fun renderCard() {
-        val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
-        // head like guest-sheet
-        topBar.setPadding(dp(16), dp(14), dp(12), dp(8))
-        val head = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        titleCol.addView(TextView(this).apply {
-            text = "Карта гостя"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        titleCol.addView(TextView(this).apply {
-            text = "Лояльность 6.7 · чашки и бонусы"
-            textSize = 9.5f
-            setTextColor(UiKit.MUTED)
-        })
-        head.addView(titleCol, LinearLayout.LayoutParams(0, WRAP, 1f))
-        head.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
-            background = rounded(UiKit.SURFACE_2, 22, null)
-            isClickable = true
-            contentDescription = "Закрыть"
-            setOnClickListener {
-                notice = null
-                screen = Screen.ORDER
-                safeRender()
-            }
-        }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+    private var guestDialog: BottomSheetDialog? = null
+    private var guestBody: LinearLayout? = null
 
-        if (resolving) {
-            root.addView(banner("Проверяем карту…", Kind.INFO), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+    /** Экран CARD = витрина под листом «Карта гостя» (`guest-sheet` в index). */
+    private fun renderCard() {
+        renderOrder()
+        val existing = guestDialog
+        if (existing != null && existing.isShowing) { fillGuest(); return }
+        openGuestSheet()
+    }
+
+    private fun openGuestSheet() {
+        val dialog = BottomSheetDialog(this)
+        guestDialog = dialog
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(WHITE) }
+        sheetHead(root, "Карта гостя", "Лояльность 6.7 · чашки и бонусы") { closeGuestSheet() }
+        val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(4), dp(16), dp(16)) }
+        scroll.addView(body)
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        guestBody = body
+        dialog.setContentView(root)
+        styleSheet(dialog)
+        dialog.setOnDismissListener {
+            if (guestDialog === dialog) {
+                guestDialog = null; guestBody = null
+                if (screen == Screen.CARD) { screen = Screen.ORDER; notice = null; safeRender() }
+            }
         }
-        notice?.let {
-            root.addView(banner(it, noticeKind), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
-        }
+        fillGuest()
+        dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
+    }
+
+    private fun closeGuestSheet() { guestDialog?.dismiss() }
+
+    private fun fillGuest() {
+        val body = guestBody ?: return
+        body.removeAllViews()
+        val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+
+        if (resolving) body.addView(banner("Проверяем карту…", Kind.INFO, 11f), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        notice?.let { body.addView(banner(it, noticeKind, 11f), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) }) }
 
         if (card != null) {
-            // guest-card (brand panel)
-            val gc = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(15), dp(15), dp(15), dp(15))
-                background = rounded(BRAND, 18, null)
-            }
-            gc.addView(TextView(this).apply {
-                text = "6.7 CLUB · КАРТА ГОСТЯ"
-                textSize = 8f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(0x9EFFFFFF.toInt())
-                letterSpacing = 0.16f
+            // .guest-card
+            val gc = FrameLayout(this).apply { background = rounded(BRAND, 18, null) }
+            gc.addView(android.widget.ImageView(this).apply {
+                setImageResource(R.drawable.logo_67_mark); alpha = 0.08f
+                setColorFilter(WHITE, android.graphics.PorterDuff.Mode.SRC_IN)
+            }, FrameLayout.LayoutParams(dp(162), dp(165), Gravity.BOTTOM or Gravity.END).apply { rightMargin = -dp(18); bottomMargin = -dp(28) })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(15), dp(15), dp(15)) }
+            col.addView(TextView(this).apply {
+                text = "6.7 CLUB · КАРТА ГОСТЯ"; textSize = 10f; weight(Fonts.SEMIBOLD); letterSpacing = 0.16f; setTextColor(0x9EFFFFFF.toInt())
             })
-            val displayName = card.cardCode.ifBlank { "Гость" }
-            gc.addView(TextView(this).apply {
-                text = displayName
-                textSize = 21f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(WHITE)
+            col.addView(TextView(this).apply {
+                text = card.cardCode.ifBlank { "Гость" }; textSize = 21f; weight(Fonts.STRONG); letterSpacing = -0.025f; setTextColor(WHITE)
                 setPadding(0, dp(4), 0, 0)
             })
-            if (card.freeStatus == "OFFLINE") {
-                gc.addView(TextView(this).apply {
-                    text = "Нет связи · баланс неизвестен"
-                    textSize = 10f
-                    setTextColor(0xADFFFFFF.toInt())
-                })
+            if (card.freeStatus == "OFFLINE") col.addView(TextView(this).apply {
+                text = "Нет связи · баланс неизвестен"; textSize = 10f; setTextColor(0xADFFFFFF.toInt())
+            })
+            val stats = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(18), 0, 0) }
+            fun stat(label: String, value: String, first: Boolean) {
+                val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                c.addView(TextView(this).apply { text = label; textSize = 10f; letterSpacing = 0.08f; setTextColor(0x8CFFFFFF.toInt()) })
+                c.addView(TextView(this).apply { text = value; textSize = 19f; weight(Fonts.STRONG); letterSpacing = -0.02f; setTextColor(WHITE); setPadding(0, dp(2), 0, 0) })
+                stats.addView(c, LinearLayout.LayoutParams(WRAP, WRAP).apply { if (!first) leftMargin = dp(22) })
             }
-            val stats = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, dp(18), 0, 0)
-            }
-            fun stat(label: String, value: String) {
-                val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                col.addView(TextView(this).apply {
-                    text = label
-                    textSize = 8f
-                    setTextColor(0x8CFFFFFF.toInt())
-                    letterSpacing = 0.08f
-                })
-                col.addView(TextView(this).apply {
-                    text = value
-                    textSize = 19f
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(WHITE)
-                    setPadding(0, dp(2), 0, 0)
-                })
-                stats.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
-            }
-            stat("ЧАШКИ", "${card.paidCups} / ${card.cupsForFree}")
-            stat("КЭШБЭК", "${card.cashbackKopecks / 100} ₽")
-            gc.addView(stats)
-            // progress dots (paidCups of cupsForFree)
             val goal = card.cupsForFree.coerceAtLeast(1)
             val filled = card.paidCups.coerceIn(0, goal)
-            val dots = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, dp(14), 0, 0)
-            }
-            for (i in 0 until goal.coerceAtMost(12)) {
-                dots.addView(View(this).apply {
-                    background = rounded(if (i < filled) WHITE else 0x33FFFFFF.toInt(), 4, null)
-                }, LinearLayout.LayoutParams(0, dp(7), 1f).apply {
-                    if (i > 0) leftMargin = dp(4)
-                })
-            }
-            gc.addView(dots)
-            gc.addView(TextView(this).apply {
-                text = when {
-                    card.freeAvailable > 0 -> "Бесплатный напиток доступен в этом чеке"
-                    else -> {
-                        val left = (goal - filled).coerceAtLeast(0)
-                        "Ещё $left до бесплатного напитка"
-                    }
-                }
-                textSize = 9f
-                setTextColor(0xB3FFFFFF.toInt())
-                setPadding(0, dp(7), 0, 0)
+            stat("ЧАШКИ", "$filled / $goal", true)
+            stat("БОНУСЫ", "${card.cashbackKopecks / 100}", false)
+            col.addView(stats)
+            col.addView(UiKit.loyaltyDots(this, filled, goal, onColor = 0xFFF6F3EE.toInt()).apply {
+                // .gc-progress .lc-dots i: высота 7
+                for (i in 0 until childCount) getChildAt(i).layoutParams.height = dp(7)
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+            col.addView(TextView(this).apply {
+                val left = (goal - filled).coerceAtLeast(0)
+                text = if (card.freeAvailable > 0) "Бесплатный напиток доступен в этом чеке"
+                else "Ещё $left ${plural(left, "чашка", "чашки", "чашек")} до бесплатного напитка"
+                textSize = 10f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(7), 0, 0)
             })
-            val actions = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, dp(14), 0, 0)
-            }
+            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(14), 0, 0) }
             actions.addView(TextView(this).apply {
-                text = "К заказу"
-                textSize = 10f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(INK)
-                background = rounded(0xFFF6F3EE.toInt(), 9, null)
-                isClickable = true
+                text = "К заказу"; textSize = 10f; weight(Fonts.SEMIBOLD); gravity = Gravity.CENTER; setTextColor(INK)
+                setPadding(dp(12), 0, dp(12), 0); background = rounded(0xFFF6F3EE.toInt(), 9, null); isClickable = true
                 setOnClickListener { notice = null; screen = Screen.ORDER; safeRender() }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { rightMargin = dp(6) })
+            }, LinearLayout.LayoutParams(WRAP, dp(36)).apply { rightMargin = dp(6) })
             actions.addView(TextView(this).apply {
-                text = "Отвязать"
-                textSize = 10f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(WHITE)
-                background = rounded(0x24FFFFFF.toInt(), 9, null)
-                isClickable = true
-                setOnClickListener {
-                    CardSession.clear(this@MainActivity)
-                    notice = null
-                    safeRender()
-                }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f))
-            gc.addView(actions)
-            root.addView(gc, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-
-            root.addView(TextView(this).apply {
-                text = "Карта одна для кассы и PWA: чашки, бонусы и подарки считаются на сервере после SELL."
-                textSize = 10.5f
-                setTextColor(UiKit.MUTED)
-            })
+                text = "Отвязать"; textSize = 10f; weight(Fonts.SEMIBOLD); gravity = Gravity.CENTER; setTextColor(WHITE)
+                setPadding(dp(12), 0, dp(12), 0); background = rounded(0x24FFFFFF.toInt(), 9, null); isClickable = true
+                setOnClickListener { CardSession.clear(this@MainActivity); notice = null; screen = Screen.ORDER; safeRender() }
+            }, LinearLayout.LayoutParams(WRAP, dp(36)))
+            col.addView(actions)
+            gc.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
+            body.addView(gc, LinearLayout.LayoutParams(MATCH, WRAP))
+            body.addView(noteRow("Бонусы списываются на этот чек. Чашки начисляются после оплаты — по одной за каждый напиток."),
+                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+            Fonts.apply(body)
             return
         }
 
-        // empty: qr-zone + phone/number field
-        val qrZone = LinearLayout(this).apply {
+        // .qr-zone — видоискатель сканера (QR гостя считывает сканер кассы)
+        val qr = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(16), dp(20), dp(16), dp(16))
-            background = rounded(WHITE, 16, LINE)
+            setPadding(dp(12), dp(18), dp(12), dp(14))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(UiKit.SURFACE_2); cornerRadius = dp(16).toFloat()
+                setStroke(dp(1), UiKit.LINE_STRONG, dp(4).toFloat(), dp(3).toFloat())
+            }
         }
-        qrZone.addView(TextView(this).apply {
-            text = "▣"
-            textSize = 36f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.MUTED)
-            setPadding(0, 0, 0, dp(8))
-        })
-        qrZone.addView(TextView(this).apply {
-            text = "Поднесите карту гостя"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            gravity = Gravity.CENTER
-        })
-        qrZone.addView(TextView(this).apply {
-            text = "QR в PWA 6.7 Coffee · или введите номер"
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, 0)
-        })
-        root.addView(qrZone, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        qr.addView(FrameLayout(this).apply {
+            background = rounded(WHITE, 12, null); Ds.shadowS(this)
+            addView(icon(this@MainActivity, R.drawable.ic_scan, 78f, INK), FrameLayout.LayoutParams(dp(78), dp(78), Gravity.CENTER))
+        }, LinearLayout.LayoutParams(dp(134), dp(134)))
+        qr.addView(TextView(this).apply { text = "Поднесите карту гостя"; textSize = 11.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); setPadding(0, dp(10), 0, 0) })
+        qr.addView(TextView(this).apply { text = "QR в PWA 6.7 Coffee · или введите номер карты"; textSize = 10f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER; setPadding(0, dp(2), 0, 0) })
+        body.addView(qr, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        root.addView(TextView(this).apply {
-            text = "или по номеру"
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(8))
-        })
+        // .guest-divider
+        val div = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(14), 0, dp(10)) }
+        div.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(0, dp(1), 1f))
+        div.addView(TextView(this).apply { text = "ИЛИ ПО НОМЕРУ"; textSize = 10f; letterSpacing = 0.11f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED) },
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(10); rightMargin = dp(10) })
+        div.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(0, dp(1), 1f))
+        body.addView(div)
 
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = rounded(WHITE, 14, LINE)
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-        }
+        // .phone-field
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val field = EditText(this).apply {
             hint = "Номер карты или QR"
-            inputType = InputType.TYPE_CLASS_TEXT
             setRawInputType(InputType.TYPE_CLASS_NUMBER)
             isSingleLine = true
-            textSize = 15f
+            textSize = 12f
             setTextColor(INK)
             setHintTextColor(UiKit.MUTED)
             imeOptions = EditorInfo.IME_ACTION_GO
             setSelectAllOnFocus(true)
             isEnabled = !resolving
-            background = null
-            setPadding(dp(12), 0, dp(8), 0)
-            minHeight = dp(48)
+            background = rounded(WHITE, 11, LINE)
+            setPadding(dp(12), 0, dp(12), 0)
         }
         input = field
-        row.addView(field, LinearLayout.LayoutParams(0, dp(48), 1f))
-        val go = TextView(this).apply {
-            text = "→"
-            textSize = 18f
-            gravity = Gravity.CENTER
-            setTextColor(WHITE)
-            background = rounded(BRAND, 12, null)
-            isClickable = true
-            isEnabled = !resolving
-            setOnClickListener { resolve(field.text.toString()) }
-        }
-        row.addView(go, LinearLayout.LayoutParams(dp(48), dp(48)))
-        root.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        row.addView(field, LinearLayout.LayoutParams(0, dp(44), 1f))
+        row.addView(FrameLayout(this).apply {
+            background = rounded(INK, 11, null); isClickable = true; contentDescription = "Найти гостя"
+            addView(icon(this@MainActivity, R.drawable.ic_search, 17f, WHITE), FrameLayout.LayoutParams(dp(17), dp(17), Gravity.CENTER))
+            setOnClickListener { if (!resolving) resolve(field.text.toString()) }
+        }, LinearLayout.LayoutParams(dp(46), dp(44)).apply { leftMargin = dp(7) })
+        body.addView(row)
 
         val last = lastCardCode
         if (last != null && !resolving) {
-            root.addView(TextView(this).apply {
-                text = "Последняя: ${lastCardLabel ?: last.take(12)}"
-                textSize = 12.5f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(INK)
-                background = rounded(WHITE, 12, LINE)
-                setPadding(dp(12), dp(14), dp(12), dp(14))
-                isClickable = true
+            body.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(9), dp(10), dp(9)); background = rounded(WHITE, 12, LINE); isClickable = true
                 setOnClickListener { resolve(last) }
-            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+                addView(TextView(this@MainActivity).apply {
+                    text = (lastCardLabel ?: last).take(1).uppercase(); textSize = 11f; weight(Fonts.STRONG); gravity = Gravity.CENTER
+                    setTextColor(BRAND); background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(UiKit.BRAND_SOFT) }
+                }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { rightMargin = dp(9) })
+                val t = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                t.addView(TextView(this@MainActivity).apply { text = "Последняя: ${lastCardLabel ?: last.take(12)}"; textSize = 10.5f; weight(Fonts.SEMIBOLD); setTextColor(INK) })
+                t.addView(TextView(this@MainActivity).apply { text = "Нажмите, чтобы привязать снова"; textSize = 10f; setTextColor(UiKit.MUTED) })
+                addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
+                addView(icon(this@MainActivity, R.drawable.ic_chevron_sm, 12f, UiKit.MUTED), LinearLayout.LayoutParams(dp(12), dp(12)))
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
         }
-
-        root.addView(TextView(this).apply {
-            text = "Карта гостя одна для кассы и PWA: чашки, бонусы и подарки считаются одинаково."
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(4), 0, 0)
-        })
+        body.addView(noteRow("Карта гостя одна для кассы и PWA: чашки, бонусы и подарки считаются одинаково."),
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
+        body.addView(btn("Продолжить без карты", "ghost") { CardSession.clear(this); notice = null; screen = Screen.ORDER; safeRender() },
+            LinearLayout.LayoutParams(MATCH, dp(50)).apply { topMargin = dp(14) })
 
         field.setOnEditorActionListener { _, action, _ ->
-            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) {
-                resolve(field.text.toString()); true
-            } else false
+            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { resolve(field.text.toString()); true } else false
         }
         field.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -596,31 +518,14 @@ class MainActivity : AppCompatActivity() {
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
+        Fonts.apply(body)
+    }
 
-        bottomBar.setPadding(dp(12), dp(6), dp(12), dp(10))
-        bottomBar.addView(TextView(this).apply {
-            text = "Продолжить без карты"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(INK)
-            background = rounded(WHITE, 14, LINE)
-            isClickable = true
-            setOnClickListener {
-                CardSession.clear(this@MainActivity)
-                notice = null
-                screen = Screen.ORDER
-                safeRender()
-            }
-        }, LinearLayout.LayoutParams(MATCH, dp(52)))
-
-        if (!resolving) field.post {
-            if (!isFinishing) {
-                field.requestFocus()
-                (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
-            }
-        }
+    /** `.cart-note`: значок i 12 + текст 9→10. */
+    private fun noteRow(t: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(icon(this@MainActivity, R.drawable.ic_info, 12f, UiKit.MUTED), LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(5); topMargin = dp(1) })
+        addView(TextView(this@MainActivity).apply { text = t; textSize = 10f; setTextColor(UiKit.MUTED); setLineSpacing(0f, 1.2f) }, LinearLayout.LayoutParams(0, WRAP, 1f))
     }
 
     private fun resolve(raw: String) {
@@ -657,30 +562,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderOrder() {
         val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+        val m = Ds.metrics(this)
         scroll.visibility = View.GONE
         orderPane.visibility = View.VISIBLE
-        wideLayout = resources.configuration.screenWidthDp >= 600
-        cartSidebar = null; cartSidebarRows = null; cartSidebarTotal = null
+        orderPane.setPadding(0, 0, 0, 0)
+        wideLayout = m.mode == Ds.Mode.M10
+        cartSidebar = null; cartSidebarRows = null; cartSidebarTotal = null; cartDockFill = null
 
-        // pos-head 1:1 с index.html: lockup (logo + brand + shift) | guest-chip
-        topBar.setPadding(dp(14), dp(14), dp(14), dp(8))
+        // .pos-head
+        topBar.setPadding(dp(m.headPadH), dp(m.headPadTop), dp(m.headPadH), dp(m.headPadBottom))
         topBar.addView(buildPosHead(card), LinearLayout.LayoutParams(MATCH, WRAP))
-        notice?.let { topBar.addView(banner(it, noticeKind, 14f).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6) }) }
+        notice?.let { topBar.addView(banner(it, noticeKind, 12f).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6) }) }
 
+        val stage = FrameLayout(this)
         val content = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP }
-        val catalogColumn = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(2), 0, 0)
-        }
+        val catalogColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(catalogColumn, LinearLayout.LayoutParams(0, MATCH, 1f))
 
+        // .search + .scan-btn  (строка прокручивается вместе со списком, как .sale-scroll)
+
+        // .cats
         val strip = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false; clipToPadding = false; overScrollMode = View.OVER_SCROLL_NEVER
+            setPadding(dp(m.sidePad), 0, dp(m.sidePad), dp(2))
         }
         val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         strip.addView(chips)
         chipsScroll = strip; chipsRow = chips
-        catalogColumn.addView(strip, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        searchHost = null; chipsHost = strip
 
         val ad = CatalogAdapter(CatalogCallbacks(
             onTap = { onProductTap(it) },
@@ -697,31 +606,31 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             onDec = { prod ->
-                // У комбо плюс/минус не трогаем: набор удаляется целиком из чека.
                 if (combos.none { it.id == prod.uuid }) {
-                    Cart.decProduct(prod.uuid)
+                    Cart.decAny(variantModel.variantsOf(prod).map { it.uuid })
                     onCartChanged()
                 }
             },
+            qtyOf = { prod -> Cart.qtyAny(variantModel.variantsOf(prod).map { it.uuid }) },
         ))
         adapter = ad
-        val screenWidth = resources.configuration.screenWidthDp
-        // Две колонки на 5″, три на 7″/10″: крупнее, чем в 4-колоночном варианте, но мельче исходных.
-        val columns = if (screenWidth >= 520) 3 else 2
+        val columns = m.cols
         val rv = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@MainActivity, columns).also { gm ->
                 gm.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
                     override fun getSpanSize(position: Int): Int {
                         val row = ad.currentList.getOrNull(position) ?: return columns
-                        return when (row) { is CatalogRow.Item -> 1; else -> columns }
+                        return when (row) { is CatalogRow.Item, is CatalogRow.Skeleton -> 1; else -> columns }
                     }
                 }
             }
             adapter = ad
+            addItemDecoration(TileGridDecoration(columns, dp(m.sidePad), dp(m.gap)))
             itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
             clipToPadding = false
-            setPadding(0, dp(2), 0, dp(8))
+            // .sale-scroll: padding-bottom 96 — чтобы корзина-бар не закрывала последний ряд
+            setPadding(0, dp(4), 0, dp(if (m.mode == Ds.Mode.M10) 24 else 96))
             setHasFixedSize(true)
             setItemViewCacheSize(8)
             contentDescription = "Каталог товаров"
@@ -730,66 +639,113 @@ class MainActivity : AppCompatActivity() {
         catalogColumn.addView(rv, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
         if (wideLayout) {
-            content.addView(buildCartSidebar(), LinearLayout.LayoutParams(dp(if (screenWidth >= 800) 260 else 220), MATCH).apply {
-                leftMargin = dp(12)
+            // Закреплённый чек справа 372 (`.mode-10 #cartOverlay .sheet`).
+            val (panel, fill) = buildCartPanel(true) { }
+            cartDockFill = fill
+            val dock = FrameLayout(this).apply {
+                background = leftBorder(WHITE)
+                addView(panel, FrameLayout.LayoutParams(MATCH, MATCH))
+            }
+            content.addView(dock, LinearLayout.LayoutParams(dp(m.cartDockW), MATCH))
+        }
+        stage.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        // .cartbar / .empty-cartbar плавают поверх списка
+        if (!wideLayout) {
+            val bar = buildCartBar(card)
+            stage.addView(bar, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply {
+                leftMargin = dp(m.barInset); rightMargin = dp(m.barInset); bottomMargin = dp(m.barBottom)
             })
         }
-        orderPane.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
-        refreshChromeAndRows(false)
-
-        // cartbar 1:1 index (.cartbar / .empty-cartbar)
+        orderPane.addView(stage, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        bottomBar.setPadding(0, 0, 0, 0)
         bottomBar.setBackgroundColor(PAGE)
-        bottomBar.setPadding(dp(11), dp(2), dp(11), dp(4))
         bottomBar.elevation = 0f
-        bottomBar.addView(buildCartBar(card), LinearLayout.LayoutParams(MATCH, WRAP))
+        refreshChromeAndRows(false)
         updateBar()
     }
 
-    /** Постоянная корзина для широких экранов; редактирование остаётся в проверенном bottom sheet. */
-    private fun buildCartSidebar(): View {
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = rounded(WHITE, 20, LINE)
+    private var searchHost: View? = null
+    private var chipsHost: View? = null
+    private var searchQuery: String = ""
+    private var searchEdit: EditText? = null
+
+    /** `.searchrow`: поле 48 (радиус 14, лупа 17, ✕ 24) + кнопка скана 48. */
+    private fun buildSearchRow(m: Ds.Metrics): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(m.sidePad), 0, dp(m.sidePad), 0)
         }
-        panel.addView(text("Ваш заказ", 18f, INK, true), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
-        panel.addView(text("Позиции обновляются автоматически", 12f, HINT, false), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
-        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val rowsScroll = ScrollView(this).apply {
-            isFillViewport = false; overScrollMode = View.OVER_SCROLL_NEVER
-            addView(rows, FrameLayout.LayoutParams(MATCH, WRAP))
+        val field = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(12), 0)
+            background = rounded(WHITE, 14, LINE)
+            Ds.shadowS(this)
         }
-        panel.addView(rowsScroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
-        val total = text("Итого 0 ₽", 18f, BRAND, true).apply {
-            setPadding(0, dp(12), 0, dp(8)); gravity = Gravity.END
+        field.addView(icon(this, R.drawable.ic_search, 17f, UiKit.MUTED), LinearLayout.LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(9) })
+        val edit = EditText(this).apply {
+            hint = "Найти напиток"
+            setHintTextColor(UiKit.MUTED)
+            setTextColor(INK)
+            textSize = 12.5f
+            background = null
+            setPadding(0, 0, 0, 0)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            maxLines = 1
+            isSingleLine = true
+            setText(searchQuery)
         }
-        panel.addView(total, LinearLayout.LayoutParams(MATCH, WRAP))
-        panel.addView(button("Изменить заказ", false, 48) { showCart() }, LinearLayout.LayoutParams(MATCH, dp(48)))
-        cartSidebar = panel; cartSidebarRows = rows; cartSidebarTotal = total
-        refreshCartSidebar()
-        return panel
+        searchEdit = edit
+        val clear = FrameLayout(this).apply {
+            background = rounded(UiKit.SURFACE_2, 12, null)
+            visibility = if (searchQuery.isEmpty()) View.GONE else View.VISIBLE
+            contentDescription = "Очистить поиск"
+            addView(icon(this@MainActivity, R.drawable.ic_close, 10f, UiKit.MUTED), FrameLayout.LayoutParams(dp(10), dp(10), Gravity.CENTER))
+            setOnClickListener { edit.setText("") }
+        }
+        edit.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                searchQuery = s?.toString().orEmpty()
+                clear.visibility = if (searchQuery.isEmpty()) View.GONE else View.VISIBLE
+                searchRunnable?.let { handler.removeCallbacks(it) }
+                val r = Runnable { refreshRows(false) }
+                searchRunnable = r
+                handler.postDelayed(r, 120)
+            }
+        })
+        edit.setOnEditorActionListener { v, id, _ ->
+            if (id == EditorInfo.IME_ACTION_SEARCH) {
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(v.windowToken, 0)
+                true
+            } else false
+        }
+        field.addView(edit, LinearLayout.LayoutParams(0, WRAP, 1f))
+        field.addView(clear, LinearLayout.LayoutParams(dp(24), dp(24)))
+        row.addView(field, LinearLayout.LayoutParams(0, dp(48), 1f))
+        val scan = FrameLayout(this).apply {
+            background = rounded(WHITE, 14, LINE)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Сканировать карту гостя"
+            Ds.shadowS(this)
+            addView(icon(this@MainActivity, R.drawable.ic_scan, 21f, INK), FrameLayout.LayoutParams(dp(21), dp(21), Gravity.CENTER))
+            setOnClickListener { notice = null; screen = Screen.CARD; safeRender() }
+        }
+        row.addView(scan, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
+        return row
     }
 
-    private fun refreshCartSidebar() {
-        val rows = cartSidebarRows ?: return
-        rows.removeAllViews()
-        val lines = Cart.all()
-        if (lines.isEmpty()) {
-            rows.addView(text("Корзина пока пуста", 15f, HINT, false).apply {
-                setPadding(0, dp(8), 0, dp(8))
-            })
-        } else {
-            lines.forEach { line ->
-                val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, dp(8)) }
-                row.addView(text(line.name, 14f, INK, true).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
-                row.addView(text("×${line.quantity.stripTrailingZeros().toPlainString()}  ·  ${rub(line.lineTotal())}", 14f, HINT, false))
-                rows.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
-                val divider = View(this).apply { setBackgroundColor(LINE) }
-                rows.addView(divider, LinearLayout.LayoutParams(MATCH, dp(1)))
-            }
-        }
-        cartSidebarTotal?.text = "Итого  ${rub(cartTotalRub())}"
+    private fun leftBorder(color: Int): android.graphics.drawable.Drawable {
+        val line = android.graphics.drawable.ColorDrawable(LINE)
+        val fill = android.graphics.drawable.ColorDrawable(color)
+        return android.graphics.drawable.LayerDrawable(arrayOf(line, fill)).apply { setLayerInset(1, dp(1), 0, 0, 0) }
     }
+
+    private fun refreshCartSidebar() { cartDockFill?.invoke() }
 
     /** Поиск/чипы (если набор групп изменился) + строки списка. */
     private fun refreshChromeAndRows(toTop: Boolean) {
@@ -817,6 +773,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER
                 maxLines = 1
                 setPadding(dp(14), 0, dp(14), 0)
+                weight(Fonts.MEDIUM)
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
@@ -832,6 +789,7 @@ class MainActivity : AppCompatActivity() {
         updateChipStyles()
         chipsScroll?.visibility =
             if (groupsCache.isEmpty() && combos.isEmpty()) View.GONE else View.VISIBLE
+        Fonts.apply(row)
     }
 
     private fun updateChipStyles() {
@@ -839,7 +797,6 @@ class MainActivity : AppCompatActivity() {
             val on = group == value
             // index .chip.on → background: var(--ink); color: #fff
             tv.setTextColor(if (on) WHITE else UiKit.INK_2)
-            tv.setTypeface(null, Typeface.NORMAL)
             tv.background = rounded(if (on) INK else WHITE, 999, if (on) INK else LINE)
         }
     }
@@ -851,38 +808,68 @@ class MainActivity : AppCompatActivity() {
         if (toTop) ad.submitList(rows) { recycler?.scrollToPosition(0) } else ad.submitList(rows)
     }
 
+    private fun plural(n: Int, one: String, few: String, many: String): String {
+        val m100 = n % 100; val m10 = n % 10
+        return when {
+            m100 in 11..14 -> many
+            m10 == 1 -> one
+            m10 in 2..4 -> few
+            else -> many
+        }
+    }
+
+    /** `.tile-meta`: «3 размера · молоко» для напитка с выбором, иначе категория. */
+    private fun tileMeta(p: CatalogProduct): String {
+        if (p.isCombo) return "Напиток + выпечка"
+        val sizes = variantModel.variantsOf(p).size
+        val parts = ArrayList<String>(2)
+        if (sizes > 1) parts.add("$sizes ${plural(sizes, "размер", "размера", "размеров")}")
+        if (p.supportsMods && (!variantModel.options.milk.isEmpty() || p.toppings.any { it.groupKey.equals("milk", true) })) parts.add("молоко")
+        if (parts.isEmpty()) return p.groupName.orEmpty()
+        return parts.joinToString(" · ")
+    }
+
     private fun computeRows(): List<CatalogRow> {
-        if (products.isEmpty()) return when {
-            productsLoading -> List(6) { CatalogRow.Skeleton(it) }
-            productsError -> listOf(CatalogRow.State("err", "Каталог не загрузился.", true, "Повторить"))
-            else -> listOf(CatalogRow.State("empty", "В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру.", true, null))
+        val hostRows = ArrayList<CatalogRow>(8)
+        val q = "" // поиск убран с витрины
+        if (products.isEmpty()) {
+            val st: List<CatalogRow> = when {
+                productsLoading -> List(6) { CatalogRow.Skeleton(it) }
+                productsError -> listOf(CatalogRow.State("err", "Каталог не загрузился.", true, "Повторить"))
+                else -> listOf(CatalogRow.State("empty", "В каталоге Эвотор нет доступных товаров. Синхронизируйте номенклатуру.", true, null))
+            }
+            return hostRows + st
         }
         val tiles = variantModel.tiles
-        val q = ""
-        // Комбо показываются плитками вместе с меню или отдельной категорией — как в index.
         val comboTiles = if (combos.isNotEmpty() && q.isEmpty() && (group == null || group == GROUP_COMBOS))
             combos.map { Combos.tile(it, products) } else emptyList()
         val filtered = if (group == GROUP_COMBOS) emptyList() else tiles.filter {
             (group == null || it.groupName == group) && (q.isEmpty() || it.name.contains(q, ignoreCase = true))
         }
-        if (filtered.isEmpty() && comboTiles.isEmpty()) {
-            val msg = if (q.isNotEmpty()) "Ничего не найдено по «$q»" else "В этой категории пока нет позиций"
-            return listOf(CatalogRow.State("nf", msg, false, null))
-        }
-        val rows = ArrayList<CatalogRow>(filtered.size + comboTiles.size + 4)
+        val rows = ArrayList<CatalogRow>(filtered.size + comboTiles.size + 8)
+        rows.addAll(hostRows)
         if (group == null && q.isEmpty()) {
             val focus = filtered.filter { it.featured }.take(8)
             if (focus.isNotEmpty()) {
                 rows.add(CatalogRow.Header("Сейчас берут"))
                 rows.add(CatalogRow.Focus(focus))
-                rows.add(CatalogRow.Header("Всё меню"))
             }
         }
-        if (comboTiles.isNotEmpty()) {
-            if (group == GROUP_COMBOS) rows.add(CatalogRow.Header("Комбо"))
-            comboTiles.forEach { rows.add(CatalogRow.Item(it)) }
+        chipsHost?.let { rows.add(CatalogRow.Host("cats", it, 12)) }
+        val total = filtered.size + comboTiles.size
+        val title = when {
+            q.isNotEmpty() -> "Результаты"
+            group == GROUP_COMBOS -> "Комбо"
+            group == null -> "Всё меню"
+            else -> group!!
         }
-        filtered.forEach { rows.add(CatalogRow.Item(it)) }
+        rows.add(CatalogRow.MenuHead(title, "$total ${plural(total, "позиция", "позиции", "позиций")}"))
+        if (total == 0) {
+            rows.add(CatalogRow.State("nf", if (q.isNotEmpty()) "Ничего не нашли по «$q»" else "В этой категории пока нет позиций", false, null))
+            return rows
+        }
+        comboTiles.forEach { rows.add(CatalogRow.Item(it, tileMeta(it))) }
+        filtered.forEach { rows.add(CatalogRow.Item(it, tileMeta(it))) }
         return rows
     }
 
@@ -909,26 +896,30 @@ class MainActivity : AppCompatActivity() {
      */
     private fun optionsFor(p: CatalogProduct): OptionPicker.Opts {
         val evotor = variantModel.options
-        if (!evotor.isEmpty) {
-            fun map(list: List<CatalogProduct>) = list.map {
-                OptionPicker.Opt(it.uuid, it.optionLabel, it.priceRub, it.uuid, it.defaultVariant)
+        fun mapEv(list: List<CatalogProduct>) = list.map {
+            OptionPicker.Opt(it.uuid, it.optionLabel, it.priceRub, it.uuid, it.defaultVariant)
+        }
+        // Backend scheme may use any groupKey; map known ones, rest → extra.
+        val byGroup = p.toppings.groupBy { it.groupKey.trim().lowercase() }
+        val known = setOf("milk", "молоко", "syrup", "сироп", "sugar", "сахар", "topping", "extra", "other", "добавки", "добавка")
+        fun toOpts(vararg keys: String) = keys.flatMap { k ->
+            byGroup[k].orEmpty().map {
+                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() })
             }
-            return OptionPicker.Opts(
-                milk = map(evotor.milk),
-                syrup = map(evotor.syrup),
-                sugar = map(evotor.sugar),
-                extra = map(evotor.extra),
-            )
         }
-        val byGroup = p.toppings.groupBy { it.groupKey.lowercase() }
-        fun toOpts(key: String) = byGroup[key].orEmpty().map {
-            OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() })
-        }
+        val restExtra = byGroup
+            .filterKeys { it !in known }
+            .values
+            .flatten()
+            .map {
+                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() })
+            }
+        // Merge Evotor #opt= inventory items with backend toppings (do not drop one for the other).
         return OptionPicker.Opts(
-            milk = toOpts("milk"),
-            syrup = toOpts("syrup"),
-            sugar = toOpts("sugar"),
-            extra = toOpts("topping") + toOpts("extra") + toOpts("other"),
+            milk = mapEv(evotor.milk) + toOpts("milk", "молоко"),
+            syrup = mapEv(evotor.syrup) + toOpts("syrup", "сироп"),
+            sugar = mapEv(evotor.sugar) + toOpts("sugar", "сахар"),
+            extra = mapEv(evotor.extra) + toOpts("topping", "extra", "other", "добавки", "добавка") + restExtra,
         )
     }
 
@@ -939,26 +930,31 @@ class MainActivity : AppCompatActivity() {
     private fun showItemSheet(p: CatalogProduct) {
         dismissSheets()
         val variants = variantModel.variantsOf(p)
-        val opts = if (p.supportsMods) optionsFor(p) else OptionPicker.Opts()
+        val hasTops = variants.any { it.toppings.isNotEmpty() } || p.toppings.isNotEmpty()
+        val opts = if (p.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(
+            // Prefer variant that already carries toppings from backend merge.
+            variants.firstOrNull { it.toppings.isNotEmpty() } ?: p
+        ) else OptionPicker.Opts()
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        root.addView(buildItemHero(p) { dialog.dismiss() }, LinearLayout.LayoutParams(MATCH, dp(150)))
+        root.addView(buildItemHero(p) { dialog.dismiss() }, LinearLayout.LayoutParams(MATCH, dp(128)))
 
         val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(16))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
         }
         scroll.addView(body)
         root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
         val priceView = TextView(this).apply {
             textSize = 17f
-            setTypeface(null, Typeface.BOLD)
+            letterSpacing = -0.02f
+            weight(Fonts.BOLD)
             setTextColor(INK)
         }
         val titleRow = LinearLayout(this).apply {
@@ -968,9 +964,11 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(TextView(this).apply {
             text = p.name
             textSize = 20f
-            setTypeface(null, Typeface.BOLD)
+            letterSpacing = -0.025f
+            weight(Fonts.STRONG)
+            setLineSpacing(0f, 0.95f)
             setTextColor(INK)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }, LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(10) })
         titleRow.addView(priceView)
         body.addView(titleRow)
 
@@ -979,8 +977,8 @@ class MainActivity : AppCompatActivity() {
                 text = desc
                 textSize = 10.5f
                 setTextColor(UiKit.MUTED)
-                setLineSpacing(0f, 1.25f)
-                setPadding(0, dp(4), 0, 0)
+                setLineSpacing(0f, 1.3f)
+                setPadding(0, dp(3), dp(40), 0)
             })
         }
         val tags = itemTags(p)
@@ -993,15 +991,18 @@ class MainActivity : AppCompatActivity() {
             body.addView(TextView(this).apply {
                 text = "В чеке уже $existing порц. Новая сохранится отдельной позицией."
                 textSize = 10f
-                setTextColor(UiKit.INK_2)
-                setPadding(dp(10), dp(8), dp(10), dp(8))
-                background = rounded(UiKit.SURFACE_2, 12, LINE)
-            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
+                setTextColor(UiKit.MUTED)
+                setPadding(dp(9), dp(7), dp(9), dp(7))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(UiKit.SURFACE_2); cornerRadius = dp(9).toFloat()
+                    setStroke(dp(1), UiKit.LINE_STRONG, dp(3).toFloat(), dp(3).toFloat())
+                }
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(9) })
         }
 
         val addBtn = TextView(this).apply {
             textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(WHITE)
             gravity = Gravity.CENTER
             background = rounded(BRAND, 14, null)
@@ -1010,11 +1011,11 @@ class MainActivity : AppCompatActivity() {
         }
         val qtyLabel = TextView(this).apply {
             text = "1"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 12.5f
+            weight(Fonts.STRONG)
             gravity = Gravity.CENTER
             setTextColor(INK)
-            minWidth = dp(28)
+            minWidth = dp(20)
         }
         var qty = 1
 
@@ -1033,14 +1034,13 @@ class MainActivity : AppCompatActivity() {
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(12))
-            setBackgroundColor(WHITE)
-            elevation = 4f * resources.displayMetrics.density
+            setPadding(dp(14), dp(10), dp(14), dp(11))
+            background = topBorder(WHITE)
         }
         val qtyWrap = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = rounded(WHITE, 12, LINE)
+            background = rounded(UiKit.SURFACE_2, 13, LINE)
         }
         fun qBtn(label: String, act: () -> Unit) = TextView(this).apply {
             text = label
@@ -1052,12 +1052,12 @@ class MainActivity : AppCompatActivity() {
         }
         qtyWrap.addView(qBtn("−") {
             if (qty > 1) { qty -= 1; paint() }
-        }, LinearLayout.LayoutParams(dp(44), dp(48)))
-        qtyWrap.addView(qtyLabel, LinearLayout.LayoutParams(WRAP, dp(48)))
+        }, LinearLayout.LayoutParams(dp(44), dp(50)))
+        qtyWrap.addView(qtyLabel, LinearLayout.LayoutParams(WRAP, dp(50)))
         qtyWrap.addView(qBtn("+") {
             if (qty < 99) { qty += 1; paint() }
-        }, LinearLayout.LayoutParams(dp(44), dp(48)))
-        foot.addView(qtyWrap, LinearLayout.LayoutParams(WRAP, dp(48)).apply { rightMargin = dp(10) })
+        }, LinearLayout.LayoutParams(dp(44), dp(50)))
+        foot.addView(qtyWrap, LinearLayout.LayoutParams(WRAP, dp(50)).apply { rightMargin = dp(10) })
         foot.addView(addBtn, LinearLayout.LayoutParams(0, dp(50), 1f))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -1086,7 +1086,9 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
         }
 
+        Fonts.apply(root)
         dialog.setContentView(root)
+        styleSheet(dialog)
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
@@ -1109,7 +1111,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val variants = variantModel.variantsOf(drink)
-        val opts = if (drink.supportsMods) optionsFor(drink) else OptionPicker.Opts()
+        val opts = if (drink.supportsMods || drink.toppings.isNotEmpty() || !variantModel.options.isEmpty) optionsFor(drink) else OptionPicker.Opts()
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
@@ -1127,24 +1129,23 @@ class MainActivity : AppCompatActivity() {
         val pics = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(24), dp(18), dp(24), dp(18))
         }
-        pics.addView(ThumbView(this).apply { setCorner(14); bind(drink.name, drink.imageUrl, 360) },
-            LinearLayout.LayoutParams(0, MATCH, 1f).apply { rightMargin = dp(10) })
+        pics.addView(ThumbView(this).apply { setCorner(0); setContain(104, 86); bind(drink.name, drink.imageUrl, 360) },
+            LinearLayout.LayoutParams(dp(104), dp(86)))
         pics.addView(TextView(this).apply {
             text = "+"
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 13f
+            weight(Fonts.MEDIUM)
             setTextColor(UiKit.MUTED)
             gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(dp(24), WRAP))
-        pics.addView(ThumbView(this).apply { setCorner(14); bind(food.name, food.imageUrl, 360) },
-            LinearLayout.LayoutParams(0, MATCH, 1f).apply { leftMargin = dp(10) })
-        hero.addView(pics, FrameLayout.LayoutParams(MATCH, MATCH))
+        }, LinearLayout.LayoutParams(dp(16), WRAP).apply { leftMargin = dp(4); rightMargin = dp(4) })
+        pics.addView(ThumbView(this).apply { setCorner(0); setContain(104, 86); bind(food.name, food.imageUrl, 360) },
+            LinearLayout.LayoutParams(dp(104), dp(86)))
+        hero.addView(pics, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
         hero.addView(TextView(this).apply {
             text = "КОМБО"
-            textSize = 7f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 10f
+            setOnest(true)
             setTextColor(UiKit.INK_2)
             setPadding(dp(6), dp(3), dp(6), dp(3))
             background = rounded(0xEBFFFFFF.toInt(), 5, null)
@@ -1152,32 +1153,24 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.TOP or Gravity.START
             topMargin = dp(12); leftMargin = dp(16)
         })
-        hero.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
-            background = rounded(0xE6FFFFFF.toInt(), 22, null)
-            isClickable = true
-            contentDescription = "Закрыть"
-            setOnClickListener { dialog.dismiss() }
-        }, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
+        hero.addView(closeButton("Закрыть") { dialog.dismiss() }.apply { background = rounded(0xE6FFFFFF.toInt(), 22, null); Ds.shadowS(this) }, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
             gravity = Gravity.TOP or Gravity.END
             topMargin = dp(10); rightMargin = dp(12)
         })
-        root.addView(hero, LinearLayout.LayoutParams(MATCH, dp(150)))
+        root.addView(hero, LinearLayout.LayoutParams(MATCH, dp(128)))
 
         val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(16))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
         }
         scroll.addView(body)
         root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
         val priceView = TextView(this).apply {
             textSize = 17f
-            setTypeface(null, Typeface.BOLD)
+            letterSpacing = -0.02f
+            weight(Fonts.BOLD)
             setTextColor(INK)
         }
         val titleRow = LinearLayout(this).apply {
@@ -1186,10 +1179,11 @@ class MainActivity : AppCompatActivity() {
         }
         titleRow.addView(TextView(this).apply {
             text = combo.name
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 20f
+            letterSpacing = -0.025f
+            weight(Fonts.STRONG)
             setTextColor(INK)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }, LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(10) })
         titleRow.addView(priceView)
         body.addView(titleRow)
 
@@ -1203,49 +1197,38 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
-        // выгода
+        // .combo-saving: «Выгода −X ₽ ~~старая~~»
         val oldSum = combo.drinkBasePriceRub.add(combo.foodPriceRub)
         body.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            background = rounded(UiKit.SUCCESS_SOFT, 12, null)
+            setPadding(dp(7), dp(3), dp(7), dp(3))
+            background = rounded(UiKit.SUCCESS_SOFT, 6, null)
             addView(TextView(this@MainActivity).apply {
-                text = "Выгода"
-                textSize = 10f
-                setTextColor(UiKit.SUCCESS)
-            }, LinearLayout.LayoutParams(0, WRAP, 1f))
-            addView(TextView(this@MainActivity).apply {
-                text = "−" + rub(combo.discountRub)
-                textSize = 11f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(UiKit.SUCCESS)
+                text = "Выгода"; textSize = 10f; weight(Fonts.MEDIUM); setTextColor(UiKit.SUCCESS)
             })
             addView(TextView(this@MainActivity).apply {
-                text = rub(oldSum)
-                textSize = 10f
-                setTextColor(UiKit.MUTED)
+                text = rub(combo.discountRub); textSize = 10f; weight(Fonts.STRONG); setTextColor(UiKit.SUCCESS)
+            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6) })
+            addView(TextView(this@MainActivity).apply {
+                text = rub(oldSum); textSize = 10f; setTextColor(0xFF4A7A5E.toInt()); alpha = 0.8f
                 paintFlags = paintFlags or android.graphics.Paint.STRIKE_THRU_TEXT_FLAG
-            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(8) })
-        }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
+            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6) })
+        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(8) })
 
-        // состав
-        val compHeader = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(16), 0, dp(7))
+        // .combo-composition
+        val comp = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(9), dp(10), dp(9))
+            background = rounded(UiKit.SURFACE_2, 11, LINE)
         }
+        body.addView(comp, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+        val compHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM; setPadding(0, 0, 0, dp(4)) }
         compHeader.addView(TextView(this).apply {
-            text = "Состав комбо"
-            textSize = 9f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(UiKit.INK_2)
+            text = "СОСТАВ КОМБО"; textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        compHeader.addView(TextView(this).apply {
-            text = "2 позиции в чеке"
-            textSize = 8.5f
-            setTextColor(UiKit.MUTED)
-        })
-        body.addView(compHeader)
+        compHeader.addView(TextView(this).apply { text = "2 позиции в чеке"; textSize = 10f; setTextColor(UiKit.MUTED) })
+        comp.addView(compHeader)
 
         fun compRow(p: CatalogProduct, detail: String?, price: BigDecimal) {
             val row = LinearLayout(this).apply {
@@ -1253,8 +1236,8 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, dp(6), 0, dp(6))
             }
-            row.addView(ThumbView(this).apply { setCorner(8); bind(p.name, p.imageUrl, 200) },
-                LinearLayout.LayoutParams(dp(34), dp(34)))
+            row.addView(ThumbView(this).apply { setCorner(7); bind(p.name, p.imageUrl, 200) },
+                LinearLayout.LayoutParams(dp(32), dp(32)))
             val col = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(9), 0, dp(6), 0)
@@ -1262,14 +1245,14 @@ class MainActivity : AppCompatActivity() {
             col.addView(TextView(this).apply {
                 text = p.name
                 textSize = 11f
-                setTypeface(null, Typeface.BOLD)
+                setOnest(true)
                 setTextColor(INK)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             })
             col.addView(TextView(this).apply {
                 text = detail.orEmpty()
-                textSize = 9f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
@@ -1280,11 +1263,10 @@ class MainActivity : AppCompatActivity() {
                 textSize = 11f
                 setTextColor(UiKit.INK_2)
             })
-            body.addView(row)
+            comp.addView(row)
         }
 
         val foodPrice = combo.foodPriceRub
-        compRow(food, null, foodPrice)
 
         val picker = OptionPicker(this)
         // При редактировании подставляем уже выбранный в чеке объём.
@@ -1303,7 +1285,8 @@ class MainActivity : AppCompatActivity() {
         )
         // строка напитка обновляется вместе с опциями
         val drinkRowHost = LinearLayout(this)
-        body.addView(drinkRowHost, LinearLayout.LayoutParams(MATCH, WRAP))
+        comp.addView(drinkRowHost, LinearLayout.LayoutParams(MATCH, WRAP))
+        compRow(food, null, foodPrice)
         fun paintDrinkRow() {
             drinkRowHost.removeAllViews()
             val v = picker.selectedVariant ?: drink
@@ -1313,8 +1296,8 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, dp(6), 0, dp(6))
             }
-            row.addView(ThumbView(this).apply { setCorner(8); bind(v.name, v.imageUrl, 200) },
-                LinearLayout.LayoutParams(dp(34), dp(34)))
+            row.addView(ThumbView(this).apply { setCorner(7); bind(v.name, v.imageUrl, 200) },
+                LinearLayout.LayoutParams(dp(32), dp(32)))
             val col = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(9), 0, dp(6), 0)
@@ -1322,14 +1305,14 @@ class MainActivity : AppCompatActivity() {
             col.addView(TextView(this).apply {
                 text = v.name
                 textSize = 11f
-                setTypeface(null, Typeface.BOLD)
+                setOnest(true)
                 setTextColor(INK)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             })
             if (detail != null) col.addView(TextView(this).apply {
                 text = detail
-                textSize = 9f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
@@ -1343,11 +1326,18 @@ class MainActivity : AppCompatActivity() {
             drinkRowHost.addView(row)
         }
         paintDrinkRow()
+        body.addView(TextView(this).apply {
+            text = "ОПЦИИ НАПИТКА"; textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
+            setPadding(0, dp(16), 0, 0)
+        })
+        body.addView(TextView(this).apply {
+            text = "как у обычного ${drink.name.lowercase()}"; textSize = 10f; setTextColor(UiKit.MUTED); setPadding(0, dp(2), 0, 0)
+        })
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val addBtn = TextView(this).apply {
             textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(WHITE)
             gravity = Gravity.CENTER
             background = rounded(BRAND, 14, null)
@@ -1365,9 +1355,8 @@ class MainActivity : AppCompatActivity() {
 
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(12))
-            setBackgroundColor(WHITE)
-            elevation = 4f * resources.displayMetrics.density
+            setPadding(dp(14), dp(10), dp(14), dp(11))
+            background = topBorder(WHITE)
         }
         foot.addView(addBtn, LinearLayout.LayoutParams(MATCH, dp(50)))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -1421,7 +1410,9 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
         }
 
+        Fonts.apply(root)
         dialog.setContentView(root)
+        styleSheet(dialog)
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
@@ -1435,7 +1426,7 @@ class MainActivity : AppCompatActivity() {
                 intArrayOf(0xFFF7F2E9.toInt(), 0xFFECE3D6.toInt()),
             )
         }
-        hero.addView(ThumbView(this).apply { setCorner(0); bind(p.name, p.imageUrl, 480) }, FrameLayout.LayoutParams(MATCH, MATCH))
+        hero.addView(ThumbView(this).apply { setCorner(0); setContain(150, 120); bind(p.name, p.imageUrl, 480) }, FrameLayout.LayoutParams(MATCH, MATCH))
         val badge = when {
             p.isCombo -> "КОМБО"
             p.featured -> "ХИТ"
@@ -1444,8 +1435,9 @@ class MainActivity : AppCompatActivity() {
         if (badge != null) {
             hero.addView(TextView(this).apply {
                 text = badge
-                textSize = 7f
-                setTypeface(null, Typeface.BOLD)
+                textSize = 10f
+                letterSpacing = 0.09f
+                weight(Fonts.STRONG)
                 setTextColor(UiKit.INK_2)
                 setPadding(dp(6), dp(3), dp(6), dp(3))
                 background = rounded(0xEBFFFFFF.toInt(), 5, null)
@@ -1454,15 +1446,9 @@ class MainActivity : AppCompatActivity() {
                 topMargin = dp(12); leftMargin = dp(16)
             })
         }
-        hero.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
+        hero.addView(closeButton("Закрыть", onClose).apply {
             background = rounded(0xE6FFFFFF.toInt(), 22, null)
-            isClickable = true
-            contentDescription = "Закрыть"
-            setOnClickListener { onClose() }
+            Ds.shadowS(this)
         }, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
             gravity = Gravity.TOP or Gravity.END
             topMargin = dp(10); rightMargin = dp(12)
@@ -1474,7 +1460,7 @@ class MainActivity : AppCompatActivity() {
     private fun itemTags(p: CatalogProduct): LinearLayout {
         val tags = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, 0)
+            setPadding(0, dp(7), 0, 0)
         }
         listOfNotNull(
             p.groupName?.takeIf { it.isNotBlank() },
@@ -1482,8 +1468,9 @@ class MainActivity : AppCompatActivity() {
         ).forEach { t ->
             tags.addView(TextView(this).apply {
                 text = t.uppercase()
-                textSize = 8f
-                setTypeface(null, Typeface.BOLD)
+                textSize = 10f
+                letterSpacing = 0.07f
+                weight(Fonts.SEMIBOLD)
                 setTextColor(UiKit.MUTED)
                 setPadding(dp(5), dp(2), dp(5), dp(2))
                 background = rounded(WHITE, 4, LINE)
@@ -1528,41 +1515,42 @@ class MainActivity : AppCompatActivity() {
      * empty-cartbar: без «Повторить» — прошлого заказа в APK нет (не выдумываем).
      */
     private fun buildCartBar(card: CardInfo?): View {
-        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val m = Ds.metrics(this)
+        val wrap = FrameLayout(this)
 
-        // empty
+        // .empty-cartbar: пунктир, высота 62, «Повторить» 36×радиус 10
         val empty = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), 0, dp(14), 0)
-            minimumHeight = dp(62)
-            background = GradientDrawable().apply {
-                setColor(0x8CFFFFFF.toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xF2FBF9F5.toInt())
                 cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), UiKit.LINE_STRONG)
+                setStroke(dp(1), UiKit.LINE_STRONG, dp(4).toFloat(), dp(3).toFloat())
             }
         }
         val emptyText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         emptyText.addView(TextView(this).apply {
             text = "Чек пуст"
             textSize = 12f
-            setTypeface(null, Typeface.BOLD)
+            weight(Fonts.SEMIBOLD)
             setTextColor(INK)
         })
         emptyText.addView(TextView(this).apply {
-            text = "Начните с хитов"
+            text = if (Cart.hasLastOrder()) "Начните с хитов или повторите прошлый" else "Начните с хитов"
             textSize = 10.5f
             setTextColor(UiKit.MUTED)
+            setPadding(0, dp(1), 0, 0)
         })
         empty.addView(emptyText, LinearLayout.LayoutParams(0, WRAP, 1f))
         val repeat = TextView(this).apply {
             text = "Повторить"
             textSize = 10.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
+            weight(Fonts.SEMIBOLD)
+            setTextColor(INK)
             gravity = Gravity.CENTER
             setPadding(dp(12), 0, dp(12), 0)
-            background = rounded(WHITE, 12, LINE)
+            background = rounded(WHITE, 10, LINE)
             isClickable = true
             contentDescription = "Повторить прошлый заказ"
             visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
@@ -1577,33 +1565,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
         repeatOrderView = repeat
-        empty.addView(repeat, LinearLayout.LayoutParams(WRAP, dp(38)).apply { leftMargin = dp(8) })
-        empty.setOnClickListener { /* index: open cart overlay even if empty */ showCart() }
+        empty.addView(repeat, LinearLayout.LayoutParams(WRAP, dp(36)).apply { leftMargin = dp(10) })
         emptyCartBarRoot = empty
-        wrap.addView(empty, LinearLayout.LayoutParams(MATCH, dp(62)))
+        wrap.addView(empty, FrameLayout.LayoutParams(MATCH, dp(62)))
 
-        // filled cartbar
+        // .cartbar: тёмная плашка 66/70, счётчик 31, сумма, CTA
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(11), 0, dp(8), 0)
-            minimumHeight = dp(66)
-            background = GradientDrawable().apply {
-                setColor(0xFF171410.toInt())
-                cornerRadius = dp(20).toFloat()
-            }
-            elevation = 8f * resources.displayMetrics.density
+            background = rounded(0xFF171410.toInt(), 20, null)
+            elevation = 10f * resources.displayMetrics.density
         }
         val count = TextView(this).apply {
             text = "0"
             textSize = 12f
-            setTypeface(null, Typeface.BOLD)
+            weight(Fonts.STRONG)
             gravity = Gravity.CENTER
             setTextColor(0xFF171410.toInt())
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0xFFF6F3EE.toInt())
-            }
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFF6F3EE.toInt()) }
         }
         cartCountView = count
         bar.addView(count, LinearLayout.LayoutParams(dp(31), dp(31)))
@@ -1617,7 +1597,9 @@ class MainActivity : AppCompatActivity() {
         }
         val sub = TextView(this).apply {
             text = "Чек · ${orderType.lowercase()}"
-            textSize = 9f
+            textSize = 10f
+            letterSpacing = 0.04f
+            weight(Fonts.MEDIUM)
             setTextColor(0x9EF6F3EE.toInt())
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -1626,35 +1608,37 @@ class MainActivity : AppCompatActivity() {
         sumCol.addView(sub)
         val total = TextView(this).apply {
             text = "0 ₽"
-            textSize = 17f
-            setTypeface(null, Typeface.BOLD)
+            textSize = m.sumSp
+            letterSpacing = -0.02f
+            weight(Fonts.STRONG)
             setTextColor(WHITE)
             maxLines = 1
+            includeFontPadding = false
         }
         cartTotalView = total
         sumCol.addView(total, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
         bar.addView(sumCol, LinearLayout.LayoutParams(0, WRAP, 1f))
 
         val cta = TextView(this).apply {
-            text = "К оплате  →"
+            text = "К оплате"
             textSize = 12f
-            setTypeface(null, Typeface.BOLD)
+            letterSpacing = 0.01f
+            weight(Fonts.SEMIBOLD)
             setTextColor(WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(14), 0, dp(14), 0)
-            background = GradientDrawable().apply {
-                setColor(BRAND)
-                cornerRadius = dp(14).toFloat()
-            }
+            compoundDrawablePadding = dp(7)
+            setCompoundDrawables(null, null, tinted(R.drawable.ic_arrow_right, WHITE, 15), null)
+            setPadding(dp(if (m.mode == Ds.Mode.M5) 14 else 18), 0, dp(if (m.mode == Ds.Mode.M5) 14 else 18), 0)
+            background = rounded(BRAND, 14, null)
             isClickable = true
             isFocusable = true
             contentDescription = "К оплате"
             setOnClickListener { showUpsellThenCheckout(card) }
         }
-        bar.addView(cta, LinearLayout.LayoutParams(WRAP, dp(48)))
+        bar.addView(cta, LinearLayout.LayoutParams(WRAP, dp(m.ctaH)))
         bar.tag = cta
         cartBarRoot = bar
-        wrap.addView(bar, LinearLayout.LayoutParams(MATCH, dp(66)))
+        wrap.addView(bar, FrameLayout.LayoutParams(MATCH, dp(m.barH)))
         return wrap
     }
 
@@ -1669,7 +1653,7 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val logo = android.widget.ImageView(this).apply {
-            setImageResource(R.drawable.ic_logo_67)
+            setImageResource(R.drawable.logo_67_tile)
             contentDescription = "6.7 Coffee"
         }
         lockup.addView(logo, LinearLayout.LayoutParams(dp(34), dp(34)))
@@ -1682,7 +1666,9 @@ class MainActivity : AppCompatActivity() {
             text = "6.7 Coffee"
             textSize = 14.5f
             setTextColor(INK)
-            setTypeface(null, Typeface.BOLD)
+            letterSpacing = -0.015f
+            weight(Fonts.STRONG)
+            includeFontPadding = false
             maxLines = 1
         })
         // shift-chip visual (index) — действия = существующий showMore
@@ -1694,20 +1680,25 @@ class MainActivity : AppCompatActivity() {
             isFocusable = true
             contentDescription = "Меню смены"
         }
+        // .shift-dot: 5px + кольцо 2px success-soft
         val dot = View(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(UiKit.SUCCESS)
-            }
+            val chipOn = shiftOpenState()
+            background = android.graphics.drawable.LayerDrawable(arrayOf(
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (chipOn == true) UiKit.SUCCESS_SOFT else UiKit.LINE) },
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(when (chipOn) { true -> UiKit.SUCCESS; false -> UiKit.DANGER; null -> UiKit.MUTED }) },
+            )).apply { setLayerInset(1, dp(2), dp(2), dp(2), dp(2)) }
         }
-        shift.addView(dot, LinearLayout.LayoutParams(dp(5), dp(5)).apply { rightMargin = dp(4); gravity = Gravity.CENTER_VERTICAL })
+        shift.addView(dot, LinearLayout.LayoutParams(dp(9), dp(9)).apply { rightMargin = dp(2); gravity = Gravity.CENTER_VERTICAL })
         shift.addView(TextView(this).apply {
-            text = "Смена открыта"
-            textSize = 8f
+            text = when (shiftOpenState()) { true -> "Смена открыта"; false -> "Смена не открыта"; null -> "Смена" }
+            textSize = 10f
+            weight(Fonts.MEDIUM)
             setTextColor(UiKit.MUTED)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }, LinearLayout.LayoutParams(WRAP, WRAP))
+        shift.addView(icon(this, R.drawable.ic_chevron_sm, 9f, UiKit.MUTED).apply { alpha = 0.75f },
+            LinearLayout.LayoutParams(dp(9), dp(9)).apply { leftMargin = dp(4) })
         shift.setOnClickListener {
             shiftView = "home"
             notice = null
@@ -1718,6 +1709,7 @@ class MainActivity : AppCompatActivity() {
         lockup.addView(brandCol, LinearLayout.LayoutParams(WRAP, WRAP))
 
         head.addView(lockup, LinearLayout.LayoutParams(0, WRAP, 1f))
+        queueIndicator()?.let { head.addView(it, LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(8) }) }
         head.addView(guestChip(card, clickable = true), LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(10) })
         return head
     }
@@ -1730,7 +1722,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(5), 0, dp(10), 0)
             background = rounded(WHITE, 999, LINE)
             minimumHeight = dp(48)
-            elevation = 2f * resources.displayMetrics.density
+            Ds.shadowS(this)
         }
         val letter: String
         val name: String
@@ -1761,14 +1753,15 @@ class MainActivity : AppCompatActivity() {
         meta.addView(TextView(this).apply {
             text = name
             textSize = 11.5f
-            setTypeface(null, Typeface.BOLD)
+            weight(Fonts.SEMIBOLD)
             setTextColor(INK)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
         meta.addView(TextView(this).apply {
             text = cups
-            textSize = 8.5f
+            textSize = 10f
+            weight(Fonts.MEDIUM)
             setTextColor(UiKit.MUTED)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -1860,8 +1853,8 @@ class MainActivity : AppCompatActivity() {
         }
         badgeRow.addView(TextView(this).apply {
             text = "КОМБО"
-            textSize = 7f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 10f
+            setOnest(true)
             setTextColor(UiKit.WHITE)
             setPadding(dp(5), dp(2), dp(5), dp(2))
             background = rounded(BRAND, 4, null)
@@ -1869,7 +1862,7 @@ class MainActivity : AppCompatActivity() {
         badgeRow.addView(TextView(this).apply {
             text = combo?.name ?: "Комбо"
             textSize = 12f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -1879,7 +1872,7 @@ class MainActivity : AppCompatActivity() {
         if (combo != null && combo.discountRub.signum() > 0) {
             titleCol.addView(TextView(this).apply {
                 text = "выгода ${rub(combo.discountRub)} · ${rub(componentSum)}"
-                textSize = 9f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
                 setPadding(0, dp(2), 0, 0)
             })
@@ -1888,22 +1881,14 @@ class MainActivity : AppCompatActivity() {
         head.addView(TextView(this).apply {
             text = rub(price)
             textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
         })
-        head.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 12f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.MUTED)
-            isClickable = true
-            contentDescription = "Удалить комбо"
-            setOnClickListener {
+        head.addView(closeButton("Удалить комбо") {
                 Cart.removeComboGroup(groupId)
                 onCartChanged()
                 showCart()
-            }
-        }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(4) })
+            }.apply { background = null }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(4) })
         card.addView(head)
 
         rows.filterNot { it.cartKey.contains("#opt:") }.forEach { l ->
@@ -1922,7 +1907,7 @@ class MainActivity : AppCompatActivity() {
             })
             if (!l.recipe.isNullOrBlank()) col.addView(TextView(this).apply {
                 text = l.recipe
-                textSize = 8.5f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
@@ -1930,7 +1915,7 @@ class MainActivity : AppCompatActivity() {
             row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
             row.addView(TextView(this).apply {
                 text = rub(l.lineTotal())
-                textSize = 9.5f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
             })
             card.addView(row)
@@ -1939,8 +1924,8 @@ class MainActivity : AppCompatActivity() {
         if (combo != null) {
             card.addView(TextView(this).apply {
                 text = "Изменить опции"
-                textSize = 9.5f
-                setTypeface(null, Typeface.BOLD)
+                textSize = 10f
+                setOnest(true)
                 setTextColor(BRAND)
                 setPadding(0, dp(8), 0, 0)
                 isClickable = true
@@ -1982,19 +1967,19 @@ class MainActivity : AppCompatActivity() {
             col.addView(TextView(this).apply {
                 text = "Привязать карту гостя"
                 textSize = 11f
-                setTypeface(null, Typeface.BOLD)
+                setOnest(true)
                 setTextColor(INK)
             })
             col.addView(TextView(this).apply {
                 text = "Чашки и бонусы спишутся в этом чеке"
-                textSize = 8.5f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
             })
             box.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
             box.addView(TextView(this).apply {
                 text = "Сканировать"
-                textSize = 9.5f
-                setTypeface(null, Typeface.BOLD)
+                textSize = 10f
+                setOnest(true)
                 setTextColor(UiKit.INK_2)
                 gravity = Gravity.CENTER
                 setPadding(dp(10), 0, dp(10), 0)
@@ -2022,13 +2007,13 @@ class MainActivity : AppCompatActivity() {
         top.addView(TextView(this).apply {
             text = code
             textSize = 11.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(0xFFF6F3EE.toInt())
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
         if (card.cashbackKopecks > 0) {
             top.addView(TextView(this).apply {
                 text = "${card.cashbackKopecks / 100} бонусов"
-                textSize = 9.5f
+                textSize = 10f
                 setTextColor(0xB3F6F3EE.toInt())
             })
         }
@@ -2037,7 +2022,7 @@ class MainActivity : AppCompatActivity() {
         box.addView(TextView(this).apply {
             text = if (card.freeAvailable > 0) "Подарок доступен" else "$cups из $goal чашек"
             textSize = 10.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(0xFFF6F3EE.toInt())
             setPadding(0, dp(9), 0, 0)
         })
@@ -2047,7 +2032,7 @@ class MainActivity : AppCompatActivity() {
                 card.freeAvailable > 0 -> "1 бесплатный напиток"
                 else -> "$left до подарка"
             }
-            textSize = 8.5f
+            textSize = 10f
             setTextColor(0xB3F6F3EE.toInt())
             setPadding(0, dp(2), 0, 0)
         })
@@ -2058,26 +2043,29 @@ class MainActivity : AppCompatActivity() {
         return box
     }
 
-    private fun showCart() {
-        dismissSheets()
-        val dialog = BottomSheetDialog(this)
+    /**
+     * Панель чека `.cart-sheet`. docked = true — закреплена справа на 10″ (без ручки и «✕»), иначе содержимое bottom-sheet.
+     * Возвращает корневую view и функцию перерисовки.
+     */
+    private fun buildCartPanel(docked: Boolean, close: () -> Unit): Pair<View, () -> Unit> {
+        val sidePad = if (docked) 18 else 16
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        // grip
-        root.addView(View(this).apply {
+        // sheet-grip 34×4
+        if (!docked) root.addView(View(this).apply {
             background = rounded(UiKit.LINE_STRONG, 2, null)
-        }, LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+        }, LinearLayout.LayoutParams(dp(34), dp(4)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(8); bottomMargin = dp(4)
+            topMargin = dp(7); bottomMargin = dp(0)
         })
 
         // sheet-head
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(10), dp(8), dp(8))
+            setPadding(dp(sidePad), dp(if (docked) 18 else 10), dp(if (docked) sidePad else 16), dp(8))
         }
         val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val titleRow = LinearLayout(this).apply {
@@ -2087,12 +2075,13 @@ class MainActivity : AppCompatActivity() {
         val titleTv = TextView(this).apply {
             text = "Чек"
             textSize = 16f
-            setTypeface(null, Typeface.BOLD)
+            letterSpacing = -0.02f
+            weight(Fonts.STRONG)
             setTextColor(INK)
         }
         val countBadge = TextView(this).apply {
-            textSize = 9f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 10f
+            setOnest(true)
             setTextColor(UiKit.MUTED)
             gravity = Gravity.CENTER
             setPadding(dp(5), 0, dp(5), 0)
@@ -2104,7 +2093,7 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(countBadge, LinearLayout.LayoutParams(WRAP, dp(19)).apply { leftMargin = dp(6) })
         titleCol.addView(titleRow)
         val subTv = TextView(this).apply {
-            textSize = 9.5f
+            textSize = 10f
             setTextColor(UiKit.MUTED)
         }
         titleCol.addView(subTv)
@@ -2118,17 +2107,7 @@ class MainActivity : AppCompatActivity() {
             contentDescription = "Очистить заказ"
         }
         head.addView(clearBtn)
-        val closeBtn = TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
-            background = rounded(UiKit.SURFACE_2, 22, null)
-            isClickable = true
-            contentDescription = "Закрыть чек"
-            setOnClickListener { dialog.dismiss() }
-        }
-        head.addView(closeBtn, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(4) })
+        if (!docked) head.addView(closeButton("Закрыть чек", close), LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(4) })
         root.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val scroll = NestedScrollView(this).apply {
@@ -2137,7 +2116,7 @@ class MainActivity : AppCompatActivity() {
         }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, dp(16), dp(16))
+            setPadding(dp(sidePad), 0, dp(sidePad), dp(16))
         }
         scroll.addView(body)
         root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -2146,35 +2125,39 @@ class MainActivity : AppCompatActivity() {
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(12))
-            setBackgroundColor(WHITE)
-            elevation = 4f * resources.displayMetrics.density
+            setPadding(dp(if (docked) 18 else 14), dp(10), dp(if (docked) 18 else 14), dp(11))
+            background = topBorder(WHITE)
         }
         val footPriceCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         footPriceCol.addView(TextView(this).apply {
-            text = "Итого"
-            textSize = 9f
+            text = "ИТОГО"
+            textSize = 10f
+            letterSpacing = 0.07f
             setTextColor(UiKit.MUTED)
         })
         val footTotal = TextView(this).apply {
             textSize = 17f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
         }
         footPriceCol.addView(footTotal)
         foot.addView(footPriceCol, LinearLayout.LayoutParams(0, WRAP, 1f))
         val goPay = TextView(this).apply {
-            text = "К оплате  →"
+            text = "К оплате"
             textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(WHITE)
             gravity = Gravity.CENTER
+            compoundDrawablePadding = dp(8)
+            setCompoundDrawables(null, null, tinted(R.drawable.ic_arrow_right, WHITE, 15), null)
             setPadding(dp(18), 0, dp(18), 0)
             background = rounded(BRAND, 14, null)
             isClickable = true
             isFocusable = true
         }
-        foot.addView(goPay, LinearLayout.LayoutParams(WRAP, dp(50)))
+        foot.addView(goPay, LinearLayout.LayoutParams(0, dp(50), 1f).apply { leftMargin = dp(10) })
+        footPriceCol.minimumWidth = dp(84)
+        (footPriceCol.layoutParams as LinearLayout.LayoutParams).apply { width = WRAP; weight = 0f }
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
         fun paintOrderType(row: LinearLayout) {
@@ -2184,7 +2167,7 @@ class MainActivity : AppCompatActivity() {
                 val b = TextView(this).apply {
                     text = label
                     textSize = 11f
-                    setTypeface(null, Typeface.BOLD)
+                    setOnest(true)
                     gravity = Gravity.CENTER
                     setTextColor(if (on) INK else UiKit.MUTED)
                     background = if (on) rounded(WHITE, 9, null) else null
@@ -2201,6 +2184,7 @@ class MainActivity : AppCompatActivity() {
 
         fun fill() {
             body.removeAllViews()
+            body.post { Fonts.apply(body) }
             val lines = Cart.all()
             val n = cartLineCount(lines)
             countBadge.text = n.toString()
@@ -2210,7 +2194,7 @@ class MainActivity : AppCompatActivity() {
             foot.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
             footTotal.text = rub(cartTotalRub())
             goPay.setOnClickListener {
-                dialog.dismiss()
+                close()
                 val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
                 showUpsellThenCheckout(card)
             }
@@ -2241,7 +2225,7 @@ class MainActivity : AppCompatActivity() {
                 body.addView(TextView(this).apply {
                     text = "Чек пуст"
                     textSize = 14f
-                    setTypeface(null, Typeface.BOLD)
+                    setOnest(true)
                     setTextColor(INK)
                     gravity = Gravity.CENTER
                     setPadding(0, dp(24), 0, dp(4))
@@ -2268,20 +2252,15 @@ class MainActivity : AppCompatActivity() {
                     orientation = LinearLayout.HORIZONTAL
                     setPadding(0, dp(12), 0, dp(12))
                 }
-                // thumb placeholder
+                // .cart-thumb 46×46, радиус 12, градиент; картинка вписана
                 val thumb = FrameLayout(this).apply {
-                    background = GradientDrawable().apply {
-                        setColor(0xFFF3EEE5.toInt())
-                        cornerRadius = dp(12).toFloat()
-                    }
+                    background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFFF3EEE5.toInt(), 0xFFECE3D6.toInt()))
+                        .apply { cornerRadius = dp(12).toFloat() }
+                    clipToOutline = true
                 }
-                thumb.addView(TextView(this).apply {
-                    text = line.name.take(1).uppercase()
-                    textSize = 14f
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(UiKit.INK_2)
-                    gravity = Gravity.CENTER
-                }, FrameLayout.LayoutParams(MATCH, MATCH))
+                val tv = ThumbView(this).apply { setCorner(0); setContain(48, 39) }
+                tv.bind(line.name, products.firstOrNull { it.uuid == line.productUuid }?.imageUrl, 120)
+                thumb.addView(tv, FrameLayout.LayoutParams(MATCH, MATCH))
                 row.addView(thumb, LinearLayout.LayoutParams(dp(46), dp(46)))
 
                 val info = LinearLayout(this).apply {
@@ -2291,7 +2270,7 @@ class MainActivity : AppCompatActivity() {
                 info.addView(TextView(this).apply {
                     text = line.name
                     textSize = 12.5f
-                    setTypeface(null, Typeface.BOLD)
+                    setOnest(true)
                     setTextColor(INK)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
@@ -2314,7 +2293,7 @@ class MainActivity : AppCompatActivity() {
                 lineRow.addView(TextView(this).apply {
                     text = rub(line.lineTotal())
                     textSize = 12.5f
-                    setTypeface(null, Typeface.BOLD)
+                    setOnest(true)
                     setTextColor(INK)
                 }, LinearLayout.LayoutParams(0, WRAP, 1f))
                 val stepper = LinearLayout(this).apply {
@@ -2337,7 +2316,7 @@ class MainActivity : AppCompatActivity() {
                 stepper.addView(TextView(this).apply {
                     text = line.quantity.stripTrailingZeros().toPlainString()
                     textSize = 12f
-                    setTypeface(null, Typeface.BOLD)
+                    setOnest(true)
                     gravity = Gravity.CENTER
                     setTextColor(INK)
                     minWidth = dp(28)
@@ -2349,20 +2328,17 @@ class MainActivity : AppCompatActivity() {
                 info.addView(lineRow, LinearLayout.LayoutParams(MATCH, WRAP))
                 row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-                val remove = TextView(this).apply {
-                    text = "×"
-                    textSize = 16f
-                    gravity = Gravity.CENTER
-                    setTextColor(UiKit.MUTED)
+                val remove = FrameLayout(this).apply {
                     contentDescription = "Удалить: ${line.name}"
                     isClickable = true
+                    addView(icon(this@MainActivity, R.drawable.ic_close, 14f, UiKit.MUTED), FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER))
                     setOnClickListener {
                         Cart.remove(key)
                         onCartChanged()
                         fill()
                     }
                 }
-                row.addView(remove, LinearLayout.LayoutParams(dp(32), dp(32)))
+                row.addView(remove, LinearLayout.LayoutParams(dp(32), dp(32)).apply { topMargin = dp(1) })
                 body.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
                 body.addView(View(this).apply { setBackgroundColor(0xFFF1EBE1.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
             }
@@ -2376,8 +2352,8 @@ class MainActivity : AppCompatActivity() {
             if (upsell.isNotEmpty()) {
                 body.addView(TextView(this).apply {
                     text = "ДОБАВИТЬ К ЗАКАЗУ"
-                    textSize = 9.5f
-                    setTypeface(null, Typeface.BOLD)
+                    textSize = 10f
+                    setOnest(true)
                     setTextColor(UiKit.MUTED)
                     letterSpacing = 0.12f
                     setPadding(0, dp(14), 0, dp(6))
@@ -2424,7 +2400,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         fill()
+        return root to { fill(); Fonts.apply(body) }
+    }
+
+    private fun showCart() {
+        if (Ds.mode(this) == Ds.Mode.M10) { cartDockFill?.invoke(); return }
+        dismissSheets()
+        val dialog = BottomSheetDialog(this)
+        val (root, _) = buildCartPanel(false) { dialog.dismiss() }
+        Fonts.apply(root)
+        Fonts.apply(root)
         dialog.setContentView(root)
+        styleSheet(dialog)
         dialog.setOnDismissListener { onCartChanged(); if (cartDialog === dialog) cartDialog = null }
         cartDialog = dialog
         dialog.show()
@@ -2436,19 +2423,17 @@ class MainActivity : AppCompatActivity() {
 
 
     /** Есть ли в чеке еда — тогда рекомендации не нужны (index: !hasFood()). */
-    private fun hasFoodInCart(): Boolean {
-        val byUuid = products.associateBy { it.uuid }
-        return Cart.all().any { line ->
-            val p = byUuid[line.productUuid] ?: return@any false
-            !p.supportsMods && !p.freeEligible
-        }
-    }
+    private fun hasFoodInCart(): Boolean =
+        FoodRules.cartHasFood(Cart.all(), products.filter { it.isFood }.map { it.uuid }.toSet())
 
     private fun showUpsellThenCheckout(card: CardInfo?) {
-        if (recShown || hasFoodInCart()) {
+        val hasFood = hasFoodInCart()
+        if (recShown || hasFood) {
+            Log.i(TAG, "hasFood=$hasFood upsellShown=false (recShown=$recShown)")
             checkout(card)
             return
         }
+        Log.i(TAG, "hasFood=false upsellShown=true")
         val inCart = Cart.all().map { it.productUuid }.toSet()
         val candidates = LinkedHashMap<String, UpsellItem>()
         fun resolveUuid(u: UpsellItem): String? {
@@ -2483,161 +2468,189 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        root.addView(View(this).apply {
-            background = rounded(UiKit.LINE_STRONG, 2, null)
-        }, LinearLayout.LayoutParams(dp(36), dp(4)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(8); bottomMargin = dp(4)
-        })
-        val head = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(10), dp(8), dp(8))
-        }
-        val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        titleCol.addView(TextView(this).apply {
-            text = "Что-то к напитку?"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        titleCol.addView(TextView(this).apply {
-            text = "Выпечка к кофе · можно пропустить"
-            textSize = 9.5f
-            setTextColor(UiKit.MUTED)
-        })
-        head.addView(titleCol, LinearLayout.LayoutParams(0, WRAP, 1f))
-        head.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
-            background = rounded(UiKit.SURFACE_2, 22, null)
-            isClickable = true
-            setOnClickListener { dialog.dismiss(); checkout(card) }
-        }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        root.addView(head)
+        sheetHead(root, "Что-то к напитку?", "Выпечка к кофе · можно пропустить") { dialog.dismiss(); checkout(card) }
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(4), dp(16), dp(8))
+            setPadding(dp(16), 0, dp(16), dp(8))
         }
         body.addView(TextView(this).apply {
             text = "Короткая подборка. Добавьте 0, 1 или несколько — или сразу к оплате."
-            textSize = 12f
+            textSize = 10f
+            setLineSpacing(0f, 1.3f)
             setTextColor(UiKit.MUTED)
-            setPadding(0, 0, 0, dp(10))
+            setPadding(0, 0, 0, dp(9))
         })
 
-        val payCta = TextView(this).apply {
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(WHITE)
-            gravity = Gravity.CENTER
-            background = rounded(BRAND, 14, null)
-            isClickable = true
-        }
-        fun paintPay() {
-            payCta.text = "К оплате · ${rub(cartTotalRub())}"
-        }
+        val payCta = btn("", "primary") { dialog.dismiss(); checkout(card) }.apply { textSize = 11.5f }
+        fun paintPay() { payCta.text = "К оплате · ${rub(cartTotalRub())}" }
         paintPay()
 
-        list.forEach { (uuid, u) ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), dp(10), dp(10), dp(10))
-                background = rounded(WHITE, 14, LINE)
-            }
-            row.addView(ThumbView(this).apply {
-                setCorner(10)
-                bind(u.name, u.imageUrl ?: products.firstOrNull { it.uuid == uuid }?.imageUrl, 160)
-            }, LinearLayout.LayoutParams(dp(46), dp(46)).apply { rightMargin = dp(10) })
-            val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            info.addView(TextView(this).apply {
-                text = u.name
-                textSize = 13f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(INK)
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-            })
-            products.firstOrNull { it.uuid == uuid }?.recipe?.takeIf { it.isNotBlank() }?.let { meta ->
-                info.addView(TextView(this).apply {
-                    text = meta
-                    textSize = 9.5f
-                    setTextColor(UiKit.MUTED)
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                })
-            }
-            info.addView(TextView(this).apply {
-                text = rub(u.priceRub)
-                textSize = 12f
-                setTextColor(UiKit.INK_2)
-            })
-            row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
-            val qtyTv = TextView(this).apply {
-                text = Cart.qty(uuid).toString()
-                textSize = 14f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(INK)
-                minWidth = dp(28)
-            }
-            fun step(label: String, act: () -> Unit) = TextView(this).apply {
-                text = label
-                textSize = 18f
-                gravity = Gravity.CENTER
-                setTextColor(UiKit.INK_2)
-                background = rounded(UiKit.SURFACE_2, 12, LINE)
-                isClickable = true
-                setOnClickListener {
-                    act()
-                    onCartChanged()
-                    qtyTv.text = Cart.qty(uuid).toString()
-                    paintPay()
+        val listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(listBox)
+        fun paintList() {
+            listBox.removeAllViews()
+            list.forEachIndexed { idx, (uuid, u) ->
+                val prod = products.firstOrNull { it.uuid == uuid }
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(10), 0, dp(10))
                 }
+                val thumb = FrameLayout(this).apply {
+                    background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFFF3EEE5.toInt(), 0xFFECE3D6.toInt())).apply { cornerRadius = dp(12).toFloat() }
+                    clipToOutline = true
+                    addView(ThumbView(this@MainActivity).apply { setCorner(0); setContain(56, 46); bind(u.name, u.imageUrl ?: prod?.imageUrl, 160) },
+                        FrameLayout.LayoutParams(MATCH, MATCH))
+                }
+                row.addView(thumb, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(10) })
+                val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                info.addView(TextView(this).apply {
+                    text = u.name; textSize = 12.5f; weight(Fonts.SEMIBOLD); letterSpacing = -0.005f; setTextColor(INK)
+                    maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                })
+                prod?.recipe?.takeIf { it.isNotBlank() }?.let { meta ->
+                    info.addView(TextView(this).apply {
+                        text = meta; textSize = 10f; setTextColor(UiKit.MUTED); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                        setPadding(0, dp(1), 0, 0)
+                    })
+                }
+                info.addView(TextView(this).apply {
+                    text = rub(u.priceRub); textSize = 12.5f; weight(Fonts.STRONG); setTextColor(INK); setPadding(0, dp(3), 0, 0)
+                })
+                row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
+                val q = Cart.qty(uuid)
+                fun add() { Cart.add(CartLine(uuid, u.name, u.priceRub, BigDecimal.ONE, null, false)); onCartChanged(); paintPay(); paintList() }
+                if (q == 0) {
+                    row.addView(TextView(this).apply {
+                        text = "Добавить"; textSize = 10f; weight(Fonts.SEMIBOLD); setTextColor(INK); gravity = Gravity.CENTER
+                        setPadding(dp(12), 0, dp(12), 0); background = rounded(WHITE, 9, LINE); isClickable = true
+                        setOnClickListener { add() }
+                    }, LinearLayout.LayoutParams(WRAP, dp(40)))
+                } else {
+                    val st = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = rounded(WHITE, 9, LINE) }
+                    fun stepBtn(label: String, act: () -> Unit) = TextView(this).apply {
+                        text = label; textSize = 15f; gravity = Gravity.CENTER; setTextColor(UiKit.INK_2); isClickable = true
+                        setOnClickListener { act() }
+                    }
+                    st.addView(stepBtn("−") { Cart.decProduct(uuid); onCartChanged(); paintPay(); paintList() }, LinearLayout.LayoutParams(dp(36), dp(40)))
+                    st.addView(TextView(this).apply { text = q.toString(); textSize = 11f; weight(Fonts.STRONG); gravity = Gravity.CENTER; setTextColor(INK); minWidth = dp(18) }, LinearLayout.LayoutParams(WRAP, dp(40)))
+                    st.addView(stepBtn("+") { add() }, LinearLayout.LayoutParams(dp(36), dp(40)))
+                    row.addView(st, LinearLayout.LayoutParams(WRAP, dp(40)))
+                }
+                listBox.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+                if (idx < list.size - 1) listBox.addView(View(this).apply { setBackgroundColor(0xFFF1EBE1.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
             }
-            row.addView(step("−") { Cart.decProduct(uuid) }, LinearLayout.LayoutParams(dp(40), dp(40)))
-            row.addView(qtyTv, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(4); rightMargin = dp(4) })
-            row.addView(step("+") {
-                Cart.add(CartLine(uuid, u.name, u.priceRub, BigDecimal.ONE, null, false))
-            }, LinearLayout.LayoutParams(dp(40), dp(40)))
-            body.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+            Fonts.apply(listBox)
         }
+        paintList()
         root.addView(NestedScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(12))
-            setBackgroundColor(WHITE)
+            setPadding(dp(14), dp(10), dp(14), dp(11))
+            background = topBorder(WHITE)
         }
-        val skip = TextView(this).apply {
-            text = "Пропустить"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(INK)
-            background = rounded(WHITE, 14, LINE)
-            isClickable = true
-            setOnClickListener { dialog.dismiss(); checkout(card) }
-        }
-        foot.addView(skip, LinearLayout.LayoutParams(dp(120), dp(50)).apply { rightMargin = dp(10) })
-        payCta.setOnClickListener { dialog.dismiss(); checkout(card) }
+        foot.addView(btn("Пропустить", "ghost") { dialog.dismiss(); checkout(card) }, LinearLayout.LayoutParams(WRAP, dp(50)).apply { rightMargin = dp(10) })
         foot.addView(payCta, LinearLayout.LayoutParams(0, dp(50), 1f))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
+        Fonts.apply(root)
         dialog.setContentView(root)
+        styleSheet(dialog)
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
     }
 
+    /** Общая «шапка» листа: ручка 34×4, заголовок + подпись, ✕. */
+    private fun sheetHead(root: LinearLayout, title: String, sub: String, onClose: () -> Unit): TextView {
+        root.addView(View(this).apply {
+            background = rounded(UiKit.LINE_STRONG, 2, null)
+        }, LinearLayout.LayoutParams(dp(34), dp(4)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            topMargin = dp(7)
+        })
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(8))
+        }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = title
+            textSize = 16f
+            letterSpacing = -0.02f
+            weight(Fonts.STRONG)
+            setTextColor(INK)
+        })
+        val subTv = TextView(this).apply {
+            text = sub
+            textSize = 10f
+            weight(Fonts.MEDIUM)
+            setTextColor(UiKit.MUTED)
+            setPadding(0, dp(2), 0, 0)
+        }
+        col.addView(subTv)
+        head.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        head.addView(closeButton("Закрыть", onClose), LinearLayout.LayoutParams(dp(44), dp(44)))
+        root.addView(head)
+        return subTv
+    }
+
+    /** `.btn`: высота 50, радиус 14, 12.5/600. kind: primary | ink | ghost. */
+    private fun btn(label: String, kind: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 12.5f
+        weight(Fonts.SEMIBOLD)
+        gravity = Gravity.CENTER
+        setPadding(dp(18), 0, dp(18), 0)
+        when (kind) {
+            "primary" -> { setTextColor(WHITE); background = rounded(BRAND, 14, null) }
+            "ink" -> { setTextColor(WHITE); background = rounded(INK, 14, null) }
+            else -> { setTextColor(INK); background = rounded(WHITE, 14, LINE) }
+        }
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+
+    /** Плитка выбора `.opt`: обводка ink у выбранной, галочка 14. */
+    private fun choiceCell(title: String, sub: String?, on: Boolean, onClick: () -> Unit): View {
+        val cell = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            minimumHeight = dp(48)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+        }
+        val base = rounded(WHITE, 11, if (on) INK else LINE)
+        cell.background = if (!on) base else android.graphics.drawable.LayerDrawable(arrayOf(base, GradientDrawable().apply {
+            setColor(0); cornerRadius = dp(10).toFloat(); setStroke(dp(1), INK)
+        })).apply { setLayerInset(1, dp(1), dp(1), dp(1), dp(1)) }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = title; textSize = 10.5f; weight(Fonts.MEDIUM)
+            setTextColor(if (on) INK else UiKit.INK_2)
+        })
+        if (sub != null) col.addView(TextView(this).apply {
+            text = sub; textSize = 10f; setTextColor(UiKit.MUTED)
+        })
+        cell.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (on) cell.addView(FrameLayout(this).apply {
+            background = rounded(INK, 7, null)
+            addView(icon(this@MainActivity, R.drawable.ic_check, 9f, WHITE), FrameLayout.LayoutParams(dp(9), dp(9), Gravity.CENTER))
+        }, LinearLayout.LayoutParams(dp(14), dp(14)).apply { leftMargin = dp(6) })
+        return cell
+    }
+
     /**
-     * pay-sheet: loyalty choices + «Оплатить на Эвоторе».
-     * Способы card/cash из index НЕ эмулируем — оплату принимает штатный экран Эвотора (SellLauncher).
+     * pay-sheet 1:1: гость · «К оплате» · выбор подарка/кэшбэка · способы (Картой / Наличными) · примечание.
+     * Деньги принимает штатный экран Эвотора (SellLauncher): здесь способ — подсказка кассиру,
+     * для наличных открывается калькулятор сдачи (справочный).
      */
     private fun checkout(card: CardInfo?) {
         if (Cart.isEmpty()) {
@@ -2647,20 +2660,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
         notice = null
-        if (card == null) {
-            pay(false, false, 0L)
-            return
-        }
         val now = System.currentTimeMillis() / 1000
-        val reserved = DiscountCalc.reserved(card, now)
+        val reserved = card != null && DiscountCalc.reserved(card, now)
         val eligibleLines = Cart.all().filter { it.freeEligible }
         val eligiblePrices = eligibleLines.map { it.priceRub }
-        val giftPossible = card.freeAvailable > 0 && eligiblePrices.isNotEmpty()
-        val cbPossible = card.cashbackKopecks > 0 && card.reservationId != null
-        if (!giftPossible && !cbPossible) {
-            pay(false, false, 0L)
-            return
-        }
+        val giftPossible = card != null && card.freeAvailable > 0 && eligiblePrices.isNotEmpty()
+        val cbPossible = card != null && card.cashbackKopecks > 0 && card.reservationId != null
 
         dismissSheets()
         val dialog = BottomSheetDialog(this)
@@ -2669,195 +2674,311 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        root.addView(View(this).apply {
-            background = rounded(UiKit.LINE_STRONG, 2, null)
-        }, LinearLayout.LayoutParams(dp(36), dp(4)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(8); bottomMargin = dp(4)
-        })
-        val head = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(10), dp(8), dp(8))
-        }
-        val hCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        hCol.addView(TextView(this).apply {
-            text = "Оплата"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        hCol.addView(TextView(this).apply {
-            text = "Чек · ${orderType.lowercase()} · Эвотор"
-            textSize = 9.5f
-            setTextColor(UiKit.MUTED)
-        })
-        head.addView(hCol, LinearLayout.LayoutParams(0, WRAP, 1f))
-        head.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
-            background = rounded(UiKit.SURFACE_2, 22, null)
-            isClickable = true
-            setOnClickListener { dialog.dismiss() }
-        }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        root.addView(head)
+        sheetHead(root, "Оплата", "Чек · ${orderType.lowercase()} · Эвотор") { dialog.dismiss() }
 
-        val scroll = NestedScrollView(this)
+        val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(4), dp(16), dp(16))
+            setPadding(dp(16), 0, dp(16), dp(14))
         }
         scroll.addView(box)
         root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        // guest row
-        val guestRow = LinearLayout(this).apply {
+        // .pay-order
+        val order = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = rounded(UiKit.SURFACE_2, 14, LINE)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(UiKit.SURFACE_2); cornerRadius = dp(11).toFloat()
+                setStroke(dp(1), UiKit.LINE_STRONG, dp(3).toFloat(), dp(3).toFloat())
+            }
         }
-        val gLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        gLeft.addView(TextView(this).apply {
-            text = "Гость"
-            textSize = 9f
-            setTextColor(UiKit.MUTED)
-        })
-        gLeft.addView(TextView(this).apply {
-            text = card.cardCode.ifBlank { "по QR" }
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        guestRow.addView(gLeft, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val gRight = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.END
+        fun small(t: String, end: Boolean = false) = TextView(this).apply {
+            text = t; textSize = 10f; setTextColor(UiKit.MUTED); letterSpacing = 0.02f
+            if (end) gravity = Gravity.END
         }
-        gRight.addView(TextView(this).apply {
-            text = "Стаканы"
-            textSize = 9f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.END
+        val oLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        oLeft.addView(small("Гость"))
+        oLeft.addView(TextView(this).apply {
+            text = if (card != null) card.cardCode.ifBlank { "по QR" } else "Без карты"
+            textSize = 11.5f; weight(Fonts.SEMIBOLD); setTextColor(INK)
         })
-        gRight.addView(TextView(this).apply {
-            text = "${card.paidCups} из ${card.cupsForFree}"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            gravity = Gravity.END
+        order.addView(oLeft, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val oRight = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
+        oRight.addView(small("Позиций", true))
+        oRight.addView(TextView(this).apply {
+            text = cartLineCount(Cart.all()).toString()
+            textSize = 11f; letterSpacing = 0.04f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2); gravity = Gravity.END
         })
-        guestRow.addView(gRight)
-        box.addView(guestRow, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        order.addView(oRight)
+        box.addView(order, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        val expiry = card.reservationExpiresAt
-        val resText = when {
-            card.reservationId == null -> null
-            expiry == 0L -> null
-            expiry - now > 0 -> "Бонусы зарезервированы ещё ~${(expiry - now + 59) / 60} мин."
-            reserved -> "Резерв истёк: бонус применится, только если его не занял другой чек."
-            else -> "Резерв истёк — бонус не применится. Отсканируйте карту заново."
+        // .pay-total
+        val totalWrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(16), 0, dp(14))
+            background = bottomBorder(WHITE)
         }
-        resText?.let {
-            box.addView(banner(it, if (reserved) Kind.INFO else Kind.WARN).apply {
-                (layoutParams as LinearLayout.LayoutParams).bottomMargin = dp(8)
-            })
+        totalWrap.addView(TextView(this).apply {
+            text = "К ОПЛАТЕ"; textSize = 10f; letterSpacing = 0.12f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
+        })
+        val totalTv = TextView(this).apply {
+            textSize = 38f; letterSpacing = -0.045f; weight(Fonts.BOLD); setTextColor(INK)
+            includeFontPadding = false; setPadding(0, dp(3), 0, 0)
         }
-        if ((giftPossible || cbPossible) && !reserved) {
-            box.addView(banner("Бонус по карте недоступен: резерв не создан или истёк. Оплата пройдёт без скидки.", Kind.WARN).apply {
-                (layoutParams as LinearLayout.LayoutParams).bottomMargin = dp(8)
-            })
+        totalWrap.addView(totalTv)
+        val discTv = TextView(this).apply {
+            textSize = 10f; setTextColor(UiKit.MUTED); setPadding(0, dp(4), 0, 0)
         }
+        totalWrap.addView(discTv)
+        box.addView(totalWrap, LinearLayout.LayoutParams(MATCH, WRAP))
 
         var useGift = giftPossible && reserved
         var useCb = false
+        lateinit var recompute: () -> Unit
+
+        if (card != null) {
+            val resExpiry = card.reservationExpiresAt
+            val resText = when {
+                card.reservationId == null -> null
+                resExpiry == 0L -> null
+                resExpiry - now > 0 -> "Бонусы зарезервированы ещё ~${(resExpiry - now + 59) / 60} мин."
+                reserved -> "Резерв истёк: бонус применится, только если его не занял другой чек."
+                else -> "Резерв истёк — бонус не применится. Отсканируйте карту заново."
+            }
+            resText?.let { box.addView(banner(it, if (reserved) Kind.INFO else Kind.WARN, 11f), LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) }) }
+            if ((giftPossible || cbPossible) && !reserved) {
+                box.addView(banner("Бонус по карте недоступен: резерв не создан или истёк. Оплата пройдёт без скидки.", Kind.WARN, 11f),
+                    LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
+            }
+        }
         val cheapestName = eligibleLines.minByOrNull { it.priceRub }?.name
         val cheapest = DiscountCalc.cheapestEligible(eligiblePrices) ?: BigDecimal.ZERO
-        val totals = TextView(this).apply {
-            textSize = 15f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            setPadding(0, dp(8), 0, dp(8))
-        }
-        lateinit var recompute: () -> Unit
-        fun choice(a: String, b: String, onA: (Boolean) -> Unit) {
-            val g = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-            val ra = RadioButton(this).apply {
-                id = View.generateViewId(); text = a; textSize = 14f; setTextColor(INK); minHeight = dp(48)
+
+        fun choiceBlock(title: String, hint: String, a: String, aSub: String?, b: String, bSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
+            val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            wrap.addView(TextView(this).apply {
+                text = title.uppercase(); textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
+                setPadding(0, dp(15), 0, dp(7))
+            })
+            val cells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            fun paint() {
+                cells.removeAllViews()
+                cells.addView(choiceCell(a, aSub, firstOn()) { set(true); paint(); recompute() }, LinearLayout.LayoutParams(MATCH, WRAP))
+                cells.addView(choiceCell(b, bSub, !firstOn()) { set(false); paint(); recompute() }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
+                Fonts.apply(cells)
             }
-            val rb = RadioButton(this).apply {
-                id = View.generateViewId(); text = b; textSize = 14f; setTextColor(INK); minHeight = dp(48)
-            }
-            g.addView(ra); g.addView(rb)
-            g.check(ra.id)
-            g.setOnCheckedChangeListener { _, id -> onA(id == ra.id); recompute() }
-            box.addView(g, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(4) })
+            paint()
+            wrap.addView(cells)
+            box.addView(wrap)
         }
         if (giftPossible && reserved) {
-            choice("Применить подарок: «${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка") { useGift = it }
+            choiceBlock("Подарок", "", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) { useGift = it }
         } else useGift = false
-        if (cbPossible && reserved) {
-            choice("Копить кэшбэк", "Списать кэшбэк (до ${card.cashbackKopecks / 100} ₽)") { useCb = !it }
+        if (cbPossible && reserved && card != null) {
+            choiceBlock("Кэшбэк", "", "Копить кэшбэк", null, "Списать кэшбэк", "до ${card.cashbackKopecks / 100} ₽", { !useCb }) { useCb = !it }
         }
-        box.addView(totals)
+
         recompute = {
             val gross = Cart.gross()
-            val r = DiscountCalc.compute(
+            val r = if (card != null) DiscountCalc.compute(
                 gross, eligiblePrices, reserved, useGift, card.freeAvailable,
                 if (useCb) card.cashbackKopecks else 0L, card.cashbackKopecks,
-            )
+            ) else DiscountCalc.Result(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO)
             val combo = comboDiscountRub()
             val dueNow = gross.subtract(r.total).subtract(combo).max(BigDecimal.ZERO)
-            totals.text = "Итого ${rub(gross)}" +
-                (if (combo.signum() > 0) "\nКомбо −${rub(combo)}" else "") +
-                (if (r.free.signum() > 0) "\nПодарок −${rub(r.free)}" else "") +
-                (if (r.cashback.signum() > 0) "\nКэшбэк −${rub(r.cashback)}" else "") +
-                "\nК оплате: ${rub(dueNow)}"
+            val disc = gross.subtract(dueNow)
+            totalTv.text = rub(dueNow)
+            discTv.text = if (disc.signum() > 0) "Скидка −${rub(disc)}" else ""
+            discTv.setTextColor(if (disc.signum() > 0) UiKit.SUCCESS else UiKit.MUTED)
+            payDue = dueNow
         }
         recompute()
 
-        box.addView(TextView(this).apply {
-            text = "Эвотор примет оплату, применит скидку и напечатает фискальный чек."
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(8), 0, dp(4))
-        })
-
-        val foot = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(12))
-            setBackgroundColor(WHITE)
-        }
-        foot.addView(TextView(this).apply {
-            text = "Оплатить на Эвоторе"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(WHITE)
-            gravity = Gravity.CENTER
-            background = rounded(BRAND, 14, null)
-            isClickable = true
-            setOnClickListener {
-                dialog.dismiss()
-                pay(useGift && reserved, useCb && reserved, if (useCb && reserved) card.cashbackKopecks else 0L)
+        // .pay-methods
+        fun method(label: String, sub: String, iconRes: Int, primary: Boolean, onClick: () -> Unit): View {
+            val c = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(11), dp(11), dp(11), dp(11))
+                minimumHeight = dp(92)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onClick() }
             }
-        }, LinearLayout.LayoutParams(MATCH, dp(52)))
-        foot.addView(TextView(this).apply {
-            text = "Назад к заказу"
-            textSize = 12.5f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.MUTED)
-            isClickable = true
-            setOnClickListener { dialog.dismiss() }
-        }, LinearLayout.LayoutParams(MATCH, dp(44)).apply { topMargin = dp(6) })
-        root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
+            val base = rounded(WHITE, 14, if (primary) BRAND else LINE)
+            c.background = if (!primary) base else android.graphics.drawable.LayerDrawable(arrayOf(base, GradientDrawable().apply {
+                setColor(0); cornerRadius = dp(13).toFloat(); setStroke(dp(1), BRAND)
+            })).apply { setLayerInset(1, dp(1), dp(1), dp(1), dp(1)) }
+            c.addView(FrameLayout(this).apply {
+                background = rounded(if (primary) BRAND else UiKit.SURFACE_2, 9, if (primary) BRAND else LINE)
+                addView(icon(this@MainActivity, iconRes, 17f, if (primary) WHITE else INK), FrameLayout.LayoutParams(dp(17), dp(17), Gravity.CENTER))
+            }, LinearLayout.LayoutParams(dp(32), dp(32)))
+            c.addView(TextView(this).apply {
+                text = label; textSize = 11.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); setPadding(0, dp(7), 0, 0)
+            })
+            c.addView(TextView(this).apply {
+                text = sub; textSize = 10f; setTextColor(UiKit.MUTED); setLineSpacing(0f, 1.15f); setPadding(0, dp(7), 0, 0)
+            })
+            return c
+        }
+        val methods = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        methods.addView(method("Картой", "Приложить к терминалу", R.drawable.ic_card, true) {
+            dialog.dismiss(); pay(useGift && reserved, useCb && reserved, if (useCb && reserved) card!!.cashbackKopecks else 0L)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        methods.addView(method("Наличными", "Ввод суммы и сдача", R.drawable.ic_cash, false) {
+            dialog.dismiss()
+            showCashSheet(payDue) { pay(useGift && reserved, useCb && reserved, if (useCb && reserved) card!!.cashbackKopecks else 0L) }
+        }, LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(8) })
+        box.addView(methods, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(13) })
 
+        // .pay-note
+        val note = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(10), dp(9), dp(10), dp(9))
+            background = rounded(UiKit.SURFACE_2, 10, LINE)
+        }
+        note.addView(icon(this, R.drawable.ic_info, 13f, UiKit.INK_2), LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(7); topMargin = dp(1) })
+        note.addView(TextView(this).apply {
+            val sp = android.text.SpannableString("Выберите способ — Эвотор примет оплату, передаст скидку и напечатает фискальный чек.")
+            val i = sp.indexOf("Эвотор")
+            sp.setSpan(android.text.style.ForegroundColorSpan(UiKit.INK_2), i, i + 6, 0)
+            sp.setSpan(android.text.style.StyleSpan(Typeface.BOLD), i, i + 6, 0)
+            text = sp; textSize = 10f; setTextColor(UiKit.MUTED); setLineSpacing(0f, 1.15f)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        box.addView(note, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(13) })
+
+        Fonts.apply(root)
         dialog.setContentView(root)
+        styleSheet(dialog)
         dialog.setOnDismissListener { if (checkoutDialog === dialog) checkoutDialog = null }
         checkoutDialog = dialog
         dialog.show()
         dialog.behavior.isDraggable = false
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
+    }
+
+    private var payDue: BigDecimal = BigDecimal.ZERO
+
+    private fun bottomBorder(color: Int): android.graphics.drawable.Drawable {
+        val line = android.graphics.drawable.ColorDrawable(LINE)
+        val fill = android.graphics.drawable.ColorDrawable(color)
+        return android.graphics.drawable.LayerDrawable(arrayOf(line, fill)).apply { setLayerInset(1, 0, 0, 0, dp(1)) }
+    }
+
+    /**
+     * cash-sheet 1:1: «К оплате» · «Получено» · сдача · быстрые суммы · клавиатура · «Принять».
+     * Расчёт справочный: деньги вводятся и фиксируются на экране оплаты Эвотора,
+     * который откроется по «Принять».
+     */
+    private fun showCashSheet(due: BigDecimal, onAccept: () -> Unit) {
+        dismissSheets()
+        val dialog = BottomSheetDialog(this)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(WHITE) }
+        sheetHead(root, "Наличные", "Чек · ${orderType.lowercase()} · расчёт сдачи") { dialog.dismiss() }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), 0, dp(16), dp(12)) }
+        root.addView(body, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val dueRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
+            setPadding(0, dp(6), 0, dp(9)); background = bottomBorder(WHITE)
+        }
+        dueRow.addView(TextView(this).apply {
+            text = "К ОПЛАТЕ"; textSize = 10f; letterSpacing = 0.1f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        dueRow.addView(TextView(this).apply {
+            text = rub(due); textSize = 24f; letterSpacing = -0.035f; weight(Fonts.BOLD); setTextColor(INK)
+        })
+        body.addView(dueRow, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val display = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
+            setPadding(dp(12), dp(10), dp(12), dp(10)); background = rounded(UiKit.SURFACE_2, 12, LINE)
+        }
+        display.addView(TextView(this).apply {
+            text = "Получено"; textSize = 10f; weight(Fonts.MEDIUM); setTextColor(UiKit.MUTED)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val recvTv = TextView(this).apply { textSize = 25f; letterSpacing = -0.03f; weight(Fonts.BOLD); setTextColor(INK) }
+        display.addView(recvTv)
+        body.addView(display, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10); bottomMargin = dp(8) })
+
+        val changeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(2), 0, dp(2), dp(8)) }
+        changeRow.addView(TextView(this).apply { text = "Сдача"; textSize = 10f; setTextColor(UiKit.MUTED) }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val changeTv = TextView(this).apply { textSize = 13f; weight(Fonts.STRONG) }
+        changeRow.addView(changeTv)
+        body.addView(changeRow)
+
+        var typed = ""
+        val acceptBtn = btn("Принять", "primary") {}
+        fun received(): BigDecimal = if (typed.isEmpty()) BigDecimal.ZERO else BigDecimal(typed)
+        fun paint() {
+            val rcv = received()
+            recvTv.text = rub(rcv)
+            val ch = rcv.subtract(due)
+            val ok = rcv >= due
+            changeTv.text = if (typed.isEmpty()) "—" else if (ok) rub(ch) else "не хватает ${rub(ch.negate())}"
+            changeTv.setTextColor(if (typed.isEmpty()) UiKit.MUTED else if (ok) UiKit.SUCCESS else UiKit.DANGER)
+            acceptBtn.isEnabled = ok
+            acceptBtn.background = rounded(if (ok) BRAND else 0xFFC9C3B9.toInt(), 14, null)
+        }
+
+        val quick = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun q(label: String, v: BigDecimal?) {
+            quick.addView(TextView(this).apply {
+                text = label; textSize = 10f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.INK_2); gravity = Gravity.CENTER
+                background = rounded(WHITE, 9, LINE); isClickable = true
+                setOnClickListener { typed = (v ?: due).stripTrailingZeros().toPlainString().let { if (it.contains("E")) BigDecimal(it).toPlainString() else it }; paint() }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { if (quick.childCount > 0) leftMargin = dp(5) })
+        }
+        q("Без сдачи", null); q("500", BigDecimal(500)); q("1 000", BigDecimal(1000)); q("2 000", BigDecimal(2000))
+        body.addView(quick, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+
+        val keys = listOf("1","2","3","4","5","6","7","8","9","00","0","⌫")
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (r in 0 until 4) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in 0 until 3) {
+                val k = keys[r * 3 + c]
+                val cell: View = if (k == "⌫") FrameLayout(this).apply {
+                    background = rounded(UiKit.SURFACE_2, 10, null)
+                    addView(icon(this@MainActivity, R.drawable.ic_backspace, 20f, UiKit.MUTED), FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
+                } else TextView(this).apply {
+                    text = k; textSize = 17f; weight(Fonts.MEDIUM); gravity = Gravity.CENTER
+                    setTextColor(if (k == "00") UiKit.MUTED else INK)
+                    background = rounded(UiKit.SURFACE_2, 10, null)
+                }
+                cell.isClickable = true
+                cell.setOnClickListener {
+                    when (k) {
+                        "⌫" -> typed = typed.dropLast(1)
+                        else -> if (typed.length < 7 && !(typed.isEmpty() && (k == "0" || k == "00"))) typed += k
+                    }
+                    paint()
+                }
+                row.addView(cell, LinearLayout.LayoutParams(0, dp(48), 1f).apply { if (c > 0) leftMargin = dp(6) })
+            }
+            grid.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { if (r > 0) topMargin = dp(6) })
+        }
+        body.addView(grid)
+
+        val foot = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(11)); background = topBorder(WHITE) }
+        acceptBtn.setOnClickListener { if (acceptBtn.isEnabled) { dialog.dismiss(); onAccept() } }
+        foot.addView(acceptBtn, LinearLayout.LayoutParams(MATCH, dp(50)))
+        foot.addView(TextView(this).apply {
+            text = "Сумму и сдачу подтвердит экран оплаты Эвотора."
+            textSize = 10f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
+        })
+        root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
+        paint()
+
+        Fonts.apply(root)
+        dialog.setContentView(root)
+        styleSheet(dialog)
+        dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
     }
 
     /** Защита от двойного нажатия «Оплатить»: второй вызов, пока первый не завершился, игнорируется. */
@@ -2888,31 +3009,210 @@ class MainActivity : AppCompatActivity() {
      * Цифры выручки/чеков НЕ рисуем из воздуха — пока нет API смены.
      * Подэкраны timesheet/ops/… — заглушки до блоков 12+.
      */
+
+    private var shiftInfo: ru.sixthcup.evotor.shift.EvotorShift.Info? = null
+    private var shiftBusy = false
+
+    private fun loadShiftInfo() {
+        ru.sixthcup.evotor.shift.EvotorShift.load(this) { info ->
+            val changed = shiftInfo != info
+            shiftInfo = info
+            if (changed && (screen == Screen.SHIFT || screen == Screen.ORDER || screen == Screen.CARD)) safeRender()
+        }
+    }
+
+    private fun shiftOpenState(): Boolean? = when (shiftInfo?.state) {
+        ru.sixthcup.evotor.shift.EvotorShift.State.OPEN -> true
+        ru.sixthcup.evotor.shift.EvotorShift.State.CLOSED -> false
+        else -> null
+    }
+
+    /** `.shift-local-back`: иконка-стрелка + подпись. */
+    private fun shiftLocalBack(label: String, onClick: () -> Unit): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(44)
+        isClickable = true
+        isFocusable = true
+        addView(icon(this@MainActivity, R.drawable.ic_back, 16f, BRAND))
+        addView(TextView(this@MainActivity).apply {
+            text = label; textSize = 12.5f; weight(Fonts.SEMIBOLD); setTextColor(BRAND)
+            setPadding(dp(6), 0, dp(8), 0)
+        })
+        setOnClickListener { onClick(); safeRender() }
+    }
+
+    private fun toastMsg(msg: String) =
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+
+    /** Внесение / изъятие: сумма + комментарий → команда Эвотора. */
+    private fun showCashOpSheet(out: Boolean) {
+        dismissSheets()
+        val dialog = BottomSheetDialog(this)
+        val rootV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(WHITE) }
+        sheetHead(rootV, if (out) "Изъятие" else "Внесение", "Наличные · проведёт Эвотор") { dialog.dismiss() }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), 0, dp(16), dp(14)) }
+        rootV.addView(body, LinearLayout.LayoutParams(MATCH, WRAP))
+        val amount = android.widget.EditText(this).apply {
+            hint = "Сумма, ₽"; inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            textSize = 22f; weight(Fonts.BOLD); setTextColor(INK)
+            setPadding(dp(12), 0, dp(12), 0); background = rounded(UiKit.SURFACE_2, 12, LINE)
+        }
+        body.addView(amount, LinearLayout.LayoutParams(MATCH, dp(56)))
+        val comment = android.widget.EditText(this).apply {
+            hint = "Комментарий (необязательно)"; textSize = 14f; setTextColor(INK)
+            setPadding(dp(12), 0, dp(12), 0); background = rounded(WHITE, 12, LINE); setSingleLine()
+        }
+        body.addView(comment, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(10) })
+        val err = TextView(this).apply { textSize = 12f; setTextColor(UiKit.DANGER); setPadding(0, dp(8), 0, 0); visibility = View.GONE }
+        body.addView(err)
+        body.addView(btn(if (out) "Изъять" else "Внести", "primary") {
+            val sum = amount.text.toString().toBigDecimalOrNull()
+            if (sum == null || sum.signum() <= 0) {
+                err.text = "Введите сумму больше нуля"; err.visibility = View.VISIBLE
+            } else if (!shiftBusy) {
+                shiftBusy = true
+                val cb: (String?) -> Unit = { e ->
+                    shiftBusy = false
+                    if (e == null) { dialog.dismiss(); toastMsg(if (out) "Изъятие проведено" else "Внесение проведено") }
+                    else { err.text = e; err.visibility = View.VISIBLE }
+                }
+                if (out) ru.sixthcup.evotor.shift.EvotorShift.cashOut(this, sum, comment.text.toString(), cb)
+                else ru.sixthcup.evotor.shift.EvotorShift.cashIn(this, sum, comment.text.toString(), cb)
+            }
+        }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(12) })
+        dialog.setContentView(rootV)
+        styleSheet(dialog)
+        Fonts.apply(rootV)
+        dialog.show()
+    }
+
+
+    // ── Данные смены с сервера: загрузка / ошибка / пусто / готово ──
+    private class Remote<T> {
+        var state: String = "idle"   // idle | loading | error | empty | ready
+        var data: T? = null
+        var error: String? = null
+        var key: String? = null
+    }
+    private val tsRemote = Remote<Map<String, ShiftApi.TsDay>>()
+    private val wishRemote = Remote<ShiftApi.Wishes>()
+    private val teamRemote = Remote<List<ShiftApi.Member>>()
+    private val summaryRemote = Remote<ShiftApi.Summary>()
+    private val breakRemote = Remote<ShiftApi.BreakRec?>()
+    private var wishSending = false
+
+    /** Запускает загрузку, если для [key] данных ещё нет (или [force]). Ответ — в UI-потоке с перерисовкой. */
+    private fun <T> ensureLoaded(r: Remote<T>, key: String, force: Boolean = false, isEmpty: (T) -> Boolean, fetch: () -> ShiftApi.Res<T>, onData: (T) -> Unit = {}) {
+        if (r.state == "loading" && r.key == key) return
+        if (!force && r.key == key && r.state != "idle") return
+        r.state = "loading"; r.key = key; r.error = null
+        Thread {
+            val res = fetch()
+            runOnUiThread {
+                if (r.key != key) return@runOnUiThread
+                when (res) {
+                    is ShiftApi.Res.Ok -> { r.data = res.value; r.state = if (isEmpty(res.value)) "empty" else "ready"; onData(res.value) }
+                    is ShiftApi.Res.Fail -> { r.data = null; r.state = "error"; r.error = res.message }
+                }
+                if (screen == Screen.SHIFT) safeRender()
+            }
+        }.start()
+    }
+
+    /**
+     * Статус загрузки в виде карточки. true → есть что рисовать (state ready).
+     * [emptyTitle]/[emptyText] — честное «нет данных» без выдуманных строк.
+     */
+    private fun <T> remoteStatus(r: Remote<T>, what: String, emptyText: String, retry: () -> Unit): Boolean {
+        if (r.state == "ready") return true
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(16), dp(18), dp(16), dp(16))
+            background = rounded(WHITE, 14, LINE)
+        }
+        val (title, text) = when (r.state) {
+            "error" -> "Не удалось загрузить: $what" to (r.error ?: "Проверьте подключение")
+            "empty" -> "Нет данных" to emptyText
+            else -> "Загрузка…" to what
+        }
+        card.addView(TextView(this).apply { this.text = title; textSize = 14f; weight(Fonts.STRONG); setTextColor(INK); gravity = Gravity.CENTER })
+        card.addView(TextView(this).apply { this.text = text; textSize = 12f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+        if (r.state != "loading") card.addView(btn("Обновить", "ghost") { retry() }, LinearLayout.LayoutParams(MATCH, dp(44)).apply { topMargin = dp(12) })
+        root.addView(card, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
+        return false
+    }
+
+    private fun monthKey(y: Int, m0: Int) = "%04d-%02d".format(y, m0 + 1)
+    private fun monthRu(m0: Int) = arrayOf("Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь")[m0]
+
+    private fun loadTimesheet(force: Boolean = false) {
+        val key = monthKey(tsYear, tsMonth)
+        val last = java.util.Calendar.getInstance().apply { set(tsYear, tsMonth, 1) }.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
+        ensureLoaded(tsRemote, key, force, isEmpty = { it.isEmpty() }, fetch = {
+            when (val r = ShiftApi.timesheet("$key-01", "$key-%02d".format(last))) {
+                is ShiftApi.Res.Ok -> ShiftApi.Res.Ok(r.value.associateBy { it.date })
+                is ShiftApi.Res.Fail -> r
+            }
+        })
+    }
+
+    private fun loadWishes(force: Boolean = false) {
+        val key = monthKey(wishYear, wishMonth)
+        ensureLoaded(wishRemote, key, force, isEmpty = { false }, fetch = { ShiftApi.wishes(key) }, onData = { w ->
+            wishSelected.clear(); w.days.mapNotNull { it.takeLast(2).toIntOrNull() }.forEach { wishSelected.add(it) }
+        })
+    }
+
+    private fun dayText(d: ShiftApi.TsDay?): String = when (d?.status) {
+        null -> "—"
+        "off" -> "вых"
+        "vacation" -> "отп"
+        "sick" -> "бол"
+        else -> d.from?.take(2)?.let { f -> d.to?.take(2)?.let { t -> "$f–$t" } } ?: "смена"
+    }
+
+    private fun dayLong(d: ShiftApi.TsDay?): String = when (d?.status) {
+        null -> "В этот день смен нет."
+        "off" -> "Выходной"
+        "vacation" -> "Отпуск"
+        "sick" -> "Больничный"
+        else -> "Смена" + (if (d.from != null && d.to != null) " ${d.from}–${d.to}" else "")
+    } + (d?.note?.let { "\n$it" } ?: "")
+
+    private fun closeButtonBack(label: String, onClick: () -> Unit): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(44)
+        isClickable = true
+        isFocusable = true
+        addView(icon(this@MainActivity, R.drawable.ic_back, 16f, BRAND))
+        addView(TextView(this@MainActivity).apply {
+            text = label; textSize = 12.5f; weight(Fonts.SEMIBOLD); setTextColor(BRAND)
+            setPadding(dp(6), 0, dp(12), 0)
+        })
+        setOnClickListener { onClick() }
+    }
+
     private fun renderShift() {
+        if (shiftInfo == null) loadShiftInfo()
         topBar.setPadding(dp(12), dp(10), dp(12), dp(8))
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        head.addView(TextView(this).apply {
-            text = "← К заказам"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            isClickable = true
-            setPadding(0, dp(8), dp(12), dp(8))
-            setOnClickListener {
-                shiftView = "home"
-                notice = null
-                screen = Screen.ORDER
-                safeRender()
-            }
+        head.addView(closeButtonBack("К заказам") {
+            shiftView = "home"
+            notice = null
+            screen = Screen.ORDER
+            safeRender()
         })
         val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleCol.addView(TextView(this).apply {
             text = "Смена"
             textSize = 16f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
         })
         titleCol.addView(TextView(this).apply {
@@ -2924,16 +3224,16 @@ class MainActivity : AppCompatActivity() {
                 "wishes" -> "Пожелания"
                 "breaks" -> "Перерывы"
                 "close" -> "Закрытие смены"
-                else -> "Хаб · 6.7"
+                else -> when (shiftOpenState()) { true -> "Открыта"; false -> "Не открыта"; null -> "Статус неизвестен" }
             }
-            textSize = 9.5f
+            textSize = 10f
             setTextColor(UiKit.MUTED)
         })
         head.addView(titleCol, LinearLayout.LayoutParams(0, WRAP, 1f))
         head.addView(View(this).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(UiKit.SUCCESS)
+                setColor(when (shiftOpenState()) { true -> UiKit.SUCCESS; false -> UiKit.DANGER; null -> UiKit.MUTED })
             }
         }, LinearLayout.LayoutParams(dp(8), dp(8)))
         topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -2962,30 +3262,41 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        val st = shiftOpenState()
         top.addView(TextView(this).apply {
-            text = "●  Смена на терминале"
+            text = when (st) { true -> "●  Смена открыта"; false -> "●  Смена не открыта"; null -> "●  Статус смены неизвестен" }
             textSize = 11f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(UiKit.SUCCESS)
+            weight(Fonts.SEMIBOLD)
+            setTextColor(when (st) { true -> UiKit.SUCCESS; false -> UiKit.DANGER; null -> UiKit.MUTED })
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
         top.addView(TextView(this).apply {
-            text = "Эвотор"
+            text = shiftInfo?.number?.let { "№ $it" } ?: "Эвотор"
             textSize = 10f
             setTextColor(UiKit.MUTED)
         })
         hero.addView(top)
         hero.addView(TextView(this).apply {
-            text = "Фискальная смена ведётся в Эвоторе. Здесь — статус, табель и подготовка операций."
+            text = when (st) {
+                true -> "Фискальная смена открыта на кассе. Итоги смены — в разделе «Моя статистика»."
+                false -> "Откройте смену, чтобы принимать заказы и проводить операции."
+                null -> "Не удалось прочитать состояние смены у Эвотора. Проверьте разрешения приложения."
+            }
             textSize = 12f
             setTextColor(UiKit.MUTED)
             setPadding(0, dp(10), 0, 0)
         })
-        hero.addView(TextView(this).apply {
-            text = "Выручка и чеки появятся после API смены (бэкенд)."
-            textSize = 11f
-            setTextColor(UiKit.INK_2)
-            setPadding(0, dp(8), 0, 0)
-        })
+        if (st == false) {
+            hero.addView(btn("Открыть смену", "primary") {
+                if (!shiftBusy) {
+                    shiftBusy = true
+                    ru.sixthcup.evotor.shift.EvotorShift.openShift(this) { e ->
+                        shiftBusy = false
+                        if (e != null) toastMsg(e)
+                        loadShiftInfo()
+                    }
+                }
+            }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(12) })
+        }
         root.addView(hero, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
 
         // action grid 2 cols
@@ -3004,7 +3315,7 @@ class MainActivity : AppCompatActivity() {
             card.addView(TextView(this).apply {
                 text = title
                 textSize = 13f
-                setTypeface(null, Typeface.BOLD)
+                setOnest(true)
                 setTextColor(INK)
             })
             card.addView(TextView(this).apply {
@@ -3028,9 +3339,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(grid)
 
         root.addView(TextView(this).apply {
-            text = "Закрыть смену →"
+            text = "Закрыть смену"
             textSize = 13f
-            setTypeface(null, Typeface.BOLD)
+            weight(Fonts.SEMIBOLD)
             gravity = Gravity.CENTER
             setTextColor(UiKit.DANGER)
             setPadding(0, dp(16), 0, dp(8))
@@ -3052,7 +3363,7 @@ class MainActivity : AppCompatActivity() {
         bottomBar.addView(TextView(this).apply {
             text = "Сервис · каталог / карта"
             textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             gravity = Gravity.CENTER
             setTextColor(INK)
             background = rounded(WHITE, 14, LINE)
@@ -3064,196 +3375,73 @@ class MainActivity : AppCompatActivity() {
         }, LinearLayout.LayoutParams(MATCH, dp(48)))
     }
 
-    /**
-     * Block 12: табель — календарь 1:1 index (ts-monthbar, ts-week, ts-day).
-     * Смены сотрудников НЕ выдумываем: tsLoadState=empty до GET /api/devices/timesheet.
-     * Пожелания → shiftView=wishes (блок 13).
-     */
     private fun renderShiftTimesheet() {
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
 
-        // store line
-        val store = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(10))
-        }
-        store.addView(TextView(this).apply {
-            text = "⌂"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
+        val store = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, dp(10)) }
+        store.addView(FrameLayout(this).apply {
             background = rounded(WHITE, 8, LINE)
+            addView(icon(this@MainActivity, R.drawable.ic_store, 16f, UiKit.INK_2), FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
         }, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(9) })
         val storeCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        storeCol.addView(TextView(this).apply {
-            text = "6.7 Coffee"
-            textSize = 12f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        storeCol.addView(TextView(this).apply {
-            text = "Ваша кофейня · без переключения"
-            textSize = 10f
-            setTextColor(UiKit.MUTED)
-        })
+        storeCol.addView(TextView(this).apply { text = "6.7 Coffee"; textSize = 12f; weight(Fonts.STRONG); setTextColor(INK) })
+        storeCol.addView(TextView(this).apply { text = "Только ваша точка"; textSize = 10f; setTextColor(UiKit.MUTED) })
         store.addView(storeCol, LinearLayout.LayoutParams(0, WRAP, 1f))
         root.addView(store)
 
-        when (tsLoadState) {
-            "loading" -> {
-                root.addView(TextView(this).apply {
-                    text = "Загрузка табеля…"
-                    textSize = 13f
-                    setTextColor(UiKit.MUTED)
-                    gravity = Gravity.CENTER
-                    setPadding(0, dp(24), 0, dp(24))
-                })
-                return
-            }
-            "error" -> {
-                val err = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(16), dp(16), dp(16), dp(16))
-                    background = rounded(WHITE, 14, LINE)
-                }
-                err.addView(TextView(this).apply {
-                    text = "Не удалось загрузить табель"
-                    textSize = 15f
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(INK)
-                })
-                err.addView(TextView(this).apply {
-                    text = "Проверьте подключение. Приложение не подменяет данные выдуманными."
-                    textSize = 12f
-                    setTextColor(UiKit.MUTED)
-                    setPadding(0, dp(6), 0, dp(12))
-                })
-                err.addView(TextView(this).apply {
-                    text = "Повторить"
-                    textSize = 12.5f
-                    setTypeface(null, Typeface.BOLD)
-                    gravity = Gravity.CENTER
-                    setTextColor(WHITE)
-                    background = rounded(BRAND, 12, null)
-                    isClickable = true
-                    // API ещё нет — остаёмся в empty после «попытки»
-                    setOnClickListener { tsLoadState = "empty"; safeRender() }
-                }, LinearLayout.LayoutParams(MATCH, dp(48)))
-                root.addView(err)
-                return
-            }
-        }
+        loadTimesheet()
+        val data = tsRemote.data.orEmpty()
 
-        // banner empty-honest
-        root.addView(TextView(this).apply {
-            text = "График смен появится после подключения API табеля. Календарь уже готов."
-            textSize = 11f
-            setTextColor(0xFF15613D.toInt())
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            background = rounded(UiKit.SUCCESS_SOFT, 9, null)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-        }, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
-
-        // month bar
-        val monthNames = arrayOf(
-            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
-        )
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        fun navBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
-            text = label
-            textSize = 17f
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.INK_2)
+        fun navBtn(prev: Boolean, onClick: () -> Unit): View = FrameLayout(this).apply {
             background = rounded(WHITE, 9, LINE)
             isClickable = true
+            contentDescription = if (prev) "Предыдущий месяц" else "Следующий месяц"
+            addView(icon(this@MainActivity, R.drawable.ic_chevron_sm, 16f, UiKit.INK_2).apply { if (prev) rotation = 180f }, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
             setOnClickListener { onClick() }
         }
-        bar.addView(navBtn("‹") {
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        bar.addView(navBtn(true) {
             if (tsMonth == 0) { tsMonth = 11; tsYear -= 1 } else tsMonth -= 1
-            tsSelectedDay = 1
-            safeRender()
-        }, LinearLayout.LayoutParams(dp(40), dp(40)))
-        val mid = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-        mid.addView(TextView(this).apply {
-            text = "${monthNames[tsMonth]} $tsYear"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            gravity = Gravity.CENTER
-        })
-        mid.addView(TextView(this).apply {
-            text = "только просмотр"
-            textSize = 9f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-        })
+            tsSelectedDay = 1; safeRender()
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+        mid.addView(TextView(this).apply { text = "${monthRu(tsMonth)} $tsYear"; textSize = 14f; weight(Fonts.STRONG); setTextColor(INK); gravity = Gravity.CENTER })
+        mid.addView(TextView(this).apply { text = "только просмотр"; textSize = 10f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER })
         bar.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f))
-        bar.addView(navBtn("›") {
+        bar.addView(navBtn(false) {
             if (tsMonth == 11) { tsMonth = 0; tsYear += 1 } else tsMonth += 1
-            tsSelectedDay = 1
-            safeRender()
-        }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            tsSelectedDay = 1; safeRender()
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
         root.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
 
-        // weekday headers Пн…Вс
+        // Календарь показываем всегда (можно листать месяцы); статус загрузки — карточкой под ним.
         val wd = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс").forEach { d ->
-            wd.addView(TextView(this).apply {
-                text = d
-                textSize = 9f
-                gravity = Gravity.CENTER
-                setTextColor(UiKit.MUTED)
-            }, LinearLayout.LayoutParams(0, WRAP, 1f))
+            wd.addView(TextView(this).apply { text = d; textSize = 10f; gravity = Gravity.CENTER; setTextColor(UiKit.MUTED) }, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
         root.addView(wd, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
 
-        val cal = java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.YEAR, tsYear)
-            set(java.util.Calendar.MONTH, tsMonth)
-            set(java.util.Calendar.DAY_OF_MONTH, 1)
-        }
+        val cal = java.util.Calendar.getInstance().apply { set(tsYear, tsMonth, 1) }
         val daysInMonth = cal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-        // Calendar: SUNDAY=1 … Saturday=7 → Monday-first offset
-        val firstDow = cal.get(java.util.Calendar.DAY_OF_WEEK)
-        val lead = (firstDow + 5) % 7 // Mon=0
+        val lead = (cal.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
         val today = java.util.Calendar.getInstance()
-        val isThisMonth = today.get(java.util.Calendar.YEAR) == tsYear &&
-            today.get(java.util.Calendar.MONTH) == tsMonth
+        val isThisMonth = today.get(java.util.Calendar.YEAR) == tsYear && today.get(java.util.Calendar.MONTH) == tsMonth
         val todayDay = today.get(java.util.Calendar.DAY_OF_MONTH)
-
         if (tsSelectedDay > daysInMonth) tsSelectedDay = daysInMonth
+        val mk = monthKey(tsYear, tsMonth)
 
         var day = 1
         var cell = 0
-        val totalCells = lead + daysInMonth
-        val rows = (totalCells + 6) / 7
-        repeat(rows) {
+        repeat((lead + daysInMonth + 6) / 7) {
             val week = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             repeat(7) {
                 if (cell < lead || day > daysInMonth) {
-                    week.addView(View(this), LinearLayout.LayoutParams(0, dp(56), 1f).apply {
-                        setMargins(dp(2), dp(2), dp(2), dp(2))
-                    })
+                    week.addView(View(this), LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
                 } else {
                     val d = day
                     val selected = d == tsSelectedDay
                     val isToday = isThisMonth && d == todayDay
+                    val entry = data["$mk-%02d".format(d)]
                     val cellV = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
                         gravity = Gravity.CENTER_HORIZONTAL
@@ -3264,30 +3452,14 @@ class MainActivity : AppCompatActivity() {
                             else -> rounded(WHITE, 10, LINE)
                         }
                         isClickable = true
-                        setOnClickListener {
-                            tsSelectedDay = d
-                            safeRender()
-                        }
+                        setOnClickListener { tsSelectedDay = d; safeRender() }
                     }
+                    cellV.addView(TextView(this).apply { text = d.toString(); textSize = 12f; weight(Fonts.STRONG); gravity = Gravity.CENTER; setTextColor(if (selected) WHITE else INK) })
                     cellV.addView(TextView(this).apply {
-                        text = d.toString()
-                        textSize = 12f
-                        setTypeface(null, Typeface.BOLD)
-                        gravity = Gravity.CENTER
-                        setTextColor(when {
-                            selected -> WHITE
-                            else -> INK
-                        })
+                        text = dayText(entry); textSize = 10f; gravity = Gravity.CENTER; maxLines = 1
+                        setTextColor(if (selected) 0xB3FFFFFF.toInt() else if (entry?.status == "work") BRAND else UiKit.MUTED)
                     })
-                    cellV.addView(TextView(this).apply {
-                        text = "—"
-                        textSize = 8f
-                        gravity = Gravity.CENTER
-                        setTextColor(if (selected) 0xB3FFFFFF.toInt() else UiKit.MUTED)
-                    })
-                    week.addView(cellV, LinearLayout.LayoutParams(0, dp(56), 1f).apply {
-                        setMargins(dp(2), dp(2), dp(2), dp(2))
-                    })
+                    week.addView(cellV, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
                     day++
                 }
                 cell++
@@ -3295,213 +3467,103 @@ class MainActivity : AppCompatActivity() {
             root.addView(week, LinearLayout.LayoutParams(MATCH, WRAP))
         }
 
-        // selected day detail
         root.addView(TextView(this).apply {
-            text = "День $tsSelectedDay · ${monthNames[tsMonth].lowercase()}"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            setPadding(0, dp(14), 0, dp(4))
+            text = "День $tsSelectedDay · ${monthRu(tsMonth).lowercase()}"; textSize = 13f; weight(Fonts.STRONG); setTextColor(INK); setPadding(0, dp(14), 0, dp(4))
         })
-        root.addView(TextView(this).apply {
-            text = "Смена не загружена — нет данных с сервера."
-            textSize = 12f
-            setTextColor(UiKit.MUTED)
-        })
+        if (tsRemote.state == "ready") {
+            root.addView(TextView(this).apply { text = dayLong(data["$mk-%02d".format(tsSelectedDay)]); textSize = 12f; setTextColor(INK) })
+        } else {
+            remoteStatus(tsRemote, "табель за ${monthRu(tsMonth).lowercase()}", "На этот месяц график для вашей точки не опубликован.") { loadTimesheet(true); safeRender() }
+        }
 
-        // wishes entry
-        root.addView(TextView(this).apply {
-            text = "Пожелания по выходным →"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(INK)
-            background = rounded(WHITE, 14, LINE)
-            setPadding(dp(12), dp(14), dp(12), dp(14))
-            isClickable = true
-            setOnClickListener {
-                shiftView = "wishes"
-                safeRender()
-            }
-        }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(16) })
-
+        root.addView(btn("Пожелания по выходным", "ghost") { shiftView = "wishes"; safeRender() }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(14) })
         root.addView(TextView(this).apply {
             text = "Табель на кассе только для просмотра. Правки графика — в админке."
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(10), 0, 0)
+            textSize = 10.5f; setTextColor(UiKit.MUTED); setPadding(0, dp(10), 0, 0)
         })
     }
 
-    /**
-     * Block 13: пожелания по выходным (index wishes).
-     * Выбор дат локально; лимит/период/accepted — только с API (пока не подключено).
-     * «Отправить» не имитирует success от сервера.
-     */
     private fun renderShiftWishes() {
-        // target month: next calendar month if not set
         if (wishYear == 0) {
-            val c = java.util.Calendar.getInstance()
-            c.add(java.util.Calendar.MONTH, 1)
-            wishYear = c.get(java.util.Calendar.YEAR)
-            wishMonth = c.get(java.util.Calendar.MONTH)
+            val c = java.util.Calendar.getInstance(); c.add(java.util.Calendar.MONTH, 1)
+            wishYear = c.get(java.util.Calendar.YEAR); wishMonth = c.get(java.util.Calendar.MONTH)
         }
-        val monthNames = arrayOf(
-            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
-        )
+        root.addView(shiftLocalBack("Назад к табелю") { shiftView = "timesheet" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
+        loadWishes()
+        val w = wishRemote.data
 
-        root.addView(TextView(this).apply {
-            text = "← Назад к табелю"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "timesheet"; safeRender() }
-        })
-
-        // store
-        root.addView(TextView(this).apply {
-            text = "6.7 Coffee · пожелания — не назначение выходного"
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, 0, 0, dp(10))
-        })
-
-        // target + pill
-        val head = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(10))
-        }
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, dp(10)) }
         val hCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        hCol.addView(TextView(this).apply {
-            text = "Пожелания на"
-            textSize = 10f
-            setTextColor(UiKit.MUTED)
-        })
-        hCol.addView(TextView(this).apply {
-            text = "${monthNames[wishMonth]} $wishYear"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
+        hCol.addView(TextView(this).apply { text = "Пожелания на"; textSize = 10f; setTextColor(UiKit.MUTED) })
+        hCol.addView(TextView(this).apply { text = "${monthRu(wishMonth)} $wishYear"; textSize = 16f; weight(Fonts.STRONG); setTextColor(INK) })
         head.addView(hCol, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val pillLabel = when (wishStatus) {
-            "draft" -> "Черновик"
-            "sent_local" -> "Локально"
-            else -> "Открыто"
+        if (w != null) {
+            val (label, bg, fg) = when (w.status) {
+                "sent" -> Triple("Отправлено", UiKit.BRAND_SOFT, BRAND)
+                "approved" -> Triple("Принято", UiKit.SUCCESS_SOFT, 0xFF15613D.toInt())
+                "rejected" -> Triple("Отклонено", UiKit.WARN_SOFT, UiKit.WARN)
+                "closed" -> Triple("Приём закрыт", UiKit.SURFACE_2, UiKit.MUTED)
+                else -> Triple("Открыто", UiKit.SUCCESS_SOFT, 0xFF15613D.toInt())
+            }
+            head.addView(TextView(this).apply {
+                text = label; textSize = 10f; weight(Fonts.STRONG); setTextColor(fg)
+                setPadding(dp(8), dp(4), dp(8), dp(4)); background = rounded(bg, 999, null)
+            })
         }
-        val pillBg = when (wishStatus) {
-            "draft" -> UiKit.WARN_SOFT
-            "sent_local" -> UiKit.BRAND_SOFT
-            else -> UiKit.SUCCESS_SOFT
-        }
-        val pillFg = when (wishStatus) {
-            "draft" -> UiKit.WARN
-            "sent_local" -> BRAND
-            else -> 0xFF15613D.toInt()
-        }
-        head.addView(TextView(this).apply {
-            text = pillLabel
-            textSize = 10f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(pillFg)
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            background = rounded(pillBg, 999, null)
-        })
         root.addView(head)
 
-        // rules placeholder (no invented period)
-        val rules = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            background = rounded(UiKit.SURFACE_2, 12, LINE)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
+        if (!remoteStatus(wishRemote, "пожелания", "Приём пожеланий на этот месяц не открыт.") { loadWishes(true); safeRender() }) return
+        w!!
+
+        val rules = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; background = rounded(UiKit.SURFACE_2, 12, LINE); setPadding(dp(12), dp(10), dp(12), dp(10)) }
         fun rule(label: String, value: String) {
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            col.addView(TextView(this).apply {
-                text = label
-                textSize = 9f
-                setTextColor(UiKit.MUTED)
-            })
-            col.addView(TextView(this).apply {
-                text = value
-                textSize = 12f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(INK)
-            })
+            col.addView(TextView(this).apply { text = label; textSize = 10f; setTextColor(UiKit.MUTED) })
+            col.addView(TextView(this).apply { text = value; textSize = 12f; weight(Fonts.STRONG); setTextColor(INK) })
             rules.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
-        rule("Период подачи", "с сервера")
-        rule("Лимит дат", "с сервера")
+        rule("Приём до", w.deadline ?: "не указан")
+        rule("Лимит дат", w.limit?.toString() ?: "не указан")
         root.addView(rules, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
 
         root.addView(TextView(this).apply {
-            text = "Выберите даты. Это пожелание, а не самостоятельное назначение выходных. Отправка на сервер — после API."
-            textSize = 12f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, 0, 0, dp(10))
+            text = "Выберите даты. Это пожелание, а не назначение выходных — решение принимает руководитель."
+            textSize = 12f; setTextColor(UiKit.MUTED); setPadding(0, 0, 0, dp(10))
         })
 
-        // weekday headers
         val wd = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс").forEach { d ->
-            wd.addView(TextView(this).apply {
-                text = d
-                textSize = 9f
-                gravity = Gravity.CENTER
-                setTextColor(UiKit.MUTED)
-            }, LinearLayout.LayoutParams(0, WRAP, 1f))
+            wd.addView(TextView(this).apply { text = d; textSize = 10f; gravity = Gravity.CENTER; setTextColor(UiKit.MUTED) }, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
         root.addView(wd, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
 
-        val cal = java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.YEAR, wishYear)
-            set(java.util.Calendar.MONTH, wishMonth)
-            set(java.util.Calendar.DAY_OF_MONTH, 1)
-        }
+        val cal = java.util.Calendar.getInstance().apply { set(wishYear, wishMonth, 1) }
         val daysInMonth = cal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-        val firstDow = cal.get(java.util.Calendar.DAY_OF_WEEK)
-        val lead = (firstDow + 5) % 7
+        val lead = (cal.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
+        val editable = w.editable && !wishSending
         var day = 1
         var cell = 0
-        val total = lead + daysInMonth
-        val rows = (total + 6) / 7
-        val editable = wishStatus == "open" || wishStatus == "draft"
-        repeat(rows) {
+        repeat((lead + daysInMonth + 6) / 7) {
             val week = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             repeat(7) {
                 if (cell < lead || day > daysInMonth) {
-                    week.addView(View(this), LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                        setMargins(dp(2), dp(2), dp(2), dp(2))
-                    })
+                    week.addView(View(this), LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
                 } else {
                     val d = day
                     val on = d in wishSelected
-                    val cellV = TextView(this).apply {
-                        text = d.toString()
-                        textSize = 13f
-                        gravity = Gravity.CENTER
-                        setTypeface(null, Typeface.BOLD)
+                    week.addView(TextView(this).apply {
+                        text = d.toString(); textSize = 13f; gravity = Gravity.CENTER; weight(Fonts.STRONG)
                         setTextColor(if (on) WHITE else INK)
                         background = rounded(if (on) INK else WHITE, 10, if (on) INK else LINE)
-                        isEnabled = editable
                         alpha = if (editable) 1f else 0.7f
                         isClickable = editable
-                        if (editable) {
-                            setOnClickListener {
-                                if (d in wishSelected) wishSelected.remove(d)
-                                else wishSelected.add(d)
-                                wishStatus = if (wishSelected.isEmpty()) "open" else "draft"
-                                safeRender()
-                            }
+                        if (editable) setOnClickListener {
+                            if (d in wishSelected) wishSelected.remove(d)
+                            else if (w.limit != null && wishSelected.size >= w.limit) toastMsg("Лимит дат: ${w.limit}")
+                            else wishSelected.add(d)
+                            safeRender()
                         }
-                    }
-                    week.addView(cellV, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                        setMargins(dp(2), dp(2), dp(2), dp(2))
-                    })
+                    }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
                     day++
                 }
                 cell++
@@ -3509,152 +3571,62 @@ class MainActivity : AppCompatActivity() {
             root.addView(week, LinearLayout.LayoutParams(MATCH, WRAP))
         }
 
-        // selected summary
         root.addView(TextView(this).apply {
-            text = "Выбрано ${wishSelected.size}" + if (wishSelected.isEmpty()) "" else
-                ": " + wishSelected.joinToString(", ")
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            setPadding(0, dp(12), 0, dp(4))
+            text = "Выбрано ${wishSelected.size}" + if (wishSelected.isEmpty()) "" else ": " + wishSelected.joinToString(", ")
+            textSize = 12.5f; weight(Fonts.STRONG); setTextColor(INK); setPadding(0, dp(12), 0, dp(4))
         })
-        root.addView(TextView(this).apply {
-            text = if (editable) "Черновик на устройстве" else "Только просмотр"
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-        })
-
-        if (editable) {
-            root.addView(TextView(this).apply {
-                text = "Отправить пожелания"
-                textSize = 13f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(if (wishSelected.isEmpty()) UiKit.MUTED else WHITE)
-                background = rounded(if (wishSelected.isEmpty()) UiKit.SURFACE_2 else BRAND, 14, null)
-                isEnabled = wishSelected.isNotEmpty()
-                isClickable = wishSelected.isNotEmpty()
-                setOnClickListener {
-                    // API нет: не врём «отправлено на сервер»
-                    android.widget.Toast.makeText(
-                        this@MainActivity,
-                        "API пожеланий ещё не подключён. Черновик сохранён на устройстве.",
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
-                    wishStatus = "sent_local"
+        if (w.editable) {
+            root.addView(btn(if (wishSending) "Отправка…" else "Отправить пожелания", if (wishSelected.isEmpty()) "ghost" else "primary") {
+                if (wishSelected.isNotEmpty() && !wishSending) {
+                    wishSending = true
+                    val key = monthKey(wishYear, wishMonth)
+                    val days = wishSelected.map { "$key-%02d".format(it) }
                     safeRender()
+                    Thread {
+                        val res = ShiftApi.sendWishes(key, days)
+                        runOnUiThread {
+                            wishSending = false
+                            when (res) {
+                                is ShiftApi.Res.Ok -> { wishRemote.data = res.value; wishRemote.state = "ready" ; toastMsg("Пожелания отправлены") }
+                                is ShiftApi.Res.Fail -> toastMsg(res.message)
+                            }
+                            if (screen == Screen.SHIFT) safeRender()
+                        }
+                    }.start()
                 }
             }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(14) })
-        } else if (wishStatus == "sent_local") {
-            root.addView(TextView(this).apply {
-                text = "Изменить выбор"
-                textSize = 12.5f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(INK)
-                background = rounded(WHITE, 14, LINE)
-                isClickable = true
-                setOnClickListener {
-                    wishStatus = if (wishSelected.isEmpty()) "open" else "draft"
-                    safeRender()
-                }
-            }, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(14) })
         }
-
         root.addView(TextView(this).apply {
-            text = "Ограничения, сроки и результат рассмотрения приходят с бэкенда. Приложение не назначает выходные самостоятельно."
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(12), 0, 0)
+            text = "Сроки, лимит и результат рассмотрения задаёт сервер. Приложение не назначает выходные само."
+            textSize = 10.5f; setTextColor(UiKit.MUTED); setPadding(0, dp(12), 0, 0)
         })
     }
 
-    /**
-     * Block 14: Команда (index team) — read-only.
-     * Без демо-ФИО/выручки. Список появится после GET /api/devices/shift/team.
-     */
     private fun renderShiftTeam() {
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
-
-        val meta = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-        meta.addView(TextView(this).apply {
-            text = "Текущая смена"
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        meta.addView(TextView(this).apply {
-            text = "0 сотрудников"
-            textSize = 11f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
+        ensureLoaded(teamRemote, "team", isEmpty = { it.isEmpty() }, fetch = { ShiftApi.team() })
+        val meta = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, dp(12)) }
+        meta.addView(TextView(this).apply { text = "Текущая смена"; textSize = 11f; setTextColor(UiKit.MUTED) }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val list = teamRemote.data.orEmpty()
+        if (teamRemote.state == "ready") meta.addView(TextView(this).apply { text = "${list.size} ${plural(list.size, "сотрудник", "сотрудника", "сотрудников")}"; textSize = 11f; weight(Fonts.STRONG); setTextColor(INK) })
         root.addView(meta)
-
-        val empty = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(20), dp(16), dp(20))
-            background = rounded(WHITE, 16, LINE)
-        }
-        empty.addView(TextView(this).apply {
-            text = "Команда не загружена"
-            textSize = 15f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            gravity = Gravity.CENTER
-        })
-        empty.addView(TextView(this).apply {
-            text = "Список «кто на смене» придёт с бэкенда. Приложение не подставляет демо-сотрудников."
-            textSize = 12f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, 0)
-        })
-        root.addView(empty, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-
-        // skeleton row placeholders (visual only, no names)
-        repeat(3) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(12), dp(12), dp(12))
-                background = rounded(WHITE, 14, LINE)
-                alpha = 0.55f
-            }
-            row.addView(View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(UiKit.SURFACE_2)
-                }
-            }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { rightMargin = dp(10) })
+        if (!remoteStatus(teamRemote, "команда", "Сервер не вернул сотрудников на текущей смене.") { ensureLoaded(teamRemote, "team", true, { it.isEmpty() }, { ShiftApi.team() }); safeRender() }) return
+        list.forEach { m ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12)); background = rounded(WHITE, 14, LINE) }
+            row.addView(AvatarView(this).apply { bind(m.name.first().uppercaseChar().toString(), solid = false, textSp = 13f) }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { rightMargin = dp(10) })
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            col.addView(View(this).apply {
-                background = rounded(UiKit.SURFACE_2, 4, null)
-            }, LinearLayout.LayoutParams(dp(120), dp(10)))
-            col.addView(View(this).apply {
-                background = rounded(UiKit.SURFACE_2, 4, null)
-            }, LinearLayout.LayoutParams(dp(80), dp(8)).apply { topMargin = dp(6) })
+            col.addView(TextView(this).apply { text = m.name; textSize = 13f; weight(Fonts.STRONG); setTextColor(INK) })
+            m.role?.let { r -> col.addView(TextView(this).apply { text = r; textSize = 10.5f; setTextColor(UiKit.MUTED) }) }
             row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            if (m.receipts != null || m.revenueRub != null) {
+                val f = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
+                m.receipts?.let { n -> f.addView(TextView(this).apply { text = n.toString(); textSize = 13f; weight(Fonts.BOLD); setTextColor(INK); gravity = Gravity.END }) }
+                m.revenueRub?.let { n -> f.addView(TextView(this).apply { text = rub(BigDecimal(n)); textSize = 10.5f; setTextColor(UiKit.MUTED); gravity = Gravity.END }) }
+                row.addView(f)
+            }
             root.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
         }
-
-        root.addView(TextView(this).apply {
-            text = "Без рейтингов и сравнений. Данные только за текущую смену."
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(8), 0, 0)
-        })
+        root.addView(TextView(this).apply { text = "Без рейтингов и сравнений. Данные только за текущую смену."; textSize = 10.5f; setTextColor(UiKit.MUTED); setPadding(0, dp(8), 0, 0) })
     }
 
     /**
@@ -3663,15 +3635,7 @@ class MainActivity : AppCompatActivity() {
      * Прямой вызов Integration Library (pay in/out) — отдельный блок после проверки API.
      */
     private fun renderShiftOps() {
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
 
         // cash card — no invented amount
         val cash = LinearLayout(this).apply {
@@ -3687,7 +3651,7 @@ class MainActivity : AppCompatActivity() {
         cash.addView(TextView(this).apply {
             text = "см. Эвотор"
             textSize = 22f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
             setPadding(0, dp(4), 0, 0)
         })
@@ -3715,18 +3679,18 @@ class MainActivity : AppCompatActivity() {
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
-                    android.widget.Toast.makeText(
-                        this@MainActivity,
-                        "«${op.title}» проводится в Эвоторе. Интеграция команды — следующий шаг.",
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
+                    when (op.key) {
+                        "in" -> showCashOpSheet(false)
+                        "out" -> showCashOpSheet(true)
+                        else -> toastMsg("«${op.title}» выполняется на штатном экране Эвотора: Меню → Касса.")
+                    }
                 }
             }
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             col.addView(TextView(this).apply {
                 text = op.title
                 textSize = 13f
-                setTypeface(null, Typeface.BOLD)
+                setOnest(true)
                 setTextColor(INK)
             })
             col.addView(TextView(this).apply {
@@ -3736,11 +3700,7 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, dp(2), 0, 0)
             })
             row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
-            row.addView(TextView(this).apply {
-                text = "›"
-                textSize = 18f
-                setTextColor(UiKit.MUTED)
-            })
+            row.addView(icon(this, R.drawable.ic_chevron_sm, 16f, UiKit.MUTED))
             root.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
         }
 
@@ -3752,201 +3712,98 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    /**
-     * Block 16: Моя статистика (index stats).
-     * Метрики «—» до GET /api/devices/shift/summary. Без демо-графиков и топ-3.
-     */
     private fun renderShiftStats() {
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
+        ensureLoaded(summaryRemote, "summary", isEmpty = { it.receipts == null && it.revenueRub == null }, fetch = { ShiftApi.summary() })
+
+        // Один блок «текущая смена»: цифры сервера, если пришли; иначе — локальный счётчик этого терминала.
+        val server = summaryRemote.data?.takeIf { summaryRemote.state == "ready" }
+        val local = OrderQueueStore.tally(this, shiftInfo?.number)
+        val useServer = server?.receipts != null
+        val receipts = if (useServer) server!!.receipts!! else local.receipts
+        val revenue: String = if (useServer) (server!!.revenueRub?.let { rub(BigDecimal(it)) } ?: "—") else rub(local.sumRub)
+        val avg: String = if (useServer) (server!!.avgRub?.let { rub(BigDecimal(it)) } ?: "—") else (local.avgRub?.let { rub(it) } ?: "—")
 
         root.addView(TextView(this).apply {
-            text = "Текущая смена · данные с сервера"
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, 0, 0, dp(12))
+            text = if (useServer) "Текущая смена · данные сервера" else "Текущая смена · считает этот терминал"
+            textSize = 11f; setTextColor(UiKit.MUTED); setPadding(0, 0, 0, dp(12))
         })
+        fun metric(value: String, label: String): View = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(WHITE, 14, LINE)
+            addView(TextView(this@MainActivity).apply { text = value; textSize = 20f; weight(Fonts.BOLD); setTextColor(INK) })
+            addView(TextView(this@MainActivity).apply { text = label; textSize = 10f; setTextColor(UiKit.MUTED); setPadding(0, dp(2), 0, 0) })
+        }
+        val g1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        g1.addView(metric(receipts.toString(), plural(receipts, "чек", "чека", "чеков")), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(8) })
+        g1.addView(metric(revenue, "выручка"), LinearLayout.LayoutParams(0, WRAP, 1f))
+        root.addView(g1, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        val g2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        g2.addView(metric(avg, "средний чек"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(8) })
+        server?.drinksPct?.let { g2.addView(metric("$it%", "напитки"), LinearLayout.LayoutParams(0, WRAP, 1f)) }
+            ?: g2.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        root.addView(g2, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
 
-        fun metric(value: String, label: String): View {
-            val box = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), dp(12), dp(12), dp(12))
-                background = rounded(WHITE, 14, LINE)
+        // График — только если есть хотя бы две точки с сервера.
+        val hourly = server?.hourly.orEmpty()
+        if (hourly.size >= 2) {
+            val maxV = hourly.maxOf { it.second }.coerceAtLeast(1)
+            val chart = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14)); background = rounded(WHITE, 16, LINE) }
+            chart.addView(TextView(this).apply { text = "Выручка по часам"; textSize = 13f; weight(Fonts.STRONG); setTextColor(INK); setPadding(0, 0, 0, dp(10)) })
+            val bars = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM }
+            hourly.forEach { (h, v) ->
+                val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+                col.addView(View(this).apply { background = rounded(BRAND, 4, null) }, LinearLayout.LayoutParams(MATCH, dp((6 + 64.0 * v / maxV).toInt())))
+                col.addView(TextView(this).apply { text = "%02d".format(h); textSize = 10f; gravity = Gravity.CENTER; setTextColor(UiKit.MUTED); setPadding(0, dp(3), 0, 0) })
+                bars.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(3), 0, dp(3), 0) })
             }
-            box.addView(TextView(this).apply {
-                text = value
-                textSize = 18f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(INK)
-            })
-            box.addView(TextView(this).apply {
-                text = label
-                textSize = 10f
-                setTextColor(UiKit.MUTED)
-                setPadding(0, dp(2), 0, 0)
-            })
-            return box
+            chart.addView(bars, LinearLayout.LayoutParams(MATCH, WRAP))
+            root.addView(chart, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
         }
-        val grid1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        grid1.addView(metric("—", "чека"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(8) })
-        grid1.addView(metric("—", "выручка"), LinearLayout.LayoutParams(0, WRAP, 1f))
-        root.addView(grid1, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
-        val grid2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        grid2.addView(metric("—", "средний чек"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(8) })
-        grid2.addView(metric("—", "напитки / еда"), LinearLayout.LayoutParams(0, WRAP, 1f))
-        root.addView(grid2, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-
-        val chart = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = rounded(WHITE, 16, LINE)
+        val top = server?.top.orEmpty()
+        if (top.isNotEmpty()) {
+            val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14)); background = rounded(WHITE, 16, LINE) }
+            card.addView(TextView(this).apply { text = "Топ за смену"; textSize = 13f; weight(Fonts.STRONG); setTextColor(INK); setPadding(0, 0, 0, dp(6)) })
+            top.take(3).forEach { (n, q) ->
+                val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(5), 0, dp(5)) }
+                r.addView(TextView(this).apply { text = n; textSize = 12.5f; setTextColor(INK) }, LinearLayout.LayoutParams(0, WRAP, 1f))
+                r.addView(TextView(this).apply { text = q.toString(); textSize = 12.5f; weight(Fonts.STRONG); setTextColor(INK) })
+                card.addView(r)
+            }
+            root.addView(card)
         }
-        chart.addView(TextView(this).apply {
-            text = "Выручка по часам"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
+        if (summaryRemote.state == "error") root.addView(TextView(this).apply {
+            text = "Сервер недоступен — показаны только чеки этого терминала."; textSize = 10.5f; setTextColor(UiKit.MUTED); setPadding(0, dp(8), 0, dp(4))
         })
-        chart.addView(TextView(this).apply {
-            text = "График появится после API summary. Демо-столбики не показываем."
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(8), 0, dp(8))
-        })
-        // empty bars visual only
-        val bars = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.BOTTOM
-            minimumHeight = dp(72)
-        }
-        repeat(7) {
-            bars.addView(View(this).apply {
-                background = rounded(UiKit.SURFACE_2, 4, null)
-            }, LinearLayout.LayoutParams(0, dp(12 + it * 4), 1f).apply {
-                setMargins(dp(3), 0, dp(3), 0)
-            })
-        }
-        chart.addView(bars, LinearLayout.LayoutParams(MATCH, dp(80)))
-        root.addView(chart, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-
-        val top = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = rounded(WHITE, 16, LINE)
-        }
-        top.addView(TextView(this).apply {
-            text = "Топ-3 за смену"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        top.addView(TextView(this).apply {
-            text = "Нет данных — список товаров придёт с бэкенда."
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(8), 0, 0)
-        })
-        root.addView(top)
-
-        root.addView(TextView(this).apply {
-            text = "GET /api/devices/shift/summary — чеки, выручка, средний, hourly[], top[]"
-            textSize = 10f
-            setTextColor(UiKit.INK_2)
-            setPadding(0, dp(12), 0, 0)
-        })
+        root.addView(btn("Обновить", "ghost") { ensureLoaded(summaryRemote, "summary", true, { it.receipts == null && it.revenueRub == null }, { ShiftApi.summary() }); safeRender() }, LinearLayout.LayoutParams(MATCH, dp(44)).apply { topMargin = dp(10) })
     }
 
-    /**
-     * Block 17: Перерывы (index breaks).
-     * Без фейкового «14:30–14:50». Старт/стоп локально не пишем на сервер до API.
-     */
     private fun renderShiftBreaks() {
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
-
-        val rec = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = rounded(WHITE, 16, LINE)
-        }
-        rec.addView(TextView(this).apply {
-            text = "Рекомендация"
-            textSize = 10f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(UiKit.MUTED)
-            letterSpacing = 0.06f
-        })
-        rec.addView(TextView(this).apply {
-            text = "Нет данных с сервера"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            setPadding(0, dp(6), 0, 0)
-        })
-        rec.addView(TextView(this).apply {
-            text = "Окно перерыва и длительность задаёт бэкенд под загрузку смены."
-            textSize = 11f
-            setTextColor(UiKit.MUTED)
-            setPadding(0, dp(6), 0, 0)
-        })
-        root.addView(rec, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-
-        val fact = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = rounded(UiKit.SURFACE_2, 16, LINE)
-        }
-        fact.addView(TextView(this).apply {
-            text = "Факт перерыва"
-            textSize = 10f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(UiKit.MUTED)
-        })
-        fact.addView(TextView(this).apply {
-            text = "Не зафиксирован"
-            textSize = 15f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(INK)
-            setPadding(0, dp(6), 0, 0)
-        })
-        root.addView(fact, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(14) })
-
-        root.addView(TextView(this).apply {
-            text = "Начать перерыв"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(WHITE)
-            background = rounded(BRAND, 14, null)
-            isClickable = true
-            setOnClickListener {
-                android.widget.Toast.makeText(
-                    this@MainActivity,
-                    "API перерывов не подключён. Фиксация на сервере недоступна.",
-                    android.widget.Toast.LENGTH_LONG,
-                ).show()
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
+        ensureLoaded(breakRemote, "break", isEmpty = { it == null }, fetch = { ShiftApi.breakRecommendation() })
+        val rec = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14)); background = rounded(WHITE, 16, LINE) }
+        rec.addView(TextView(this).apply { text = "РЕКОМЕНДАЦИЯ"; textSize = 10f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED); letterSpacing = 0.08f })
+        val r = breakRemote.data
+        when {
+            breakRemote.state == "ready" && r != null -> {
+                rec.addView(TextView(this).apply { text = "${r.from}–${r.to}"; textSize = 22f; weight(Fonts.BOLD); setTextColor(INK); setPadding(0, dp(6), 0, 0) })
+                r.reason?.let { why -> rec.addView(TextView(this).apply { text = why; textSize = 12f; setTextColor(UiKit.MUTED); setPadding(0, dp(6), 0, 0) }) }
             }
-        }, LinearLayout.LayoutParams(MATCH, dp(52)))
-
+            breakRemote.state == "loading" || breakRemote.state == "idle" ->
+                rec.addView(TextView(this).apply { text = "Загрузка…"; textSize = 14f; setTextColor(UiKit.MUTED); setPadding(0, dp(6), 0, 0) })
+            breakRemote.state == "error" ->
+                rec.addView(TextView(this).apply { text = "Не удалось загрузить: ${breakRemote.error ?: "нет связи"}"; textSize = 13f; setTextColor(INK); setPadding(0, dp(6), 0, 0) })
+            else ->
+                rec.addView(TextView(this).apply { text = "Рекомендаций пока нет"; textSize = 15f; weight(Fonts.STRONG); setTextColor(INK); setPadding(0, dp(6), 0, 0) })
+        }
+        root.addView(rec, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        if (breakRemote.state != "loading") root.addView(btn("Обновить", "ghost") {
+            ensureLoaded(breakRemote, "break", true, { it == null }, { ShiftApi.breakRecommendation() }); safeRender()
+        }, LinearLayout.LayoutParams(MATCH, dp(44)))
         root.addView(TextView(this).apply {
-            text = "GET/POST /api/devices/shift/breaks — рекомендация и факт."
-            textSize = 10f
-            setTextColor(UiKit.INK_2)
-            setPadding(0, dp(12), 0, 0)
+            text = "Окно перерыва рассчитывает сервер по загрузке точки. Фиксация перерывов на кассе не ведётся."
+            textSize = 10.5f; setTextColor(UiKit.MUTED); setPadding(0, dp(12), 0, 0)
         })
     }
 
@@ -3954,15 +3811,7 @@ class MainActivity : AppCompatActivity() {
      * Закрытие смены: только напоминание, фискальное закрытие — штатный Эвотор.
      */
     private fun renderShiftClose() {
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(10))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3972,11 +3821,11 @@ class MainActivity : AppCompatActivity() {
         card.addView(TextView(this).apply {
             text = "Закрытие смены"
             textSize = 18f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
         })
         card.addView(TextView(this).apply {
-            text = "Фискальную смену закрывает Эвотор (Z-отчёт / закрытие смены на терминале). 6.7 не дублирует эту операцию."
+            text = "Закрытие смены проводит Эвотор: будет снят и напечатан Z-отчёт. После закрытия приём заказов недоступен до следующего открытия."
             textSize = 12.5f
             setTextColor(UiKit.MUTED)
             setPadding(0, dp(10), 0, 0)
@@ -3990,19 +3839,22 @@ class MainActivity : AppCompatActivity() {
         root.addView(card, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(14) })
 
         root.addView(TextView(this).apply {
-            text = "Открыть меню Эвотор"
+            text = "Закрыть смену (Z-отчёт)"
             textSize = 13f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             gravity = Gravity.CENTER
             setTextColor(WHITE)
             background = rounded(BRAND, 14, null)
             isClickable = true
             setOnClickListener {
-                android.widget.Toast.makeText(
-                    this@MainActivity,
-                    "Закройте смену в штатном интерфейсе Эвотора.",
-                    android.widget.Toast.LENGTH_LONG,
-                ).show()
+                if (!shiftBusy) {
+                    shiftBusy = true
+                    ru.sixthcup.evotor.shift.EvotorShift.closeShiftZ(this@MainActivity) { e ->
+                        shiftBusy = false
+                        toastMsg(e ?: "Смена закрыта, Z-отчёт напечатан")
+                        loadShiftInfo()
+                    }
+                }
             }
         }, LinearLayout.LayoutParams(MATCH, dp(52)))
     }
@@ -4026,15 +3878,7 @@ class MainActivity : AppCompatActivity() {
             "close" -> "Закрытие фискальной смены — только штатный экран Эвотора. Здесь будет подготовка/напоминание."
             else -> ""
         }
-        root.addView(TextView(this).apply {
-            text = "← Назад к смене"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(BRAND)
-            setPadding(0, 0, 0, dp(12))
-            isClickable = true
-            setOnClickListener { shiftView = "home"; safeRender() }
-        })
+        root.addView(shiftLocalBack("Назад к смене") { shiftView = "home" }, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(10) })
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -4043,7 +3887,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(TextView(this).apply {
             text = title
             textSize = 18f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
         })
         card.addView(TextView(this).apply {
@@ -4074,12 +3918,12 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(TextView(this).apply {
             text = "Оплата · Эвотор"
             textSize = 16f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
         })
         topBar.addView(TextView(this).apply {
             text = "Чек · ${orderType.lowercase()}"
-            textSize = 9.5f
+            textSize = 10f
             setTextColor(UiKit.MUTED)
         })
 
@@ -4105,7 +3949,7 @@ class MainActivity : AppCompatActivity() {
         panel.addView(TextView(this).apply {
             text = "Чек открыт на терминале"
             textSize = 14f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
             gravity = Gravity.CENTER
         })
@@ -4119,7 +3963,7 @@ class MainActivity : AppCompatActivity() {
         panel.addView(TextView(this).apply {
             text = rub(cartTotalRub())
             textSize = 22f
-            setTypeface(null, Typeface.BOLD)
+            setOnest(true)
             setTextColor(INK)
             gravity = Gravity.CENTER
             setPadding(0, dp(10), 0, 0)
@@ -4135,7 +3979,7 @@ class MainActivity : AppCompatActivity() {
             panel.addView(TextView(this).apply {
                 // Чашки начисляет сервер по SELL: не обещаем цифру, которую не можем подтвердить.
                 text = "Чашки и бонусы обновятся после синхронизации чека"
-                textSize = 9.5f
+                textSize = 10f
                 setTextColor(UiKit.MUTED)
                 gravity = Gravity.CENTER
                 setPadding(dp(8), dp(4), dp(8), 0)
@@ -4147,8 +3991,8 @@ class MainActivity : AppCompatActivity() {
         if (!Cart.isEmpty()) {
             root.addView(TextView(this).apply {
                 text = "ПОЗИЦИИ"
-                textSize = 9f
-                setTypeface(null, Typeface.BOLD)
+                textSize = 10f
+                setOnest(true)
                 setTextColor(UiKit.MUTED)
                 letterSpacing = 0.11f
                 setPadding(0, 0, 0, dp(6))
@@ -4168,7 +4012,7 @@ class MainActivity : AppCompatActivity() {
                 row.addView(TextView(this).apply {
                     text = rub(l.lineTotal())
                     textSize = 12.5f
-                    setTypeface(null, Typeface.BOLD)
+                    setOnest(true)
                     setTextColor(INK)
                 })
                 root.addView(row)
@@ -4176,33 +4020,37 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        bottomBar.setPadding(dp(12), dp(8), dp(12), dp(10))
-        bottomBar.addView(TextView(this).apply {
-            text = "Чек пробит — новый заказ"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(WHITE)
-            background = rounded(BRAND, 14, null)
-            isClickable = true
-            setOnClickListener {
-                // lastCardCode stays in process memory for quick re-use
-                CardSession.clear(this@MainActivity)
-                Cart.rememberAsLast()
-                Cart.clear()
-                PendingPayment.clear(this@MainActivity)
-                notice = null
-                screen = Screen.CARD
-                safeRender()
-            }
-        }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { bottomMargin = dp(8) })
+        bottomBar.setPadding(dp(14), dp(10), dp(14), dp(11))
+        bottomBar.background = topBorder(WHITE)
+        bottomBar.addView(btn("Чек пробит", "primary") {
+            // Снимок для экрана «Готово» — корзина сейчас будет очищена.
+            doneLines = Cart.all()
+            doneTotal = cartTotalRub()
+            doneCard = card
+            // Один тап «Чек пробит» = один номер (кнопка исчезает вместе с корзиной).
+            doneOrder = try {
+                OrderQueueStore.enqueue(
+                    this@MainActivity,
+                    doneLines.map { l -> val q = l.quantity.stripTrailingZeros().toPlainString(); if (q == "1") l.name else "${l.name} × $q" },
+                    doneTotal,
+                    shiftInfo?.number,
+                )
+            } catch (t: Throwable) { Log.e(TAG, "queue enqueue", t); null }
+            CardSession.clear(this@MainActivity)
+            Cart.rememberAsLast()
+            Cart.clear()
+            PendingPayment.clear(this@MainActivity)
+            CheckoutChoice.saveCombo(this@MainActivity, BigDecimal.ZERO)
+            notice = null
+            screen = Screen.DONE
+            safeRender()
+        }, LinearLayout.LayoutParams(MATCH, dp(50)).apply { bottomMargin = dp(6) })
         bottomBar.addView(TextView(this).apply {
             text = "Не оплачено — к заказу"
-            textSize = 12.5f
-            setTypeface(null, Typeface.BOLD)
+            textSize = 10.5f
+            weight(Fonts.SEMIBOLD)
             gravity = Gravity.CENTER
-            setTextColor(INK)
-            background = rounded(WHITE, 14, LINE)
+            setTextColor(UiKit.MUTED)
             isClickable = true
             setOnClickListener {
                 PendingPayment.clear(this@MainActivity)
@@ -4210,13 +4058,279 @@ class MainActivity : AppCompatActivity() {
                 screen = Screen.ORDER
                 safeRender()
             }
-        }, LinearLayout.LayoutParams(MATCH, dp(48)))
+        }, LinearLayout.LayoutParams(MATCH, dp(38)))
+    }
+
+
+    private var doneLines: List<CartLine> = emptyList()
+    private var doneTotal: BigDecimal = BigDecimal.ZERO
+    private var doneCard: CardInfo? = null
+    private var doneOrder: QueueOrder? = null
+
+    /**
+     * `.done` 1:1: шапка (логотип + «Касса · 6.7»), круг-галочка 72, «Оплачено», сумма 38/700,
+     * список позиций, плашка лояльности, «Новый заказ».
+     * Метод оплаты и сдачу знает только Эвотор — на экране их нет, пока не прочитаны из чека.
+     */
+
+    // ── Очередь бариста (локально на терминале) ──
+
+    private val queueHandler = Handler(Looper.getMainLooper())
+    private val queueTick = object : Runnable {
+        override fun run() {
+            if (screen == Screen.QUEUE) { safeRender(); queueHandler.postDelayed(this, 30_000L) }
+        }
+    }
+    private fun startQueueTicker() { queueHandler.removeCallbacks(queueTick); queueHandler.postDelayed(queueTick, 30_000L) }
+    private fun stopQueueTicker() { queueHandler.removeCallbacks(queueTick) }
+
+    private fun hhmm(t: Long): String = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(t))
+
+    private fun agoText(t: Long): String {
+        val min = ((System.currentTimeMillis() - t) / 60_000L).toInt().coerceAtLeast(0)
+        return if (min < 1) "только что" else if (min < 60) "$min мин назад" else "${min / 60} ч назад"
+    }
+
+    /** Компактный индикатор в шапке: часы + номера «готовится», галочка + номера «готов». Пусто → нет индикатора. */
+    private fun queueIndicator(): View? {
+        val all = try { OrderQueueStore.load(this) } catch (_: Throwable) { emptyList() }
+        val prep = QueueOps.preparing(all)
+        val ready = QueueOps.ready(all)
+        if (prep.isEmpty() && ready.isEmpty()) return null
+        fun nums(l: List<QueueOrder>): String {
+            val shown = l.take(3).joinToString(" ") { it.label }
+            return if (l.size > 3) "$shown +${l.size - 3}" else shown
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(11), 0, dp(11), 0)
+            background = rounded(WHITE, 999, LINE)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Очередь заказов"
+            setOnClickListener { screen = Screen.QUEUE; safeRender() }
+        }
+        fun part(res: Int, color: Int, text: String) {
+            box.addView(icon(this, res, 14f, color), LinearLayout.LayoutParams(dp(14), dp(14)))
+            box.addView(TextView(this).apply {
+                this.text = text; textSize = 11f; weight(Fonts.STRONG); setTextColor(color); maxLines = 1
+                setPadding(dp(4), 0, dp(8), 0)
+            })
+        }
+        if (prep.isNotEmpty()) part(R.drawable.ic_clock, INK, nums(prep))
+        if (ready.isNotEmpty()) part(R.drawable.ic_check, UiKit.SUCCESS, nums(ready))
+        return box
+    }
+
+    private fun renderQueue() {
+        startQueueTicker()
+        topBar.setPadding(dp(12), dp(10), dp(12), dp(8))
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(closeButtonBack("К заказам") { screen = Screen.ORDER; safeRender() })
+        val all = try { OrderQueueStore.load(this) } catch (_: Throwable) { emptyList() }
+        val prep = QueueOps.preparing(all)
+        val ready = QueueOps.ready(all)
+        head.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        head.addView(TextView(this).apply {
+            text = "Очередь"; textSize = 16f; weight(Fonts.STRONG); setTextColor(INK)
+        })
+        topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        fun section(title: String, count: Int) {
+            root.addView(TextView(this).apply {
+                text = "$title · $count"; textSize = 10f; letterSpacing = 0.1f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
+                setPadding(dp(2), dp(12), 0, dp(8))
+            })
+        }
+        fun orderRow(o: QueueOrder, isReady: Boolean) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                background = rounded(WHITE, 14, LINE)
+            }
+            row.addView(TextView(this).apply {
+                text = o.label; textSize = 26f; weight(Fonts.BOLD); gravity = Gravity.CENTER
+                setTextColor(if (isReady) UiKit.SUCCESS else WHITE)
+                background = rounded(if (isReady) UiKit.SUCCESS_SOFT else INK, 12, null)
+            }, LinearLayout.LayoutParams(dp(64), dp(56)).apply { rightMargin = dp(12) })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(this).apply {
+                text = o.items.joinToString(", ").ifBlank { "Заказ" }
+                textSize = 12.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+            })
+            col.addView(TextView(this).apply {
+                text = if (isReady) "Готов в ${hhmm(o.readyAt ?: o.createdAt)} · скроется через ${QueueOps.READY_TTL_MS / 60_000L} мин" else "${hhmm(o.createdAt)} · ${agoText(o.createdAt)}"
+                textSize = 10f; setTextColor(UiKit.MUTED); setPadding(0, dp(3), 0, 0)
+            })
+            row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            val action = if (isReady) btn("В работу", "ghost") {
+                OrderQueueStore.reopen(this@MainActivity, o.number); safeRender()
+            } else btn("Готово", "primary") {
+                OrderQueueStore.markReady(this@MainActivity, o.number); safeRender()
+            }
+            row.addView(action, LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(10) })
+            root.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        }
+
+        section("В РАБОТЕ", prep.size)
+        if (prep.isEmpty()) root.addView(TextView(this).apply {
+            text = "Нет заказов в работе. Новый номер появится после оплаты чека."
+            textSize = 12f; setTextColor(UiKit.MUTED); setPadding(dp(2), 0, 0, dp(8))
+        })
+        prep.forEach { orderRow(it, false) }
+        if (ready.isNotEmpty()) {
+            section("ГОТОВЫ", ready.size)
+            ready.forEach { orderRow(it, true) }
+        }
+        root.addView(TextView(this).apply {
+            text = "Очередь хранится на этом терминале. Готовые заказы скрываются через ${QueueOps.READY_TTL_MS / 60_000L} мин."
+            textSize = 10f; setTextColor(UiKit.MUTED); setPadding(dp(2), dp(8), 0, 0)
+        })
+    }
+
+    private fun renderDone() {
+        val m = Ds.metrics(this)
+        topBar.setPadding(dp(18), dp(16), dp(18), 0)
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(android.widget.ImageView(this).apply { setImageResource(R.drawable.logo_67_mark) }, LinearLayout.LayoutParams(dp(30), dp(30)))
+        head.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        head.addView(TextView(this).apply {
+            text = "ЧЕК ПРОБИТ"; textSize = 10f; letterSpacing = 0.12f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
+        })
+        topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(20), dp(22), dp(20), dp(12))
+        }
+        root.setPadding(0, 0, 0, 0)
+        val check = FrameLayout(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(BRAND) }
+            elevation = 8f * resources.displayMetrics.density
+            addView(icon(this@MainActivity, R.drawable.ic_check_big, 30f, WHITE), FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER))
+        }
+        col.addView(check, LinearLayout.LayoutParams(dp(72), dp(72)).apply { bottomMargin = dp(14) })
+        doneOrder?.let { o ->
+            col.addView(TextView(this).apply {
+                text = "НОМЕР ЗАКАЗА"; textSize = 10f; letterSpacing = 0.12f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED); gravity = Gravity.CENTER
+            })
+            col.addView(TextView(this).apply {
+                text = o.label; textSize = 72f; letterSpacing = -0.04f; weight(Fonts.BOLD); setTextColor(INK); gravity = Gravity.CENTER
+                includeFontPadding = false; setPadding(0, dp(2), 0, dp(10))
+            })
+        }
+        col.addView(TextView(this).apply {
+            text = "Оплачено"; textSize = 23f; letterSpacing = -0.03f; weight(Fonts.STRONG); setTextColor(INK); gravity = Gravity.CENTER
+        })
+        col.addView(TextView(this).apply {
+            text = "Фискальный чек — на терминале Эвотор"; textSize = 10.5f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER
+            setPadding(0, dp(2), 0, 0)
+        })
+        col.addView(TextView(this).apply {
+            text = rub(doneTotal); textSize = 38f; letterSpacing = -0.05f; weight(Fonts.BOLD); setTextColor(INK); gravity = Gravity.CENTER
+            includeFontPadding = false; setPadding(0, dp(12), 0, 0)
+        })
+
+        val items = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(WHITE, 14, LINE)
+        }
+        val lines = doneLines
+        lines.forEachIndexed { i, l ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(5), 0, dp(5)) }
+            val qty = l.quantity.stripTrailingZeros().toPlainString()
+            row.addView(TextView(this).apply {
+                text = if (qty == "1") l.name else "${l.name} × $qty"
+                textSize = 10.5f; setTextColor(INK); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(10) })
+            row.addView(TextView(this).apply { text = rub(l.lineTotal()); textSize = 10.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); maxLines = 1 })
+            items.addView(row)
+            if (i < lines.size - 1) items.addView(View(this).apply { setBackgroundColor(0xFFF3EEE5.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
+        }
+        if (lines.isNotEmpty()) col.addView(items, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(16) })
+
+        val card = doneCard
+        if (card != null) {
+            val loy = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(11), dp(9), dp(11), dp(9))
+                background = rounded(UiKit.SUCCESS_SOFT, 12, null)
+            }
+            loy.addView(FrameLayout(this).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(UiKit.SUCCESS) }
+                addView(icon(this@MainActivity, R.drawable.ic_check, 14f, WHITE), FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER))
+            }, LinearLayout.LayoutParams(dp(29), dp(29)).apply { rightMargin = dp(9) })
+            val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            t.addView(TextView(this).apply { text = "Гость ${card.cardCode.ifBlank { "по QR" }}"; textSize = 10.5f; weight(Fonts.SEMIBOLD); setTextColor(0xFF145C39.toInt()) })
+            // Начисляет сервер по SELL — цифру заранее не обещаем.
+            t.addView(TextView(this).apply { text = "Чашки и бонусы обновятся после синхронизации чека"; textSize = 10f; setTextColor(0xFF3A7357.toInt()); setPadding(0, dp(1), 0, 0) })
+            loy.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
+            col.addView(loy, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(9) })
+        }
+        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+        wrap.addView(col, LinearLayout.LayoutParams(if (m.mode == Ds.Mode.M5) MATCH else dp(520), WRAP))
+        root.addView(wrap, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        bottomBar.setPadding(dp(16), dp(10), dp(16), dp(12))
+        bottomBar.background = topBorder(WHITE)
+        bottomBar.addView(btn("Новый заказ", "primary") { notice = null; screen = Screen.ORDER; safeRender() }, LinearLayout.LayoutParams(MATCH, dp(50)))
+        if (doneOrder != null) bottomBar.addView(btn("Очередь бариста", "ghost") { screen = Screen.QUEUE; safeRender() }, LinearLayout.LayoutParams(MATCH, dp(44)).apply { topMargin = dp(8) })
     }
 
     // ───────────────────────── view-хелперы ─────────────────────────
 
+    /**
+     * `.sheet`: скругление сверху 24, скрим rgba(23,20,15,.42), на 7″/10″ — колонка ≤ 520/560 по центру.
+     * Контент листа сам задаёт белый фон; подложку BottomSheet делаем прозрачной, чтобы углы были круглыми.
+     */
+    private fun styleSheet(dialog: BottomSheetDialog) {
+        val r = dp(24).toFloat()
+        dialog.window?.setDimAmount(0.42f)
+        val m = Ds.mode(this)
+        if (m != Ds.Mode.M5) {
+            val w = dp(if (m == Ds.Mode.M10) 560 else 520)
+            dialog.window?.setLayout(w, ViewGroup.LayoutParams.MATCH_PARENT)
+            dialog.window?.setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+        }
+        dialog.setOnShowListener {
+            val sheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet) ?: return@setOnShowListener
+            sheet.background = GradientDrawable().apply { setColor(WHITE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
+            sheet.clipToOutline = true
+        }
+    }
+
+    /** Иконка из res/drawable с цветом и размером в dp — для compound drawables. */
+    private fun tinted(res: Int, color: Int, sizeDp: Int): android.graphics.drawable.Drawable {
+        val d = androidx.core.content.ContextCompat.getDrawable(this, res)!!.mutate()
+        androidx.core.graphics.drawable.DrawableCompat.setTint(d, color)
+        d.setBounds(0, 0, dp(sizeDp), dp(sizeDp))
+        return d
+    }
+
+    /** `.sheet-close`: круг 44, фон surface-2, иконка ✕ 15. */
+    private fun closeButton(desc: String, onClick: () -> Unit): View = FrameLayout(this).apply {
+        background = rounded(UiKit.SURFACE_2, 22, null)
+        isClickable = true
+        isFocusable = true
+        contentDescription = desc
+        addView(icon(this@MainActivity, R.drawable.ic_close, 15f, UiKit.INK_2), FrameLayout.LayoutParams(dp(15), dp(15), Gravity.CENTER))
+        setOnClickListener { onClick() }
+    }
+
+    /** Фон с 1-dp линией сверху (`border-top: 1px solid var(--line)`). */
+    private fun topBorder(color: Int): android.graphics.drawable.Drawable {
+        val line = android.graphics.drawable.ColorDrawable(LINE)
+        val fill = android.graphics.drawable.ColorDrawable(color)
+        return android.graphics.drawable.LayerDrawable(arrayOf(line, fill)).apply { setLayerInset(1, 0, dp(1), 0, 0) }
+    }
+
     private fun text(t: String, sp: Float, color: Int, bold: Boolean) = TextView(this).apply {
-        text = t; textSize = sp; setTextColor(color); if (bold) setTypeface(null, Typeface.BOLD)
+        text = t; textSize = sp; setTextColor(color); if (bold) setOnest(true)
     }
 
     private fun button(label: String, primary: Boolean, heightDp: Int, onClick: () -> Unit) = Button(this).apply {
@@ -4254,6 +4368,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (::root.isInitialized) loadShiftInfo()
         try { val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN); if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED) else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f) } catch (_: Throwable) {}
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
         if (::root.isInitialized && PendingPayment.active(this) && screen != Screen.PAYMENT) { screen = Screen.PAYMENT; safeRender() }
@@ -4268,7 +4383,9 @@ class MainActivity : AppCompatActivity() {
         when (screen) {
             Screen.ORDER -> { notice = null; screen = Screen.CARD; safeRender() }
             Screen.PAYMENT -> {}  // из ожидания оплаты выходят только кнопками
+            Screen.DONE -> { screen = Screen.ORDER; safeRender() }
             Screen.SHIFT -> { screen = Screen.ORDER; safeRender() }
+            Screen.QUEUE -> { screen = Screen.ORDER; safeRender() }
             Screen.CARD -> super.onBackPressed()
         }
     }

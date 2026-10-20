@@ -46,6 +46,10 @@ data class CatalogProduct(
     val comboDrinkUuid: String? = null,
     /** `#food=` — uuid выпечки в составе комбо. */
     val comboFoodUuid: String? = null,
+    /** Картинка второй позиции комбо (выпечка) для плитки «напиток + выпечка». */
+    val imageUrl2: String? = null,
+    /** Еда (выпечка/десерт) — по [FoodRules]; нужно для решения «показывать ли upsell». */
+    val isFood: Boolean = false,
 ) {
     /** Товар-определение комбо: продаётся не сам, а набором из двух позиций со скидкой. */
     val isComboDefinition: Boolean get() = comboDrinkUuid != null && comboFoodUuid != null
@@ -115,6 +119,7 @@ object InventoryRepository {
             p.copy(
                 groupName = g,
                 freeEligible = drink,
+                isFood = FoodRules.isFood(p.name, g, null, p.description),
                 // #mods/#nomods из админки перекрывают эвристику «напиток/еда».
                 supportsMods = ProductMarkers.modsFlag(p.description) ?: drink,
                 featured = ProductMarkers.isFocus(p.description) || ProductMarkers.isCombo(p.name, p.description),

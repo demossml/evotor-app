@@ -178,21 +178,23 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         }
     }
 
+    /** `.opt-label`: капс 9/650 ink-2 + подсказка справа; отступ группы 15. */
     private fun header(title: String, hint: String) {
         val row = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.BOTTOM
-            setPadding(0, dp(16), 0, dp(7))
+            setPadding(0, dp(15), 0, dp(7))
         }
         row.addView(TextView(context).apply {
-            text = title
-            textSize = 9f
-            setTypeface(null, Typeface.BOLD)
+            text = title.uppercase()
+            textSize = Ds.sp(9f)
+            letterSpacing = 0.11f
+            weight(Fonts.STRONG)
             setTextColor(UiKit.INK_2)
         }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(TextView(context).apply {
             text = hint
-            textSize = 8.5f
+            textSize = Ds.sp(8.5f)
             setTextColor(UiKit.MUTED)
         })
         addView(row)
@@ -220,6 +222,26 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         }
     }
 
+    /** Обводка выбранной опции: 1 dp ink + внутренняя 1 dp (`box-shadow: inset 0 0 0 1px ink`). */
+    private fun optBackground(on: Boolean): android.graphics.drawable.Drawable {
+        val base = UiKit.rounded(density, UiKit.SURFACE, 11, if (on) UiKit.INK else UiKit.LINE)
+        if (!on) return base
+        val inner = android.graphics.drawable.GradientDrawable().apply {
+            setColor(0)
+            cornerRadius = 10 * density
+            setStroke(maxOf(1, density.toInt()), UiKit.INK)
+        }
+        return android.graphics.drawable.LayerDrawable(arrayOf(base, inner)).apply {
+            setLayerInset(1, dp(1), dp(1), dp(1), dp(1))
+        }
+    }
+
+    private fun tickIcon(color: Int, sizeDp: Int, iconDp: Int): View = android.widget.FrameLayout(context).apply {
+        background = UiKit.rounded(density, color, sizeDp / 2, null)
+        addView(icon(context, ru.sixthcup.evotor.R.drawable.ic_check, iconDp.toFloat(), UiKit.WHITE),
+            android.widget.FrameLayout.LayoutParams(dp(iconDp), dp(iconDp), Gravity.CENTER))
+    }
+
     private fun cell(
         label: String,
         price: BigDecimal?,
@@ -231,58 +253,57 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         val cell = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(8), dp(8), dp(8))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
             minimumHeight = dp(48)
-            background = UiKit.rounded(density, UiKit.SURFACE, 11, if (on && enabled) UiKit.INK else UiKit.LINE)
+            background = optBackground(on && enabled)
             isClickable = enabled
             isFocusable = enabled
             alpha = if (enabled) 1f else 0.45f
             if (enabled) setOnClickListener { onClick() }
         }
         if (toggle) {
-            cell.addView(TextView(context).apply {
-                text = if (on) "✓" else ""
-                textSize = 9f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(if (on) UiKit.WHITE else UiKit.MUTED)
-                background = UiKit.rounded(
-                    density,
-                    if (on) UiKit.BRAND else UiKit.SURFACE,
-                    5,
-                    if (on) UiKit.BRAND else UiKit.LINE_STRONG,
-                )
-            }, LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(7) })
+            // `.opt.toggle .box`: 17 dp, рамка 1.5, радиус 5; включён — чёрный с галочкой
+            val box = android.widget.FrameLayout(context).apply {
+                background = if (on) UiKit.rounded(density, UiKit.INK, 5, UiKit.INK)
+                else UiKit.rounded(density, UiKit.SURFACE, 5, UiKit.LINE_STRONG)
+                if (on) addView(icon(context, ru.sixthcup.evotor.R.drawable.ic_check, 11f, UiKit.WHITE),
+                    android.widget.FrameLayout.LayoutParams(dp(11), dp(11), Gravity.CENTER))
+            }
+            cell.addView(box, LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(8) })
         }
         val textCol = LinearLayout(context).apply { orientation = VERTICAL }
         textCol.addView(TextView(context).apply {
             text = label
             textSize = 10.5f
+            weight(Fonts.MEDIUM)
             setTextColor(if (on) UiKit.INK else UiKit.INK_2)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
-        if (price != null) {
+        if (price != null && !toggle) {
             textCol.addView(TextView(context).apply {
                 text = if (price.signum() > 0) "+${UiKit.rub(price)}" else "0 ₽"
-                textSize = 9.5f
-                setTextColor(UiKit.MUTED)
+                textSize = Ds.sp(9f)
+                setTextColor(if (on) UiKit.INK_2 else UiKit.MUTED)
             })
         }
         cell.addView(textCol, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (price != null && toggle) {
+            cell.addView(TextView(context).apply {
+                text = if (price.signum() > 0) "+${UiKit.rub(price)}" else "0 ₽"
+                textSize = Ds.sp(9f)
+                setTextColor(UiKit.MUTED)
+                maxLines = 1
+            })
+        }
         if (!enabled) {
             cell.addView(TextView(context).apply {
                 text = "нет в кассе"
-                textSize = 7.5f
+                textSize = Ds.sp(7.5f)
                 setTextColor(UiKit.MUTED)
             })
-        } else if (!toggle) {
-            cell.addView(TextView(context).apply {
-                text = if (on) "✓" else ""
-                textSize = 11f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(if (on) UiKit.INK else UiKit.MUTED)
-            }, LayoutParams(dp(16), ViewGroup.LayoutParams.WRAP_CONTENT))
+        } else if (!toggle && on) {
+            cell.addView(tickIcon(UiKit.INK, 14, 9), LayoutParams(dp(14), dp(14)).apply { leftMargin = dp(6) })
         }
         return cell
     }

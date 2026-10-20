@@ -55,6 +55,18 @@ object Cart {
     fun isEmpty() = lines.isEmpty()
     /** Quantity badge sums configured variants of the same catalog product. */
     fun qty(productUuid: String): Int = lines.values.filter { it.productUuid == productUuid }.sumOf { it.quantity.toInt() }
+    /** Количество по набору uuid (плитка с несколькими размерами = сумма по всем вариантам). */
+    fun qtyAny(uuids: Collection<String>): Int = lines.values.filter { it.productUuid in uuids }.sumOf { it.quantity.toInt() }
+
+    /** Убрать одну единицу последней добавленной позиции из набора uuid (любой размер/опции). */
+    fun decAny(uuids: Collection<String>) {
+        val entry = lines.entries.lastOrNull { it.value.productUuid in uuids } ?: return
+        val q = entry.value.quantity
+        if (q <= BigDecimal.ONE) lines.remove(entry.key)
+        else lines[entry.key] = entry.value.copy(quantity = q.subtract(BigDecimal.ONE))
+        save()
+    }
+
     fun count(): Int = lines.values.sumOf { it.quantity.toInt() }
 
     fun clear() { lines.clear(); save() }

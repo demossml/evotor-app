@@ -9,8 +9,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 97
-        versionName = "4.8.0-index-ui"
+        versionCode = 101
+        versionName = "4.9.2-toppings-fix"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
         // Единицы PRICE_OUT из ProductTable: KOPECKS (по умолчанию, как делает integration-library) | AUTO | RUBLES.
         buildConfigField("String", "PRICE_UNITS", "\"${project.findProperty("PRICE_UNITS") ?: "KOPECKS"}\"")
@@ -32,4 +32,5 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
 }

@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="ru.evotor.devices.SCANNER_RECEIVER" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="ru.evotor.permission.PRINT_SESSION_OPENING_REPORT" />
+    <uses-permission android:name="ru.evotor.permission.PRINT_Z_REPORT" />
     <application
         android:name=".SixthCupApp"
         android:allowBackup="false"

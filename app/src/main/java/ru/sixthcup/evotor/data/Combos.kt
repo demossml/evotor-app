@@ -82,6 +82,7 @@ object Combos {
             imageUrl = drink?.imageUrl,
             comboDrinkUuid = combo.drinkUuid,
             comboFoodUuid = combo.foodUuid,
+            imageUrl2 = food?.imageUrl,
             supportsMods = false,
         )
     }

@@ -21,7 +21,7 @@ class AvatarView(context: Context) : View(context) {
     }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
+        typeface = Fonts.face(context, Fonts.BOLD)
     }
 
     private var letter: String = ""

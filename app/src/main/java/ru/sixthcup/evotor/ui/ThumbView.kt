@@ -23,7 +23,7 @@ class ThumbView(context: Context) : View(context) {
     private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFEEF4FF.toInt() } // brand_soft
     private val photo = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF002FA7.toInt(); typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER // brand
+        color = 0xFF002FA7.toInt(); typeface = Fonts.face(context, Fonts.BOLD); textAlign = Paint.Align.CENTER // brand
     }
     private val rect = RectF()
     private val m = Matrix()
@@ -34,6 +34,17 @@ class ThumbView(context: Context) : View(context) {
 
     /** Радиус скругления в dp; большое значение (≥ сторона/2) даёт круг. */
     fun setCorner(dp: Int) { radiusPx = dp * density; invalidate() }
+
+    private var containW = 0f
+    private var containH = 0f
+    private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * Режим «вписать» (как `object-fit: contain` у `.tile-media img` в прототипе): картинка с прозрачным
+     * фоном рисуется целиком в рамке wDp×hDp по центру. Фото без альфа-канала (JPEG) по-прежнему
+     * закрывают весь блок — иначе вокруг белого фона остаётся рамка.
+     */
+    fun setContain(wDp: Int, hDp: Int) { containW = wDp * density; containH = hDp * density; invalidate() }
 
     /** Привязать товар: инициалы как заглушка + загрузка по url. Предыдущий запрос отменяется. */
     fun bind(name: String, url: String?, px: Int) {
@@ -66,7 +77,14 @@ class ThumbView(context: Context) : View(context) {
         rect.set(0f, 0f, w, h)
         val r = radiusPx.coerceAtMost(max(w, h) / 2f)
         val b = bitmap
-        if (b != null) {
+        if (b != null && containW > 0f && b.hasAlpha()) {
+            val bw = minOf(containW, w); val bh = minOf(containH, h)
+            val k = minOf(bw / b.width, bh / b.height)
+            m.reset()
+            m.setScale(k, k)
+            m.postTranslate((w - b.width * k) / 2f, (h - b.height * k) / 2f)
+            canvas.drawBitmap(b, m, bmpPaint)
+        } else if (b != null) {
             val k = max(w / b.width, h / b.height)
             m.reset()
             m.setScale(k, k)
@@ -74,7 +92,7 @@ class ThumbView(context: Context) : View(context) {
             photo.shader?.setLocalMatrix(m)
             canvas.drawRoundRect(rect, r, r, photo)
         } else {
-            canvas.drawRoundRect(rect, r, r, bg)
+            if (containW > 0f) { txt.color = 0x33776F61 } else canvas.drawRoundRect(rect, r, r, bg)
             txt.textSize = (if (w < 40 * density) 0.36f else 0.3f) * h
             canvas.drawText(label, w / 2f, h / 2f - (txt.descent() + txt.ascent()) / 2f, txt)
         }

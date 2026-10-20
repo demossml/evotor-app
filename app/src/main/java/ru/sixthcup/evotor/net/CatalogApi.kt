@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.CatalogProduct
+import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.ProductMarkers
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
@@ -38,6 +39,8 @@ object CatalogApi {
         val categoryName: String? = null,
         val featured: Boolean = false,
         val description: String? = null,
+        /** Явный флаг еды с backend (`isFood`), если пришёл. */
+        val isFood: Boolean? = null,
     )
 
     fun fetch(storeUuid: String? = null): Payload {
@@ -76,16 +79,20 @@ object CatalogApi {
             val featured = p.featured || e.featured ||
                 ProductMarkers.isFocus(e.description) ||
                 ProductMarkers.isCombo(p.name, e.description)
+            val tops = e.toppings.ifEmpty { p.toppings }
             p.copy(
                 imageUrl = e.imageUrl ?: p.imageUrl,
                 recipe = e.recipe?.takeIf { it.isNotBlank() } ?: p.recipe,
-                toppings = e.toppings.ifEmpty { p.toppings },
+                toppings = tops,
                 upsell = e.upsell.ifEmpty { p.upsell },
                 countsAsCupServer = e.countsAsCup,
                 freeEligible = e.freeEligible ?: p.freeEligible,
                 // Если в Эвотор товар без parent-группы — подставляем категорию 6.7.
                 groupName = p.groupName?.takeIf { it.isNotBlank() } ?: e.categoryName,
+                isFood = FoodRules.isFood(p.name, p.groupName, e.categoryName, e.description ?: p.description, e.isFood),
                 featured = featured,
+                // Схема добавок с backend = можно открывать item-sheet с опциями.
+                supportsMods = p.supportsMods || tops.isNotEmpty(),
             )
         }
         return applySoftFocus(merged)
@@ -131,6 +138,7 @@ object CatalogApi {
                 categoryName = o.optString("categoryName").ifBlank { null },
                 featured = featured,
                 description = desc,
+                isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
             )
         }
         val catNames = ArrayList<String>()

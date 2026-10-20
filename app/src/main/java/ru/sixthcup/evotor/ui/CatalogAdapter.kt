@@ -29,12 +29,22 @@ sealed class CatalogRow {
         override val key: String get() = "focus"
     }
 
-    data class Header(val title: String) : CatalogRow() {
+    data class Header(val title: String, val aside: String = "") : CatalogRow() {
         override val key: String get() = "h:" + title
     }
 
-    data class Item(val p: CatalogProduct) : CatalogRow() {
+    data class Item(val p: CatalogProduct, val meta: String = "") : CatalogRow() {
         override val key: String get() = "p:" + p.uuid
+    }
+
+    /** Готовая view хоста (строка поиска, чипы категорий): живёт в списке и скроллится вместе с ним, как `.sale-scroll`. */
+    data class Host(val id: String, val view: View, val topDp: Int = 0) : CatalogRow() {
+        override val key: String get() = "host:" + id
+    }
+
+    /** `.row-head` меню: «Всё меню» + «N позиций». */
+    data class MenuHead(val title: String, val count: String) : CatalogRow() {
+        override val key: String get() = "menuhead"
     }
 
     data class Skeleton(val i: Int) : CatalogRow() {
@@ -53,38 +63,39 @@ class CatalogCallbacks(
     val onRetry: () -> Unit,
     val onInc: (CatalogProduct) -> Unit = {},
     val onDec: (CatalogProduct) -> Unit = {},
+    /** Количество на плитке (сумма по размерам); по умолчанию — по uuid плитки. */
+    val qtyOf: (CatalogProduct) -> Int = { Cart.qty(it.uuid) },
 )
 
 private const val QTY = "qty"
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
-/** Цена + (если есть #old=) зачёркнутая старая; красная — только цена по акции. */
+/** `.tile-price` + `.tile-old`: цена чернилами, старая — мелко, серая, зачёркнутая. */
 internal fun priceText(p: CatalogProduct, meta: String? = null): CharSequence {
     val now: String = UiKit.rub(p.priceRub)
     val old = p.oldPriceRub?.takeIf { it > p.priceRub }
     val sb = SpannableStringBuilder(now)
     if (old != null) {
-        sb.setSpan(ForegroundColorSpan(UiKit.PROMO), 0, now.length, 0)
-        sb.append("  ")
+        sb.append(" ")
         val st = sb.length
-        val oldText: String = UiKit.rub(old)
-        sb.append(oldText)
+        sb.append(UiKit.rub(old))
         sb.setSpan(StrikethroughSpan(), st, sb.length, 0)
-        sb.setSpan(ForegroundColorSpan(UiKit.HINT), st, sb.length, 0)
+        sb.setSpan(ForegroundColorSpan(UiKit.MUTED), st, sb.length, 0)
+        sb.setSpan(android.text.style.AbsoluteSizeSpan(10, true), st, sb.length, 0)
     }
     if (!meta.isNullOrEmpty()) {
         val st = sb.length
         sb.append("  ·  ")
         sb.append(meta)
-        sb.setSpan(ForegroundColorSpan(UiKit.HINT), st, sb.length, 0)
+        sb.setSpan(ForegroundColorSpan(UiKit.MUTED), st, sb.length, 0)
     }
     return sb
 }
 
 private fun qtyPill(ctx: Context, density: Float): TextView = TextView(ctx).apply {
     textSize = 13f
-    setTypeface(null, Typeface.BOLD)
+    setOnest(true)
     setTextColor(UiKit.WHITE)
     gravity = Gravity.CENTER
     minWidth = (28 * density).toInt()
@@ -103,7 +114,7 @@ private val PRODUCT_DIFF = object : DiffUtil.ItemCallback<CatalogProduct>() {
     override fun areContentsTheSame(a: CatalogProduct, b: CatalogProduct) = a == b
 }
 
-/** Основной вертикальный список: Фокус (горизонтальная карусель) → заголовок → строки товаров. */
+/** Основной вертикальный список: поиск → фокус → чипы → «Всё меню» → плитки (как `.sale-scroll` в index). */
 class CatalogAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogRow, RecyclerView.ViewHolder>(
     object : DiffUtil.ItemCallback<CatalogRow>() {
         override fun areItemsTheSame(a: CatalogRow, b: CatalogRow) = a.key == b.key
@@ -116,6 +127,8 @@ class CatalogAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogRow,
         is CatalogRow.Item -> 2
         is CatalogRow.Skeleton -> 3
         is CatalogRow.State -> 4
+        is CatalogRow.Host -> 5
+        is CatalogRow.MenuHead -> 6
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder = when (viewType) {
@@ -123,6 +136,8 @@ class CatalogAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogRow,
         1 -> HeaderVH(parent.context)
         2 -> ProductVH(parent.context, cb)
         3 -> SkeletonVH(parent.context)
+        5 -> HostVH(parent.context)
+        6 -> MenuHeadVH(parent.context)
         else -> StateVH(parent.context, cb)
     }
 
@@ -136,14 +151,17 @@ class CatalogAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogRow,
         when (h) {
             is FocusRowVH -> if (qtyOnly) h.refreshQty() else h.bind(row as CatalogRow.Focus)
             is HeaderVH -> h.bind(row as CatalogRow.Header)
-            is ProductVH -> if (qtyOnly) h.bindQty() else h.bind((row as CatalogRow.Item).p)
+            is ProductVH -> if (qtyOnly) h.bindQty() else h.bind((row as CatalogRow.Item).p, row.meta)
             is StateVH -> h.bind(row as CatalogRow.State)
+            is HostVH -> if (!qtyOnly) h.bind(row as CatalogRow.Host)
+            is MenuHeadVH -> if (!qtyOnly) h.bind(row as CatalogRow.MenuHead)
             else -> {}
         }
     }
 
     override fun onViewRecycled(h: RecyclerView.ViewHolder) {
-        if (h is ProductVH) h.thumb.release()
+        if (h is ProductVH) h.release()
+        if (h is HostVH) h.unhost()
         super.onViewRecycled(h)
     }
 
@@ -151,177 +169,231 @@ class CatalogAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogRow,
     fun refreshQty() { if (itemCount > 0) notifyItemRangeChanged(0, itemCount, QTY) }
 }
 
-// ───────────────────────── holders ─────────────────────────
-
-/** Заголовки секций index: «Сейчас берут» = eyebrow, «Всё меню» = menu-title. */
-private class HeaderVH(ctx: Context) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
-    private val title = TextView(ctx)
-    private val aside = TextView(ctx)
+/**
+ * Отступы сетки плиток: боковой отступ экрана `side` и зазор `gap` между колонками (`.menu-grid`).
+ * Все плитки получают одинаковую суммарную вставку — ширина колонок равна, зазоры точные.
+ */
+class TileGridDecoration(private val cols: Int, private val sidePx: Int, private val gapPx: Int) : RecyclerView.ItemDecoration() {
+    private val lefts = IntArray(cols)
+    private val rights = IntArray(cols)
     init {
-        val d = ctx.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val box = itemView as LinearLayout
-        box.orientation = LinearLayout.HORIZONTAL
-        box.gravity = Gravity.BOTTOM
-        box.setPadding(0, dp(10), 0, dp(4))
-        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
-        title.setTypeface(null, Typeface.BOLD)
-        title.maxLines = 1
-        aside.textSize = 9.5f
-        aside.setTextColor(UiKit.MUTED)
-        aside.maxLines = 1
-        aside.gravity = Gravity.END
-        box.addView(title, LinearLayout.LayoutParams(0, WRAP, 1f))
-        box.addView(aside, LinearLayout.LayoutParams(WRAP, WRAP))
+        val inset = (2 * sidePx + (cols - 1) * gapPx) / cols
+        var left = sidePx
+        for (c in 0 until cols) {
+            lefts[c] = left
+            rights[c] = inset - left
+            left = gapPx - rights[c]
+        }
     }
-    fun bind(r: CatalogRow.Header) {
-        val t = r.title
-        // index: focus section uses uppercase eyebrow «Сейчас берут»
-        if (t.equals("Сейчас берут", ignoreCase = true) || t.equals("Фокус", ignoreCase = true)) {
-            title.text = "СЕЙЧАС БЕРУТ"
-            title.textSize = 9.5f
-            title.setTextColor(UiKit.MUTED)
-            title.letterSpacing = 0.12f
-            aside.text = ""
-            aside.visibility = View.GONE
-        } else {
-            title.text = if (t.equals("Меню", ignoreCase = true)) "Всё меню" else t
-            title.textSize = 14.5f
-            title.setTextColor(UiKit.INK)
-            title.letterSpacing = -0.015f
-            aside.visibility = View.VISIBLE
-            aside.text = ""
+    override fun getItemOffsets(out: android.graphics.Rect, view: View, parent: RecyclerView, state: RecyclerView.State) {
+        val lp = view.layoutParams as? androidx.recyclerview.widget.GridLayoutManager.LayoutParams ?: return
+        val pos = parent.getChildAdapterPosition(view)
+        val adapter = parent.adapter as? CatalogAdapter ?: return
+        val row = adapter.currentList.getOrNull(pos)
+        if (row is CatalogRow.Item) {
+            val c = lp.spanIndex.coerceIn(0, cols - 1)
+            out.set(lefts[c], 0, rights[c].coerceAtLeast(0), gapPx)
         }
     }
 }
 
-private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
+// ───────────────────────── holders ─────────────────────────
+
+/** Хост готовой view (поиск, чипы). */
+private class HostVH(ctx: Context) : RecyclerView.ViewHolder(FrameLayout(ctx)) {
+    private val box = itemView as FrameLayout
+    private val d = ctx.resources.displayMetrics.density
+    init { box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP) }
+    fun bind(r: CatalogRow.Host) {
+        (r.view.parent as? ViewGroup)?.removeView(r.view)
+        box.removeAllViews()
+        box.setPadding(0, (r.topDp * d).toInt(), 0, 0)
+        box.addView(r.view, FrameLayout.LayoutParams(MATCH, WRAP))
+    }
+    fun unhost() { box.removeAllViews() }
+}
+
+/** `.row-head`: eyebrow «Сейчас берут» + пояснение справа. */
+private class HeaderVH(ctx: Context) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
+    private val title = TextView(ctx)
+    private val aside = TextView(ctx)
+    init {
+        val m = Ds.metrics(ctx)
+        val box = itemView as LinearLayout
+        box.orientation = LinearLayout.HORIZONTAL
+        box.gravity = Gravity.BOTTOM
+        box.setPadding(Ds.dp(ctx, m.sidePad), Ds.dp(ctx, 14), Ds.dp(ctx, m.sidePad), 0)
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+        title.maxLines = 1
+        title.textSize = Ds.sp(9.5f)
+        title.setTextColor(UiKit.MUTED)
+        title.letterSpacing = 0.12f
+        title.weight(Fonts.STRONG)
+        aside.textSize = Ds.sp(9.5f)
+        aside.setTextColor(UiKit.MUTED)
+        aside.maxLines = 1
+        aside.gravity = Gravity.END
+        aside.weight(Fonts.MEDIUM)
+        box.addView(title, LinearLayout.LayoutParams(0, WRAP, 1f))
+        box.addView(aside, LinearLayout.LayoutParams(WRAP, WRAP))
+    }
+    fun bind(r: CatalogRow.Header) {
+        title.text = r.title.uppercase()
+        aside.text = r.aside
+        aside.visibility = if (r.aside.isEmpty()) View.GONE else View.VISIBLE
+    }
+}
+
+/** `.menu-head`: «Всё меню» 14.5/650 + «N позиций». */
+private class MenuHeadVH(ctx: Context) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
+    private val title = TextView(ctx)
+    private val count = TextView(ctx)
+    init {
+        val m = Ds.metrics(ctx)
+        val box = itemView as LinearLayout
+        box.orientation = LinearLayout.HORIZONTAL
+        box.gravity = Gravity.BOTTOM
+        box.setPadding(Ds.dp(ctx, m.sidePad), Ds.dp(ctx, 13), Ds.dp(ctx, m.sidePad), Ds.dp(ctx, 8))
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+        title.textSize = 14.5f
+        title.setTextColor(UiKit.INK)
+        title.letterSpacing = -0.015f
+        title.maxLines = 1
+        title.weight(Fonts.STRONG)
+        count.textSize = Ds.sp(9.5f)
+        count.setTextColor(UiKit.MUTED)
+        count.maxLines = 1
+        box.addView(title, LinearLayout.LayoutParams(0, WRAP, 1f))
+        box.addView(count, LinearLayout.LayoutParams(WRAP, WRAP))
+    }
+    fun bind(r: CatalogRow.MenuHead) { title.text = r.title; count.text = r.count }
+}
+
+/** `.tile` 1:1: media (96/120/126) · flag · qty · − + · name/meta/price. */
+private class ProductVH(ctx: Context, private val cb: CatalogCallbacks) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
     val thumb = ThumbView(ctx)
+    private val thumb1 = ThumbView(ctx)
+    private val thumb2 = ThumbView(ctx)
+    private val comboRow = LinearLayout(ctx)
     private val name = TextView(ctx)
     private val meta = TextView(ctx)
     private val price = TextView(ctx)
     private val flag = TextView(ctx)
     private val qty: TextView
-    private val plusBtn = TextView(ctx)
-    private val minusBtn = TextView(ctx)
-    private val controls: LinearLayout
+    private val minus: TextView
     private var item: CatalogProduct? = null
     private val thumbPx: Int
     init {
+        val m = Ds.metrics(ctx)
         val d = ctx.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val box = itemView as LinearLayout
         box.orientation = LinearLayout.VERTICAL
-        box.setPadding(0, 0, 0, 0)
-        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
+        box.background = Ds.rounded(ctx, UiKit.WHITE, 18f, UiKit.LINE)
+        box.clipToOutline = true
         box.isClickable = true
         box.isFocusable = true
         box.contentDescription = "Товар меню"
-        box.elevation = 1f * d
-        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply {
-            width = MATCH
-            // menu-grid gap 9px → ~4.5 each side
-            setMargins(dp(5), dp(5), dp(5), dp(5))
-        }
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
 
-        // tile-media height 96, warm gradient
-        val photoBox = FrameLayout(ctx).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xFFF4EFE6.toInt(), 0xFFECE4D8.toInt())
-            )
-        }
+        val photoBox = FrameLayout(ctx).apply { background = Ds.mediaGradient() }
         thumb.setCorner(0)
+        thumb.setContain(m.imgW, m.imgH)
         photoBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
-        val photoH = dp(80)
-        box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
-        thumbPx = (photoH * 2).coerceIn(200, 400)
 
-        // tile-flag top-left
-        flag.textSize = 7f
-        flag.setTypeface(null, Typeface.BOLD)
+        // Комбо: два рисунка и «+» между ними (`.combo-pics`).
+        comboRow.orientation = LinearLayout.HORIZONTAL
+        comboRow.gravity = Gravity.CENTER
+        comboRow.visibility = View.GONE
+        thumb1.setCorner(0); thumb1.setContain(62, 50)
+        thumb2.setCorner(0); thumb2.setContain(62, 50)
+        val plusSign = TextView(ctx).apply {
+            text = "+"; textSize = 13f; setTextColor(UiKit.MUTED); weight(Fonts.MEDIUM)
+            setPadding(dp(1), 0, dp(1), 0)
+        }
+        comboRow.addView(thumb1, LinearLayout.LayoutParams(dp(62), dp(50)))
+        comboRow.addView(plusSign)
+        comboRow.addView(thumb2, LinearLayout.LayoutParams(dp(62), dp(50)))
+        photoBox.addView(comboRow, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        val photoH = dp(m.mediaH)
+        box.addView(photoBox, LinearLayout.LayoutParams(MATCH, photoH))
+        thumbPx = (m.imgW * 2 * d).toInt().coerceIn(200, 480)
+
+        // .tile-flag
+        flag.textSize = Ds.sp(7f)
+        flag.weight(Fonts.STRONG)
+        flag.letterSpacing = 0.09f
         flag.setTextColor(UiKit.INK_2)
-        flag.setPadding(dp(4), dp(2), dp(4), dp(2))
-        flag.background = UiKit.rounded(d, 0xE0FFFFFF.toInt(), 5, null)
+        flag.setPadding(dp(6), dp(3), dp(6), dp(3))
+        flag.background = Ds.rounded(ctx, 0xE0FFFFFF.toInt(), 5f)
         flag.visibility = View.GONE
         photoBox.addView(flag, FrameLayout.LayoutParams(WRAP, WRAP).apply {
             gravity = Gravity.TOP or Gravity.START
             topMargin = dp(7); leftMargin = dp(7)
         })
 
-        // tile-qty top-right (ink, not brand pill)
+        // .tile-qty
         qty = TextView(ctx).apply {
-            textSize = 8.5f
-            setTypeface(null, Typeface.BOLD)
+            textSize = Ds.sp(9f)
+            weight(Fonts.STRONG)
             setTextColor(UiKit.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(5), 0, dp(5), 0)
-            minWidth = dp(22)
-            minHeight = dp(17)
-            background = UiKit.rounded(d, UiKit.INK, 6, null)
+            setPadding(dp(6), 0, dp(6), 0)
+            minWidth = dp(25)
+            background = Ds.rounded(ctx, UiKit.INK, 6f)
             visibility = View.GONE
             elevation = 2f * d
         }
-        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(17)).apply {
+        photoBox.addView(qty, FrameLayout.LayoutParams(WRAP, dp(19)).apply {
             gravity = Gravity.TOP or Gravity.END
-            topMargin = dp(5); rightMargin = dp(5)
+            topMargin = dp(7); rightMargin = dp(7)
         })
 
-        // tile-controls bottom-right of media
-        controls = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
+        // .tile-controls: 30×30, gap 4
         fun ctl(label: String, plus: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
             text = label
             textSize = 16f
+            includeFontPadding = false
             gravity = Gravity.CENTER
-            setTypeface(null, Typeface.NORMAL)
-            background = if (plus) {
-                UiKit.rounded(d, UiKit.INK, 15, UiKit.INK)
-            } else {
-                UiKit.rounded(d, 0xF5FFFFFF.toInt(), 15, UiKit.LINE)
-            }
+            weight(Fonts.MEDIUM)
+            background = if (plus) Ds.rounded(ctx, UiKit.INK, 15f, UiKit.INK)
+            else Ds.rounded(ctx, 0xF5FFFFFF.toInt(), 15f, 0xF2E7DFD3.toInt())
             setTextColor(if (plus) UiKit.WHITE else UiKit.INK)
             elevation = 2f * d
             setOnClickListener { onClick() }
         }
-        minusBtn.apply {
-            // filled below via ctl helper pattern
-        }
-        val minus = ctl("−", false) { item?.let(cb.onDec) }
+        minus = ctl("−", false) { item?.let(cb.onDec) }
         val plus = ctl("+", true) { item?.let(cb.onInc) }
-        // store refs for visibility
-        minusBtn.text = "−"
-        plusBtn.text = "+"
-        controls.addView(minus, LinearLayout.LayoutParams(dp(26), dp(26)).apply { rightMargin = dp(3) })
-        controls.addView(plus, LinearLayout.LayoutParams(dp(26), dp(26)))
-        // keep field refs for bindQty visibility of minus
-        minusBtn.tag = minus
-        plusBtn.tag = plus
+        val controls = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        controls.addView(minus, LinearLayout.LayoutParams(dp(30), dp(30)).apply { rightMargin = dp(4) })
+        controls.addView(plus, LinearLayout.LayoutParams(dp(30), dp(30)))
         photoBox.addView(controls, FrameLayout.LayoutParams(WRAP, WRAP).apply {
             gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = dp(5); rightMargin = dp(5)
+            bottomMargin = dp(7); rightMargin = dp(7)
         })
 
-        // tile-body
+        // .tile-body: padding 8 10 9
         val body = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(7), dp(10), dp(8))
+            setPadding(dp(10), dp(8), dp(10), dp(9))
         }
-        name.textSize = 12f
-        name.setTypeface(null, Typeface.BOLD)
+        name.textSize = m.nameSp
+        name.weight(Fonts.SEMIBOLD)
+        name.letterSpacing = -0.01f
         name.setTextColor(UiKit.INK)
         name.maxLines = 1
         name.ellipsize = TextUtils.TruncateAt.END
         body.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
-        meta.textSize = 8.5f
+        meta.textSize = Ds.sp(m.metaSp)
+        meta.weight(Fonts.REGULAR)
         meta.setTextColor(UiKit.MUTED)
         meta.maxLines = 1
         meta.ellipsize = TextUtils.TruncateAt.END
         body.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(1) })
-        price.textSize = 13.5f
-        price.setTypeface(null, Typeface.BOLD)
+        price.textSize = m.priceSp
+        price.weight(Fonts.STRONG)
+        price.letterSpacing = -0.015f
         price.setTextColor(UiKit.INK)
         price.maxLines = 1
         price.ellipsize = TextUtils.TruncateAt.END
@@ -330,40 +402,40 @@ private class ProductVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewH
 
         box.setOnClickListener { item?.let(cb.onTap) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }
+        Ds.shadowS(box)
     }
 
-    fun bind(p: CatalogProduct) {
+    fun bind(p: CatalogProduct, metaText: String) {
         item = p
         name.text = p.name
-        meta.text = when {
-            p.isCombo -> "Комбо"
-            !p.groupName.isNullOrBlank() -> p.groupName
-            p.freeEligible -> "Напиток"
-            else -> ""
-        }
-        meta.visibility = if (meta.text.isNullOrEmpty()) View.GONE else View.VISIBLE
+        meta.text = metaText
+        meta.visibility = if (metaText.isEmpty()) View.GONE else View.VISIBLE
         price.text = priceText(p)
-        // tile-flag only for real badges we know from data (combo / featured hit)
         when {
             p.isCombo -> { flag.text = "КОМБО"; flag.visibility = View.VISIBLE }
             p.featured -> { flag.text = "ХИТ"; flag.visibility = View.VISIBLE }
             else -> flag.visibility = View.GONE
         }
-        thumb.bind(p.name, p.imageUrl, thumbPx)
+        if (p.isCombo) {
+            thumb.visibility = View.GONE
+            comboRow.visibility = View.VISIBLE
+            thumb1.bind(p.name, p.imageUrl, 200)
+            thumb2.bind(p.name, p.imageUrl2, 200)
+        } else {
+            thumb.visibility = View.VISIBLE
+            comboRow.visibility = View.GONE
+            thumb.bind(p.name, p.imageUrl, thumbPx)
+        }
         bindQty()
     }
 
+    fun release() { thumb.release(); thumb1.release(); thumb2.release() }
+
     fun bindQty() {
-        val uuid = item?.uuid ?: return
-        val n = Cart.qty(uuid)
-        if (n > 0) {
-            qty.text = "×$n"
-            qty.visibility = View.VISIBLE
-        } else {
-            qty.visibility = View.GONE
-        }
-        val minus = minusBtn.tag as? View
-        minus?.visibility = if (n > 0) View.VISIBLE else View.GONE
+        val it = item ?: return
+        val n = cb.qtyOf(it)
+        if (n > 0) { qty.text = "×$n"; qty.visibility = View.VISIBLE } else qty.visibility = View.GONE
+        minus.visibility = if (n > 0 && !it.isCombo) View.VISIBLE else View.GONE
     }
 }
 
@@ -371,14 +443,17 @@ private class FocusRowVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.View
     private val rv = itemView as RecyclerView
     private val adapter = FocusAdapter(cb)
     init {
+        val m = Ds.metrics(ctx)
         val d = ctx.resources.displayMetrics.density
         rv.layoutManager = LinearLayoutManager(ctx, LinearLayoutManager.HORIZONTAL, false)
         rv.adapter = adapter
         rv.overScrollMode = View.OVER_SCROLL_NEVER
         rv.isHorizontalScrollBarEnabled = false
         rv.itemAnimator = null
+        rv.clipToPadding = false
+        rv.setPadding((m.sidePad * d).toInt(), (8 * d).toInt(), (m.sidePad * d).toInt(), (3 * d).toInt())
         rv.setItemViewCacheSize(4)
-        rv.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP).apply { bottomMargin = (8 * d).toInt() }
+        rv.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
     }
     fun bind(r: CatalogRow.Focus) { adapter.submitList(r.items) }
     fun refreshQty() { adapter.refreshQty() }
@@ -387,93 +462,80 @@ private class FocusRowVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.View
 private class FocusAdapter(private val cb: CatalogCallbacks) : ListAdapter<CatalogProduct, FocusCardVH>(PRODUCT_DIFF) {
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) = FocusCardVH(parent.context, cb)
     override fun onBindViewHolder(h: FocusCardVH, position: Int) = h.bind(getItem(position))
-    override fun onBindViewHolder(h: FocusCardVH, position: Int, payloads: MutableList<Any>) {
-        if (payloads.contains(QTY)) h.bindQty() else h.bind(getItem(position))
-    }
     override fun onViewRecycled(h: FocusCardVH) { h.thumb.release(); super.onViewRecycled(h) }
-    fun refreshQty() { if (itemCount > 0) notifyItemRangeChanged(0, itemCount, QTY) }
+    fun refreshQty() {}
 }
 
-/** focus-card 1:1 index: 158×74, img 53×58, name 11.5, price 11, badge, + */
+/** `.focus-card` 1:1: 158×74, img 53×58, name 11.5/600, price 11/600, badge, › справа сверху. */
 private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.ViewHolder(FrameLayout(ctx)) {
     val thumb = ThumbView(ctx)
     private val name = TextView(ctx)
     private val price = TextView(ctx)
     private val badge = TextView(ctx)
-    private val addBtn = TextView(ctx)
-    private val qty: TextView
     private var item: CatalogProduct? = null
     init {
+        val m = Ds.metrics(ctx)
         val d = ctx.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val root = itemView as FrameLayout
-        root.layoutParams = RecyclerView.LayoutParams(dp(158), dp(74)).apply { rightMargin = dp(8) }
+        root.layoutParams = RecyclerView.LayoutParams(dp(m.focusW), dp(74)).apply { rightMargin = dp(8) }
 
         val box = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(7), dp(7), dp(8), dp(7))
-            background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
+            background = Ds.rounded(ctx, UiKit.WHITE, 16f, UiKit.LINE)
             isClickable = true
             isFocusable = true
-            elevation = 1f * d
         }
+        Ds.shadowS(box)
         root.addView(box, FrameLayout.LayoutParams(MATCH, MATCH))
 
         val imgBox = FrameLayout(ctx).apply {
-            background = GradientDrawable().apply {
-                setColor(0xFFF2ECE1.toInt())
-                cornerRadius = 11 * d
-            }
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFFF2ECE1.toInt(), 0xFFECE3D6.toInt()))
+                .apply { cornerRadius = 11 * d }
+            clipToOutline = true
         }
-        thumb.setCorner(11)
+        thumb.setCorner(0)
+        thumb.setContain(58, 46)
         imgBox.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
         box.addView(imgBox, LinearLayout.LayoutParams(dp(53), dp(58)))
 
         val textCol = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), 0, dp(4), 0)
+            setPadding(dp(8), 0, 0, 0)
         }
-        name.textSize = 12f
-        name.setTypeface(null, Typeface.BOLD)
+        name.textSize = 11.5f
+        name.weight(Fonts.SEMIBOLD)
+        name.letterSpacing = -0.005f
         name.setTextColor(UiKit.INK)
         name.maxLines = 1
         name.ellipsize = TextUtils.TruncateAt.END
         textCol.addView(name, LinearLayout.LayoutParams(MATCH, WRAP))
         price.textSize = 11f
-        price.setTypeface(null, Typeface.BOLD)
+        price.weight(Fonts.SEMIBOLD)
         price.setTextColor(UiKit.INK_2)
         price.maxLines = 1
         textCol.addView(price, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(2) })
-        badge.textSize = 7f
-        badge.setTypeface(null, Typeface.BOLD)
+        badge.textSize = Ds.sp(7f)
+        badge.weight(Fonts.STRONG)
+        badge.letterSpacing = 0.09f
         badge.setTextColor(UiKit.INK_2)
         badge.setPadding(dp(4), dp(2), dp(4), dp(2))
-        badge.background = UiKit.rounded(d, 0xFFF3EEE5.toInt(), 4, UiKit.LINE)
+        badge.background = Ds.rounded(ctx, 0xFFF3EEE5.toInt(), 4f, UiKit.LINE)
         badge.visibility = View.GONE
-        textCol.addView(badge, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(2) })
+        textCol.addView(badge, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(4) })
         box.addView(textCol, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-        addBtn.text = "+"
-        addBtn.textSize = 14f
-        addBtn.gravity = Gravity.CENTER
-        addBtn.setTextColor(UiKit.MUTED)
-        addBtn.background = UiKit.rounded(d, 0xD9FFFFFF.toInt(), 10, UiKit.LINE)
-        root.addView(addBtn, FrameLayout.LayoutParams(dp(20), dp(20)).apply {
+        val add = FrameLayout(ctx).apply { background = Ds.rounded(ctx, 0xD9FFFFFF.toInt(), 10f, UiKit.LINE) }
+        add.addView(icon(ctx, ru.sixthcup.evotor.R.drawable.ic_chevron_sm, 10f, UiKit.MUTED),
+            FrameLayout.LayoutParams(dp(10), dp(10), Gravity.CENTER))
+        root.addView(add, FrameLayout.LayoutParams(dp(20), dp(20)).apply {
             gravity = Gravity.TOP or Gravity.END
-            topMargin = dp(6)
-            rightMargin = dp(6)
+            topMargin = dp(6); rightMargin = dp(6)
         })
 
-        qty = qtyPill(ctx, d)
-        root.addView(qty, FrameLayout.LayoutParams(WRAP, dp(22)).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = dp(6)
-            rightMargin = dp(6)
-        })
-
-        box.setOnClickListener { item?.let(cb.onTap) }
-        addBtn.setOnClickListener { item?.let(cb.onInc) }
+        box.setOnClickListener { item?.let(cb.onInc) }
         box.setOnLongClickListener { item?.let(cb.onInfo); true }
     }
 
@@ -481,57 +543,63 @@ private class FocusCardVH(ctx: Context, cb: CatalogCallbacks) : RecyclerView.Vie
         item = p
         name.text = p.name
         price.text = UiKit.rub(p.priceRub)
-        badge.visibility = if (p.isCombo) View.VISIBLE else View.GONE
-        badge.text = if (p.isCombo) "КОМБО" else ""
+        val tag = when { p.isCombo -> "КОМБО"; p.featured -> "ХИТ"; else -> "" }
+        badge.text = tag
+        badge.visibility = if (tag.isEmpty()) View.GONE else View.VISIBLE
         thumb.bind(p.name, p.imageUrl, 160)
-        bindQty()
     }
-
-    fun bindQty() { item?.let { applyQty(qty, it.uuid) } }
 }
 
-/** Скелетон строки: серые блоки без анимации (анимация на ST5 только греет GPU). */
+/** Скелетон: серые блоки без анимации. Форма — плитка 2×N. */
 private class SkeletonVH(ctx: Context) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
     init {
+        val m = Ds.metrics(ctx)
         val d = ctx.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val box = itemView as LinearLayout
-        box.orientation = LinearLayout.HORIZONTAL
-        box.gravity = Gravity.CENTER_VERTICAL
-        box.setPadding(dp(8), dp(6), dp(8), dp(6))
-        box.background = UiKit.rounded(d, UiKit.WHITE, 16, UiKit.LINE)
-        box.layoutParams = RecyclerView.LayoutParams(MATCH, dp(64)).apply { bottomMargin = dp(6) }
-        box.addView(View(ctx).apply { background = UiKit.rounded(d, UiKit.SKELETON, 26, null) }, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(10) })
-        val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(View(ctx).apply { background = UiKit.rounded(d, UiKit.SKELETON, 4, null) }, LinearLayout.LayoutParams(dp(150), dp(12)))
-        col.addView(View(ctx).apply { background = UiKit.rounded(d, UiKit.SKELETON, 4, null) }, LinearLayout.LayoutParams(dp(70), dp(12)).apply { topMargin = dp(8) })
-        box.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        box.orientation = LinearLayout.VERTICAL
+        box.background = Ds.rounded(ctx, UiKit.WHITE, 18f, UiKit.LINE)
+        box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
+        box.addView(View(ctx).apply { setBackgroundColor(UiKit.SKELETON) }, LinearLayout.LayoutParams(MATCH, dp(m.mediaH)))
+        val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(10), dp(10), dp(12)) }
+        col.addView(View(ctx).apply { background = Ds.rounded(ctx, UiKit.SKELETON, 4f) }, LinearLayout.LayoutParams(dp(90), dp(12)))
+        col.addView(View(ctx).apply { background = Ds.rounded(ctx, UiKit.SKELETON, 4f) }, LinearLayout.LayoutParams(dp(50), dp(12)).apply { topMargin = dp(8) })
+        box.addView(col, LinearLayout.LayoutParams(MATCH, WRAP))
     }
 }
 
+/** `.empty-search`: логотип 56 с прозрачностью, заголовок 13/600, подсказка 11. */
 private class StateVH(ctx: Context, private val cb: CatalogCallbacks) : RecyclerView.ViewHolder(LinearLayout(ctx)) {
     private val msg = TextView(ctx)
     private val btn = Button(ctx)
     private val d = ctx.resources.displayMetrics.density
+    private val logo = android.widget.ImageView(ctx)
     init {
         fun dp(v: Int) = (v * d).toInt()
+        val m = Ds.metrics(ctx)
         val box = itemView as LinearLayout
         box.orientation = LinearLayout.VERTICAL
+        box.gravity = Gravity.CENTER_HORIZONTAL
+        box.setPadding(dp(m.sidePad + 2), dp(34), dp(m.sidePad + 2), dp(34))
         box.layoutParams = RecyclerView.LayoutParams(MATCH, WRAP)
-        msg.textSize = 15f
-        msg.setPadding(dp(12), dp(10), dp(12), dp(10))
+        logo.setImageResource(ru.sixthcup.evotor.R.drawable.logo_67_mark)
+        logo.alpha = 0.35f
+        box.addView(logo, LinearLayout.LayoutParams(dp(56), dp(56)).apply { bottomMargin = dp(8) })
+        msg.textSize = 13f
+        msg.gravity = Gravity.CENTER
+        msg.setTextColor(UiKit.MUTED)
         box.addView(msg, LinearLayout.LayoutParams(MATCH, WRAP))
-        btn.text = "Повторить"; btn.textSize = 15f; btn.transformationMethod = null
+        btn.text = "Повторить"; btn.textSize = 12f; btn.transformationMethod = null
         btn.minHeight = dp(48); btn.minimumHeight = dp(48)
-        btn.background = UiKit.rounded(d, UiKit.BRAND, 12, UiKit.BRAND)
+        btn.background = Ds.rounded(ctx, UiKit.BRAND, 14f)
         btn.setTextColor(UiKit.WHITE)
+        btn.weight(Fonts.STRONG)
         btn.setOnClickListener { cb.onRetry() }
-        box.addView(btn, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(8) })
+        box.addView(btn, LinearLayout.LayoutParams(dp(180), dp(48)).apply { topMargin = dp(12) })
     }
     fun bind(r: CatalogRow.State) {
         msg.text = r.message
-        msg.setTextColor(if (r.warn) 0xFF6B4700.toInt() else UiKit.HINT)
-        msg.background = UiKit.rounded(d, if (r.warn) 0xFFFFF4D6.toInt() else UiKit.SOFT, 12, null)
+        msg.setTextColor(if (r.warn) 0xFF6B4700.toInt() else UiKit.MUTED)
         btn.text = r.action ?: ""
         btn.visibility = if (r.action != null) View.VISIBLE else View.GONE
     }

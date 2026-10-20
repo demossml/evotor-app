@@ -41,6 +41,7 @@ object CatalogCache {
                     categoryName = optStr("categoryName"),
                     featured = o.optBoolean("featured", false),
                     description = optStr("description"),
+                    isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
                 )
             }
             if (map.isEmpty()) return null
@@ -73,6 +74,7 @@ object CatalogCache {
                     .put("upsell", upsellJson(e.upsell))
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
+                if (e.isFood != null) o.put("isFood", e.isFood)
                 by.put(uuid, o)
             }
             val cats = JSONArray()
