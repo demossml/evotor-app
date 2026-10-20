@@ -77,8 +77,18 @@ object DrinkVariants {
             sugar = products.filter { it.optGroup == "sugar" },
             extra = products.filter { it.optGroup == "extra" },
         )
-        // Плитками не показываются: товары-опции и определения комбо.
-        val drinks = products.filter { it.optGroup == null && !it.isComboDefinition }
+        // UUID товаров, которые в схемах добавок (toppings) — только sheet/чек, не витрина.
+        val modifierUuids = products.asSequence()
+            .flatMap { it.toppings.asSequence() }
+            .mapNotNull { it.evotorUuid?.takeIf { u -> u.isNotBlank() } }
+            .toSet()
+        // Плитками не показываются: #opt=, комбо-определения, hideFromMenu, uuid из toppings.
+        val drinks = products.filter { p ->
+            p.optGroup == null &&
+                !p.isComboDefinition &&
+                !p.hideFromMenu &&
+                p.uuid !in modifierUuids
+        }
 
         val grouped = LinkedHashMap<String, MutableList<CatalogProduct>>()
         val singles = ArrayList<CatalogProduct>()

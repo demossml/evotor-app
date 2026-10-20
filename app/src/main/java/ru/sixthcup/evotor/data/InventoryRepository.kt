@@ -42,6 +42,8 @@ data class CatalogProduct(
     val defaultVariant: Boolean = false,
     /** Есть ли у позиции выбор опций (объём/молоко/сироп). Для выпечки — false. */
     val supportsMods: Boolean = false,
+    /** Служебная добавка (сироп/молоко-модификатор): в номенклатуре Эвотора есть, на витрине 6.7 — нет. */
+    val hideFromMenu: Boolean = false,
     /** `#drink=` — uuid напитка в составе комбо. */
     val comboDrinkUuid: String? = null,
     /** `#food=` — uuid выпечки в составе комбо. */

@@ -51,6 +51,7 @@ object CatalogApi {
         val variantSort: Int? = null,
         val sizeValue: Int? = null,
         val sizeUnit: String? = null,
+        val hideFromMenu: Boolean = false,
     )
 
     fun fetch(storeUuid: String? = null): Payload {
@@ -103,6 +104,7 @@ object CatalogApi {
                 featured = featured,
                 // Схема добавок с backend = можно открывать item-sheet с опциями.
                 supportsMods = p.supportsMods || tops.isNotEmpty(),
+                hideFromMenu = p.hideFromMenu || e.hideFromMenu,
                 // Admin-managed product groups/variants are authoritative; do not require
                 // staff to maintain #group/#size markers manually in Evotor descriptions.
                 variantGroup = e.groupId?.let { "admin-group:$it" } ?: p.variantGroup,
@@ -162,6 +164,7 @@ object CatalogApi {
                 variantSort = if (o.has("variantSort")) o.optInt("variantSort") else null,
                 sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
                 sizeUnit = o.optString("sizeUnit").ifBlank { null },
+                hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isModifier", false),
             )
             if (uuid.isNotEmpty()) map[uuid] = enrich
             val nameKey = normalizeName(productName)
