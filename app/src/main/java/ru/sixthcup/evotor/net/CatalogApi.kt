@@ -41,6 +41,12 @@ object CatalogApi {
         val description: String? = null,
         /** Явный флаг еды с backend (`isFood`), если пришёл. */
         val isFood: Boolean? = null,
+        /** Backend product group and variant metadata from the 6.7 admin. */
+        val groupId: Int? = null,
+        val variantLabel: String? = null,
+        val variantSort: Int? = null,
+        val sizeValue: Int? = null,
+        val sizeUnit: String? = null,
     )
 
     fun fetch(storeUuid: String? = null): Payload {
@@ -93,6 +99,11 @@ object CatalogApi {
                 featured = featured,
                 // Схема добавок с backend = можно открывать item-sheet с опциями.
                 supportsMods = p.supportsMods || tops.isNotEmpty(),
+                // Admin-managed product groups/variants are authoritative; do not require
+                // staff to maintain #group/#size markers manually in Evotor descriptions.
+                variantGroup = e.groupId?.let { "admin-group:$it" } ?: p.variantGroup,
+                sizeMl = e.sizeValue?.takeIf { e.sizeUnit.equals("ml", true) || e.sizeUnit.isNullOrBlank() } ?: p.sizeMl,
+                optLabel = e.variantLabel?.takeIf { it.isNotBlank() } ?: p.optLabel,
             )
         }
         return applySoftFocus(merged)
@@ -139,6 +150,11 @@ object CatalogApi {
                 featured = featured,
                 description = desc,
                 isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
+                groupId = if (o.has("groupId") && !o.isNull("groupId")) o.optInt("groupId") else null,
+                variantLabel = o.optString("variantLabel").ifBlank { null },
+                variantSort = if (o.has("variantSort")) o.optInt("variantSort") else null,
+                sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
+                sizeUnit = o.optString("sizeUnit").ifBlank { null },
             )
         }
         val catNames = ArrayList<String>()
