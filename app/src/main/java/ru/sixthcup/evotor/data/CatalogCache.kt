@@ -43,6 +43,7 @@ object CatalogCache {
                     featured = o.optBoolean("featured", false),
                     description = optStr("description"),
                     isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
+                    hideFromMenu = o.optBoolean("hideFromMenu", false),
                 )
             }
             fun parseEnrich(o: JSONObject): CatalogApi.Enrich {
@@ -60,6 +61,7 @@ object CatalogCache {
                     featured = o.optBoolean("featured", false),
                     description = str("description"),
                     isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
+                    hideFromMenu = o.optBoolean("hideFromMenu", false),
                 )
             }
             val named = linkedMapOf<String, CatalogApi.Enrich>()
@@ -100,6 +102,7 @@ object CatalogCache {
                     .put("description", e.description ?: JSONObject.NULL)
                     .put("toppings", toppingsJson(e.toppings))
                     .put("upsell", upsellJson(e.upsell))
+                    .put("hideFromMenu", e.hideFromMenu)
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
                 if (e.isFood != null) o.put("isFood", e.isFood)

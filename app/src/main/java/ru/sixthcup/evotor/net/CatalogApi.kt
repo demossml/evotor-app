@@ -5,11 +5,11 @@ import org.json.JSONObject
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.FoodRules
+import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.ProductMarkers
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
 import java.math.BigDecimal
-import java.text.Normalizer
 import java.net.HttpURLConnection
 import java.net.URL
 import android.util.Log
@@ -56,13 +56,15 @@ object CatalogApi {
 
     fun fetch(storeUuid: String? = null): Payload {
         return try {
-            val url = BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/catalog"
+            val q = if (!storeUuid.isNullOrBlank()) "?storeUuid=" + android.net.Uri.encode(storeUuid) else ""
+            val url = BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/catalog" + q
             val conn = (URL(url).openConnection() as HttpURLConnection)
             conn.requestMethod = "GET"
             conn.connectTimeout = 4000
             conn.readTimeout = 8000
             conn.setRequestProperty("Accept", "application/json")
             if (!storeUuid.isNullOrBlank()) conn.setRequestProperty("X-Evotor-Store-Uuid", storeUuid)
+            Log.i("CatalogApi", "catalog request store=${storeUuid ?: "-"}")
             // No Authorization in APK: Evotor Cloud injects it when installed from cabinet.
             // Backend allows catalog without token unless EVOTOR_PROXY_ENFORCE=1.
             val status = conn.responseCode
@@ -75,7 +77,11 @@ object CatalogApi {
             }
             val parsed = parse(body)
             val withPhoto = parsed.byUuid.values.count { !it.imageUrl.isNullOrBlank() }
-            Log.i("CatalogApi", "catalog ok products=${parsed.byUuid.size} withImageUrl=$withPhoto")
+            Log.i(
+                "CatalogApi",
+                "catalog ok byUuid=${parsed.byUuid.size} byName=${parsed.byName.size} " +
+                    "withImageUrl=$withPhoto store=${storeUuid ?: "-"}",
+            )
             parsed
         } catch (e: Throwable) {
             Log.e("CatalogApi", "catalog fetch failed", e)
@@ -86,7 +92,7 @@ object CatalogApi {
     fun merge(products: List<CatalogProduct>, payload: Payload): List<CatalogProduct> {
         if (payload.byUuid.isEmpty() && payload.byName.isEmpty() && payload.categoryNames.isEmpty()) return products
         val merged = products.map { p ->
-            val e = payload.byUuid[p.uuid] ?: payload.byName[normalizeName(p.name)] ?: return@map p
+            val e = payload.byUuid[p.uuid] ?: payload.byName[Names.normalize(p.name)] ?: return@map p
             val featured = p.featured || e.featured ||
                 ProductMarkers.isFocus(e.description) ||
                 ProductMarkers.isCombo(p.name, e.description)
@@ -167,7 +173,7 @@ object CatalogApi {
                 hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isModifier", false),
             )
             if (uuid.isNotEmpty()) map[uuid] = enrich
-            val nameKey = normalizeName(productName)
+            val nameKey = Names.normalize(productName)
             if (nameKey.isNotEmpty()) {
                 if (named.containsKey(nameKey)) ambiguousNames.add(nameKey) else named[nameKey] = enrich
             }
@@ -193,12 +199,6 @@ object CatalogApi {
         val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
         return Payload(map, upsellDefault, catNames, named)
     }
-
-    private fun normalizeName(value: String?): String = Normalizer.normalize(value.orEmpty(), Normalizer.Form.NFKC)
-        .lowercase(java.util.Locale.forLanguageTag("ru-RU"))
-        .replace('ё', 'е')
-        .replace(Regex("\\s+"), " ")
-        .trim()
 
     private fun parseToppings(a: JSONArray?): List<Topping> {
         if (a == null) return emptyList()

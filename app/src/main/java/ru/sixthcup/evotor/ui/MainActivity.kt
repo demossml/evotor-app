@@ -61,6 +61,7 @@ import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.net.LoyaltyApi
 import ru.sixthcup.evotor.net.CatalogApi
+import ru.sixthcup.evotor.net.StoreUuidResolver
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
 import ru.sixthcup.evotor.scanner.ScannerReceiver
@@ -260,7 +261,11 @@ class MainActivity : AppCompatActivity() {
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
             if (inv == null) return@thread
-            val enrich = try { CatalogApi.fetch(null) } catch (e: Throwable) { Log.e(TAG, "enrich", e); CatalogApi.Payload(emptyMap(), emptyList()) }
+            val storeUuid = StoreUuidResolver.resolve(ctx)
+            val enrich = try { CatalogApi.fetch(storeUuid) } catch (e: Throwable) {
+                Log.e(TAG, "enrich", e)
+                CatalogApi.Payload(emptyMap(), emptyList())
+            }
             if (enrich.byUuid.isEmpty() && enrich.byName.isEmpty()) return@thread
             CatalogCache.save(ctx, enrich)
             val merged = CatalogApi.merge(inv, enrich)
@@ -273,7 +278,13 @@ class MainActivity : AppCompatActivity() {
                 upsellDefault = enrich.upsellDefault
                 val withTop = merged.count { it.toppings.isNotEmpty() }
                 val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
-                Log.i(TAG, "enrich ok products=${merged.size} matchedUuid=${enrich.byUuid.size} matchedName=${enrich.byName.size} withToppings=$withTop sellableToppings=$withSellable upsellDefault=${enrich.upsellDefault.size}")
+                Log.i(TAG, "enrich ok products=${merged.size} matchedUuid=${enrich.byUuid.size} matchedName=${enrich.byName.size} withToppings=$withTop sellableToppings=$withSellable upsellDefault=${enrich.upsellDefault.size} store=$storeUuid")
+                // Диагностика: ответ непустой, но ни один товар не обогащён — обычно значит,
+                // что пришёл каталог другой точки (storeUuid не тот или отсутствует).
+                val matched = merged.count { it.toppings.isNotEmpty() || it.hideFromMenu }
+                if (matched == 0) {
+                    Log.w(TAG, "enrich merge matched NOTHING store=$storeUuid — toppings will be empty")
+                }
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
         }

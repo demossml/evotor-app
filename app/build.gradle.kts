@@ -9,13 +9,15 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 105
-        versionName = "4.9.6-hide-modifiers"
+        versionCode = 106
+        versionName = "4.9.7-storeuuid"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
         // Единицы PRICE_OUT из ProductTable: KOPECKS (по умолчанию, как делает integration-library) | AUTO | RUBLES.
         buildConfigField("String", "PRICE_UNITS", "\"${project.findProperty("PRICE_UNITS") ?: "KOPECKS"}\"")
         // Public HTTPS URL of the backend as allowed in the Evotor cabinet (proxy mask). No secrets here.
         buildConfigField("String", "API_BASE_URL", "\"${project.findProperty("API_BASE_URL") ?: "https://app.67coffee.ru"}\"")
+        // UUID магазина для /api/devices/catalog?storeUuid=… (можно зафиксировать при сборке: -PSTORE_UUID=…).
+        buildConfigField("String", "STORE_UUID", "\"${project.findProperty("STORE_UUID") ?: ""}\"")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -77,17 +77,26 @@ object DrinkVariants {
             sugar = products.filter { it.optGroup == "sugar" },
             extra = products.filter { it.optGroup == "extra" },
         )
-        // UUID товаров, которые в схемах добавок (toppings) — только sheet/чек, не витрина.
+        // Добавки, которые участвуют в схемах: скрываем их с витрины.
+        //  - по uuid товара из toppings[].evotorUuid (основной путь);
+        //  - по нормализованному имени (страховка, когда uuid добавки на терминале
+        //    не совпадает с тем, что прислал backend).
         val modifierUuids = products.asSequence()
             .flatMap { it.toppings.asSequence() }
             .mapNotNull { it.evotorUuid?.takeIf { u -> u.isNotBlank() } }
             .toSet()
-        // Плитками не показываются: #opt=, комбо-определения, hideFromMenu, uuid из toppings.
+        val modifierNames = products.asSequence()
+            .flatMap { it.toppings.asSequence() }
+            .map { Names.normalize(it.name) }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        // Плитками не показываются: #opt=, комбо-определения, hideFromMenu, добавки по uuid/имени.
         val drinks = products.filter { p ->
             p.optGroup == null &&
                 !p.isComboDefinition &&
                 !p.hideFromMenu &&
-                p.uuid !in modifierUuids
+                p.uuid !in modifierUuids &&
+                Names.normalize(p.name) !in modifierNames
         }
 
         val grouped = LinkedHashMap<String, MutableList<CatalogProduct>>()
