@@ -48,6 +48,7 @@ import ru.sixthcup.evotor.data.OrderQueueStore
 import ru.sixthcup.evotor.data.QueueOps
 import ru.sixthcup.evotor.data.QueueOrder
 import ru.sixthcup.evotor.data.FoodRules
+import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CheckoutChoice
@@ -2347,11 +2348,20 @@ class MainActivity : AppCompatActivity() {
                 body.addView(View(this).apply { setBackgroundColor(0xFFF1EBE1.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
             }
 
-            // upsell from backend default (existing data only)
+            // upsell from backend default — never scheme modifiers (syrup/milk products)
+            val modUuids = products.asSequence().flatMap { it.toppings.asSequence() }
+                .mapNotNull { it.evotorUuid?.takeIf { u -> u.isNotBlank() } }.toSet()
+            val modNames = products.asSequence().flatMap { it.toppings.asSequence() }
+                .map { Names.normalize(it.name) }.filter { it.isNotEmpty() }.toSet()
             val upsell = upsellDefault.filter { u ->
                 val uuid = u.evotorUuid?.takeIf { it.isNotBlank() }
                     ?: products.firstOrNull { it.name.equals(u.name, true) }?.uuid
-                uuid != null && Cart.qty(uuid) == 0
+                if (uuid == null || Cart.qty(uuid) != 0) return@filter false
+                if (uuid in modUuids) return@filter false
+                if (Names.normalize(u.name) in modNames) return@filter false
+                val prod = products.firstOrNull { it.uuid == uuid }
+                if (prod?.hideFromMenu == true) return@filter false
+                true
             }.take(6)
             if (upsell.isNotEmpty()) {
                 body.addView(TextView(this).apply {
@@ -2439,6 +2449,10 @@ class MainActivity : AppCompatActivity() {
         }
         Log.i(TAG, "hasFood=false upsellShown=true")
         val inCart = Cart.all().map { it.productUuid }.toSet()
+        val modUuidsRec = products.asSequence().flatMap { it.toppings.asSequence() }
+            .mapNotNull { it.evotorUuid?.takeIf { x -> x.isNotBlank() } }.toSet()
+        val modNamesRec = products.asSequence().flatMap { it.toppings.asSequence() }
+            .map { Names.normalize(it.name) }.filter { it.isNotEmpty() }.toSet()
         val candidates = LinkedHashMap<String, UpsellItem>()
         fun resolveUuid(u: UpsellItem): String? {
             u.evotorUuid?.takeIf { it.isNotBlank() }?.let { return it }
@@ -2451,11 +2465,17 @@ class MainActivity : AppCompatActivity() {
         products.forEach { p ->
             if (p.uuid in inCart) p.upsell.forEach { u ->
                 val id = resolveUuid(u) ?: return@forEach
+                if (id in modUuidsRec) return@forEach
+                if (Names.normalize(u.name) in modNamesRec) return@forEach
+                if (products.firstOrNull { it.uuid == id }?.hideFromMenu == true) return@forEach
                 candidates[id] = u.copy(evotorUuid = id)
             }
         }
         upsellDefault.forEach { u ->
             val id = resolveUuid(u) ?: return@forEach
+            if (id in modUuidsRec) return@forEach
+            if (Names.normalize(u.name) in modNamesRec) return@forEach
+            if (products.firstOrNull { it.uuid == id }?.hideFromMenu == true) return@forEach
             candidates.putIfAbsent(id, u.copy(evotorUuid = id))
         }
         val list = candidates.entries.take(3)
