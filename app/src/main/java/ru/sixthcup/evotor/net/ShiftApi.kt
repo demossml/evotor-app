@@ -116,6 +116,7 @@ object ShiftApi {
             conn.connectTimeout = 4000
             conn.readTimeout = 8000
             conn.setRequestProperty("Accept", "application/json")
+            DeviceHeaders.apply(conn)
             if (body != null) {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")

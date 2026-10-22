@@ -8,6 +8,7 @@ import ru.sixthcup.evotor.ui.ThumbLoader
 class SixthCupApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        instance = this
         // Корзина должна быть доступна DiscountIntegrationService даже если процесс
         // пересоздан на экране оплаты (MainActivity ещё не onCreate).
         Cart.attach(this)
@@ -16,5 +17,11 @@ class SixthCupApp : Application() {
             StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build())
             StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectLeakedClosableObjects().detectLeakedSqlLiteObjects().penaltyLog().build())
         }
+    }
+
+    companion object {
+        @Volatile
+        var instance: SixthCupApp? = null
+            private set
     }
 }

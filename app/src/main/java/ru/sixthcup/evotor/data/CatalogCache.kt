@@ -11,11 +11,15 @@ import java.math.BigDecimal
  * Persist enrichment so after process death offline we keep photos, toppings schemes and upsell.
  */
 object CatalogCache {
-    private const val FILE = "catalog_enrich_v2.json"
+    private const val FILE_PREFIX = "catalog_enrich_v2"
+    private fun fileName(storeUuid: String?): String {
+        val s = storeUuid?.trim().orEmpty()
+        return if (s.isEmpty()) "$FILE_PREFIX.json" else "$FILE_PREFIX-${s.take(36)}.json"
+    }
 
-    fun load(ctx: Context): CatalogApi.Payload? {
+    fun load(ctx: Context, storeUuid: String? = null): CatalogApi.Payload? {
         return try {
-            val f = File(ctx.applicationContext.filesDir, FILE)
+            val f = File(ctx.applicationContext.filesDir, fileName(storeUuid))
             // migrate: prefer v2, fall back to v1 filename
             val src = when {
                 f.isFile && f.length() > 0L -> f
@@ -88,7 +92,7 @@ object CatalogCache {
         }
     }
 
-    fun save(ctx: Context, payload: CatalogApi.Payload) {
+    fun save(ctx: Context, payload: CatalogApi.Payload, storeUuid: String? = null) {
         if (payload.byUuid.isEmpty() && payload.byName.isEmpty()) return
         try {
             fun enrichJson(e: CatalogApi.Enrich): JSONObject {
@@ -119,7 +123,7 @@ object CatalogCache {
                 .put("byName", byName)
                 .put("categoryNames", cats)
                 .put("upsellDefault", upsellJson(payload.upsellDefault))
-            File(ctx.applicationContext.filesDir, FILE).writeText(root.toString())
+            File(ctx.applicationContext.filesDir, fileName(storeUuid ?: payload.storeUuid)).writeText(root.toString())
         } catch (_: Throwable) {
         }
     }

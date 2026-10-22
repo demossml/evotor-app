@@ -239,7 +239,7 @@ class MainActivity : AppCompatActivity() {
         val ctx = applicationContext
         thread(name = "catalog-load") {
             val inv = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
-            val known = lastEnrich ?: CatalogCache.load(ctx)
+            val known = lastEnrich ?: CatalogCache.load(ctx, StoreUuidResolver.peek(ctx))
             if (lastEnrich == null && known != null) {
                 // restore RAM pointer for subsequent merges this process
             }
@@ -268,7 +268,8 @@ class MainActivity : AppCompatActivity() {
                 CatalogApi.Payload(emptyMap(), emptyList())
             }
             if (enrich.byUuid.isEmpty() && enrich.byName.isEmpty()) return@thread
-            CatalogCache.save(ctx, enrich)
+            StoreUuidResolver.remember(ctx, enrich.storeUuid ?: storeUuid)
+            CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
             val merged = CatalogApi.merge(inv, enrich)
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread

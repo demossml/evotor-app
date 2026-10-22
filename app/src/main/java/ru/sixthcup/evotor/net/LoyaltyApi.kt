@@ -22,6 +22,7 @@ object LoyaltyApi {
             conn.readTimeout = 6000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
+            DeviceHeaders.apply(conn)
             conn.outputStream.use { it.write(JSONObject().put("code", code).toString().toByteArray(Charsets.UTF_8)) }
             val status = conn.responseCode
             val body = (if (status in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""

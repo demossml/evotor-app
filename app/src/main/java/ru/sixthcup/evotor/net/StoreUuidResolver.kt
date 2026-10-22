@@ -4,23 +4,23 @@ import android.content.Context
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
+import org.json.JSONObject
 import ru.sixthcup.evotor.BuildConfig
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * UUID магазина (точки) текущего терминала.
  *
- * Нужен, чтобы `GET /api/devices/catalog?storeUuid=…` отдавал товары именно этого магазина:
- * без параметра backend возвращает связки другой точки, `evotorUuid` не совпадают
- * и обогащение (фото, добавки, скрытие модификаторов) не применяется.
+ * Нужен, чтобы catalog/shift/loyalty ходили в backend с uuid ЭТОЙ точки:
+ * иначе при 2–3 кассах приходят чужие product uuid и merge ломается.
  *
  * Источники по порядку:
- *  1. Значение, сохранённое при прошлом успешном разрешении.
- *  2. `BuildConfig.STORE_UUID` — если магазин зафиксирован при сборке (`-PSTORE_UUID=…`).
- *  3. `Settings.Secure` — ключи, которыми Эвотор может публиковать uuid точки.
- *  4. ContentProvider-провайдеры Эвотор: перебираем известные authority/пути и ищем UUID в ответе.
- *
- * Если ничего не найдено — null: запрос уходит без storeUuid (поведение как раньше),
- * но это фиксируется в логе.
+ *  1. Prefs (запомненный).
+ *  2. BuildConfig.STORE_UUID (`-PSTORE_UUID=…` при сборке на точку).
+ *  3. Settings.Secure / Global.
+ *  4. ContentProvider Эвотор.
+ *  5. GET /api/devices/whoami (backend) с device header.
  */
 object StoreUuidResolver {
     private const val TAG = "StoreUuid"
@@ -39,12 +39,14 @@ object StoreUuidResolver {
         "ru.evotor.store.uuid",
     )
 
-    /** authority → пути, которые имеет смысл опросить. */
     private val PROVIDERS = listOf(
         "ru.evotor.evotorpos.settings" to listOf("store", "stores", "shop", "company", "device", "settings"),
         "ru.evotor.evotorpos" to listOf("store", "stores", "company", "device"),
         "ru.evotor.provider" to listOf("store", "stores", "device"),
     )
+
+    /** Только чтение кэша, без side-effects (для HTTP-заголовков). */
+    fun peek(context: Context): String? = cached(context)
 
     fun resolve(context: Context): String? {
         cached(context)?.let { Log.i(TAG, "resolved=$it (cache)"); return it }
@@ -68,11 +70,16 @@ object StoreUuidResolver {
             return it
         }
 
-        Log.w(TAG, "resolved=null — catalog will be requested without storeUuid")
+        fromWhoami(context)?.let {
+            save(context, it)
+            Log.i(TAG, "resolved=$it (whoami)")
+            return it
+        }
+
+        Log.w(TAG, "resolved=null — catalog may use wrong store uuids on multi-store")
         return null
     }
 
-    /** Запомнить uuid, полученный из другого источника (например, если backend вернул его в ответе). */
     fun remember(context: Context, uuid: String?) {
         val v = uuid?.trim().orEmpty()
         if (UUID_RE.matches(v)) {
@@ -82,12 +89,15 @@ object StoreUuidResolver {
     }
 
     private fun cached(context: Context): String? = context
+        .applicationContext
         .getSharedPreferences(PREF, Context.MODE_PRIVATE)
         .getString(KEY, null)
         ?.takeIf { UUID_RE.matches(it) }
 
     private fun save(context: Context, uuid: String) {
-        context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, uuid).apply()
+        context.applicationContext
+            .getSharedPreferences(PREF, Context.MODE_PRIVATE)
+            .edit().putString(KEY, uuid).apply()
     }
 
     private fun fromSecureSettings(context: Context): String? {
@@ -128,5 +138,32 @@ object StoreUuidResolver {
             }
         }
         return null
+    }
+
+    /** Backend helper — only when local sources failed. Blocking; call off main thread. */
+    private fun fromWhoami(context: Context): String? {
+        return try {
+            val url = BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/whoami"
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 3000
+            conn.readTimeout = 4000
+            conn.setRequestProperty("Accept", "application/json")
+            DeviceHeaders.apply(conn, context)
+            val status = conn.responseCode
+            val body = (if (status in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            conn.disconnect()
+            if (status !in 200..299) {
+                Log.w(TAG, "whoami HTTP $status")
+                return null
+            }
+            val o = JSONObject(body)
+            val s = o.optString("storeUuid").trim()
+            if (UUID_RE.matches(s)) s else null
+        } catch (e: Throwable) {
+            Log.w(TAG, "whoami failed: ${e.message}")
+            null
+        }
     }
 }

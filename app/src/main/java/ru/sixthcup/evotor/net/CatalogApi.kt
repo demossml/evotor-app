@@ -29,6 +29,8 @@ object CatalogApi {
         val categoryNames: List<String> = emptyList(),
         /** Fallback for legacy/store UUID mismatches: only unique normalized product names are used. */
         val byName: Map<String, Enrich> = emptyMap(),
+        /** Store echoed by backend (for multi-store remember). */
+        val storeUuid: String? = null,
     )
 
     data class Enrich(
@@ -64,6 +66,7 @@ object CatalogApi {
             conn.readTimeout = 8000
             conn.setRequestProperty("Accept", "application/json")
             if (!storeUuid.isNullOrBlank()) conn.setRequestProperty("X-Evotor-Store-Uuid", storeUuid)
+            DeviceHeaders.apply(conn) // device uuid; store already set above when known
             Log.i("CatalogApi", "catalog request store=${storeUuid ?: "-"}")
             // No Authorization in APK: Evotor Cloud injects it when installed from cabinet.
             // Backend allows catalog without token unless EVOTOR_PROXY_ENFORCE=1.
@@ -197,7 +200,8 @@ object CatalogApi {
             catNames.addAll(seen)
         }
         val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
-        return Payload(map, upsellDefault, catNames, named)
+        val storeEcho = root.optString("storeUuid").trim().ifBlank { null }
+        return Payload(map, upsellDefault, catNames, named, storeEcho)
     }
 
     private fun parseToppings(a: JSONArray?): List<Topping> {
