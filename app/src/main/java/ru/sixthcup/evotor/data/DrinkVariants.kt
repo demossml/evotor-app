@@ -86,7 +86,7 @@ object DrinkVariants {
             .mapNotNull { it.evotorUuid?.takeIf { u -> u.isNotBlank() } }
             .toSet()
         val modifierNames = products.asSequence()
-            .flatMap { it.toppings.asSequence() }
+            .flatMap { it.toppings.asSequence().filter { t -> !t.zeroOption } }
             .map { Names.normalize(it.name) }
             .filter { it.isNotEmpty() }
             .toSet()

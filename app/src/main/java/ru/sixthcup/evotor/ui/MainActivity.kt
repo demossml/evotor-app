@@ -765,7 +765,7 @@ class MainActivity : AppCompatActivity() {
     /** Поиск/чипы (если набор групп изменился) + строки списка. */
     private fun refreshChromeAndRows(toTop: Boolean) {
         // Группы: из Evotor parent + из merge categoryName (6.7).
-        val groups = products.mapNotNull { it.groupName?.takeIf { n -> n.isNotBlank() } }
+        val groups = products.filter { !it.hideFromMenu }.mapNotNull { it.groupName?.takeIf { n -> n.isNotBlank() } }
             .distinct()
             .sorted()
         if (groups != groupsCache || chipViews.isEmpty()) {
@@ -2372,7 +2372,7 @@ class MainActivity : AppCompatActivity() {
             // upsell from backend default — never scheme modifiers (syrup/milk products)
             val modUuids = products.asSequence().flatMap { it.toppings.asSequence() }
                 .mapNotNull { it.evotorUuid?.takeIf { u -> u.isNotBlank() } }.toSet()
-            val modNames = products.asSequence().flatMap { it.toppings.asSequence() }
+            val modNames = products.asSequence().flatMap { it.toppings.asSequence().filter { t -> !t.zeroOption } }
                 .map { Names.normalize(it.name) }.filter { it.isNotEmpty() }.toSet()
             val upsell = upsellDefault.filter { u ->
                 val uuid = u.evotorUuid?.takeIf { it.isNotBlank() }
@@ -2472,7 +2472,7 @@ class MainActivity : AppCompatActivity() {
         val inCart = Cart.all().map { it.productUuid }.toSet()
         val modUuidsRec = products.asSequence().flatMap { it.toppings.asSequence() }
             .mapNotNull { it.evotorUuid?.takeIf { x -> x.isNotBlank() } }.toSet()
-        val modNamesRec = products.asSequence().flatMap { it.toppings.asSequence() }
+        val modNamesRec = products.asSequence().flatMap { it.toppings.asSequence().filter { t -> !t.zeroOption } }
             .map { Names.normalize(it.name) }.filter { it.isNotEmpty() }.toSet()
         val candidates = LinkedHashMap<String, UpsellItem>()
         fun resolveUuid(u: UpsellItem): String? {
