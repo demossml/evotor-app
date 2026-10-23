@@ -139,7 +139,11 @@ object CatalogCache {
                     .put("groupKey", t.groupKey)
                     .put("maxCount", t.maxCount)
                     .put("evotorUuid", t.evotorUuid ?: JSONObject.NULL)
-                    .put("required", t.required),
+                    .put("required", t.required)
+                    .put("isDefault", t.isDefault)
+                    .put("zeroOption", t.zeroOption)
+                    .put("available", t.available)
+                    .put("productId", t.productId ?: JSONObject.NULL),
             )
         }
         return a
@@ -174,6 +178,10 @@ object CatalogCache {
                     maxCount = o.optInt("maxCount", 1).coerceAtLeast(1),
                     evotorUuid = o.optString("evotorUuid").ifBlank { null },
                     required = o.optBoolean("required", false),
+                    isDefault = o.optBoolean("isDefault", false),
+                    zeroOption = o.optBoolean("zeroOption", false),
+                    available = if (o.has("available")) o.optBoolean("available", true) else true,
+                    productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
                 ),
             )
         }

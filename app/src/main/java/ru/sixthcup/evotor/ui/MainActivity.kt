@@ -67,6 +67,8 @@ import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
 import ru.sixthcup.evotor.scanner.ScannerReceiver
 import ru.sixthcup.evotor.sell.SellLauncher
+import ru.evotor.framework.receipt.Receipt
+import ru.evotor.framework.receipt.ReceiptApi
 import java.math.BigDecimal
 import java.math.RoundingMode
 import kotlin.concurrent.thread
@@ -202,7 +204,7 @@ class MainActivity : AppCompatActivity() {
             ViewCompat.requestApplyInsets(frame)
 
             screen = when {
-                PendingPayment.active(this) -> Screen.PAYMENT
+                PendingPayment.active(this) -> Screen.ORDER // оплата только на экране Эвотор; pending обрабатывает onResume
                 // Витрина по умолчанию (PWA-like); карта — chip/sheet, не стартовый экран
                 else -> Screen.ORDER
             }
@@ -917,7 +919,16 @@ class MainActivity : AppCompatActivity() {
         val known = setOf("milk", "молоко", "syrup", "сироп", "sugar", "сахар", "topping", "extra", "other", "добавки", "добавка")
         fun toOpts(vararg keys: String) = keys.flatMap { k ->
             byGroup[k].orEmpty().map {
-                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() }, required = it.required)
+                OptionPicker.Opt(
+                    key = "t:${it.id}",
+                    label = it.name,
+                    price = it.priceRub,
+                    evotorUuid = it.evotorUuid?.takeIf { u -> u.isNotBlank() },
+                    isDefault = it.isDefault,
+                    required = it.required,
+                    zeroOption = it.zeroOption,
+                    available = it.available,
+                )
             }
         }
         val restExtra = byGroup
@@ -925,7 +936,16 @@ class MainActivity : AppCompatActivity() {
             .values
             .flatten()
             .map {
-                OptionPicker.Opt("t:${it.id}", it.name, it.priceRub, it.evotorUuid?.takeIf { u -> u.isNotBlank() }, required = it.required)
+                OptionPicker.Opt(
+                    key = "t:${it.id}",
+                    label = it.name,
+                    price = it.priceRub,
+                    evotorUuid = it.evotorUuid?.takeIf { u -> u.isNotBlank() },
+                    isDefault = it.isDefault,
+                    required = it.required,
+                    zeroOption = it.zeroOption,
+                    available = it.available,
+                )
             }
         // Merge Evotor #opt= inventory items with backend toppings (do not drop one for the other).
         return OptionPicker.Opts(
@@ -3014,12 +3034,15 @@ class MainActivity : AppCompatActivity() {
         paying = true
         // Выгода комбо должна быть уже записана: её применяет DiscountIntegrationService.
         CheckoutChoice.saveCombo(this, comboDiscountRub())
+        // Оплата только штатным экраном Эвотор (SellLauncher → createIntentForSellReceiptPayment).
+        // Свой экран Screen.PAYMENT больше не показываем.
         SellLauncher.openSellReceipt(this, free, spend, amount) { ok, msg ->
             paying = false
             if (ok) {
                 PendingPayment.set(this)
-                screen = Screen.PAYMENT
-                safeRender()
+                // Уходим на экран Эвотор; по возврату onResume решит: успех → QUEUE, отмена → ORDER+корзина.
+                screen = Screen.ORDER
+                // не safeRender — activity уходит в оплату
             } else {
                 notice = msg; noticeKind = Kind.ERROR
                 if (screen == Screen.ORDER) safeRender()
@@ -4396,7 +4419,35 @@ class MainActivity : AppCompatActivity() {
         if (::root.isInitialized) loadShiftInfo()
         try { val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN); if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED) else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f) } catch (_: Throwable) {}
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
-        if (::root.isInitialized && PendingPayment.active(this) && screen != Screen.PAYMENT) { screen = Screen.PAYMENT; safeRender() }
+        if (::root.isInitialized && PendingPayment.active(this)) {
+            // Вернулись с экрана оплаты Эвотор.
+            val sellOpen = try {
+                ReceiptApi.getReceipt(this, Receipt.Type.SELL) != null
+            } catch (_: Throwable) {
+                null
+            }
+            when (sellOpen) {
+                false -> {
+                    // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
+                    Cart.clear()
+                    PendingPayment.clear(this)
+                    screen = Screen.QUEUE
+                    safeRender()
+                }
+                true -> {
+                    // Чек продажи ещё открыт — оплата отменена/не завершена, корзину оставляем.
+                    PendingPayment.clear(this)
+                    screen = Screen.ORDER
+                    safeRender()
+                }
+                null -> {
+                    // Не удалось проверить — не теряем корзину, уходим в заказ.
+                    PendingPayment.clear(this)
+                    screen = Screen.ORDER
+                    safeRender()
+                }
+            }
+        }
         // Каталог/цены не должны «залёживаться» на кассе, которая днями не закрывает приложение.
         if (::root.isInitialized && products.isNotEmpty() && System.currentTimeMillis() - catalogLoadedAt > CATALOG_STALE_MS && System.currentTimeMillis() - catalogAttemptAt > CATALOG_STALE_MS) loadProducts()
     }
@@ -4407,7 +4458,7 @@ class MainActivity : AppCompatActivity() {
     override fun onBackPressed() {
         when (screen) {
             Screen.ORDER -> { notice = null; screen = Screen.CARD; safeRender() }
-            Screen.PAYMENT -> {}  // из ожидания оплаты выходят только кнопками
+            Screen.PAYMENT -> { screen = Screen.ORDER; safeRender() } // legacy; обычно не попадаем
             Screen.DONE -> { screen = Screen.ORDER; safeRender() }
             Screen.SHIFT -> { screen = Screen.ORDER; safeRender() }
             Screen.QUEUE -> { screen = Screen.ORDER; safeRender() }

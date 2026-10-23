@@ -30,9 +30,19 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         val evotorUuid: String?,
         val isDefault: Boolean = false,
         val required: Boolean = false,
+        val zeroOption: Boolean = false,
+        val available: Boolean = true,
     ) {
-        /** Провести фискально можно только реальный товар; бесплатную схему — как подпись. */
-        val sellable: Boolean get() = !evotorUuid.isNullOrBlank() || price.signum() == 0
+        /**
+         * Фискально: реальный uuid; или zero-option / цена 0 (не в чек отдельной строкой).
+         * available=false с backend — disabled.
+         */
+        val sellable: Boolean
+            get() {
+                if (!available) return false
+                if (zeroOption || price.signum() == 0) return true
+                return !evotorUuid.isNullOrBlank()
+            }
     }
 
     data class Opts(
@@ -73,12 +83,14 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         this.variant = initial?.let { want -> this.variants.firstOrNull { it.uuid == want.uuid } }
             ?: this.variants.firstOrNull { it.defaultVariant }
             ?: this.variants.firstOrNull()
-        defMilk = opts.milk.firstOrNull { it.required && it.sellable }
-            ?: opts.milk.firstOrNull { it.isDefault } ?: opts.milk.firstOrNull { it.price.signum() == 0 }
-        defSyrup = opts.syrup.firstOrNull { it.required && it.sellable }
-            ?: opts.syrup.firstOrNull { it.isDefault } ?: opts.syrup.firstOrNull { it.price.signum() == 0 }
-        defSugar = opts.sugar.firstOrNull { it.required && it.sellable }
-            ?: opts.sugar.firstOrNull { it.isDefault } ?: opts.sugar.firstOrNull { it.price.signum() == 0 }
+        fun pickDefault(list: List<Opt>): Opt? =
+            list.firstOrNull { it.isDefault && it.sellable }
+                ?: list.firstOrNull { it.required && it.sellable }
+                ?: list.firstOrNull { (it.zeroOption || it.price.signum() == 0) && it.sellable }
+                ?: list.firstOrNull { it.sellable }
+        defMilk = pickDefault(opts.milk)
+        defSyrup = pickDefault(opts.syrup)
+        defSugar = pickDefault(opts.sugar)
         // При редактировании восстанавливаем отмеченные ранее опции (в корзине они лежат отдельными строками).
         milk = opts.milk.firstOrNull { it.key in preselect } ?: defMilk
         syrup = opts.syrup.firstOrNull { it.key in preselect } ?: defSyrup
@@ -121,8 +133,10 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         return sb.toString()
     }
 
-    /** Все выбранные опции с товаром Эвотор — их нужно добавить отдельными строками чека. */
-    fun chosen(): List<Opt> = listOfNotNull(milk, syrup, sugar) + extras.values
+    /** Выбранные опции с товаром Эвотор — отдельные строки чека (zero-option без uuid не входят). */
+    fun chosen(): List<Opt> =
+        (listOfNotNull(milk, syrup, sugar) + extras.values)
+            .filter { !it.evotorUuid.isNullOrBlank() && !it.zeroOption }
 
     private fun render() {
         removeAllViews()

@@ -68,6 +68,10 @@ data class Topping(
     val maxCount: Int = 2,
     val evotorUuid: String? = null,
     val required: Boolean = false,
+    val isDefault: Boolean = false,
+    val zeroOption: Boolean = false,
+    val available: Boolean = true,
+    val productId: Int? = null,
 )
 
 data class UpsellItem(

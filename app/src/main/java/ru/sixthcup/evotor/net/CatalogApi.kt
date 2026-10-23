@@ -219,9 +219,13 @@ object CatalogApi {
                     name = o.optString("name"),
                     priceRub = BigDecimal.valueOf(price),
                     groupKey = o.optString("groupKey", "extra"),
-                    maxCount = o.optInt("maxCount", 2),
+                    maxCount = o.optInt("maxCount", 2).coerceAtLeast(1),
                     evotorUuid = o.optString("evotorUuid").ifBlank { null },
                     required = o.optBoolean("required", false),
+                    isDefault = o.optBoolean("isDefault", false),
+                    zeroOption = o.optBoolean("zeroOption", false),
+                    available = if (o.has("available")) o.optBoolean("available", true) else true,
+                    productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
                 )
             )
         }
