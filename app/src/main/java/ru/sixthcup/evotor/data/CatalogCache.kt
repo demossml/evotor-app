@@ -47,7 +47,9 @@ object CatalogCache {
                     featured = o.optBoolean("featured", false),
                     description = optStr("description"),
                     isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
-                    hideFromMenu = o.optBoolean("hideFromMenu", false),
+                    hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isGroup", false),
+                    isGroup = o.optBoolean("isGroup", false),
+                    parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
                 )
             }
             fun parseEnrich(o: JSONObject): CatalogApi.Enrich {
@@ -65,7 +67,9 @@ object CatalogCache {
                     featured = o.optBoolean("featured", false),
                     description = str("description"),
                     isFood = if (o.has("isFood") && !o.isNull("isFood")) o.optBoolean("isFood") else null,
-                    hideFromMenu = o.optBoolean("hideFromMenu", false),
+                    hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isGroup", false),
+                    isGroup = o.optBoolean("isGroup", false),
+                    parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
                 )
             }
             val named = linkedMapOf<String, CatalogApi.Enrich>()
@@ -107,6 +111,8 @@ object CatalogCache {
                     .put("toppings", toppingsJson(e.toppings))
                     .put("upsell", upsellJson(e.upsell))
                     .put("hideFromMenu", e.hideFromMenu)
+                    .put("isGroup", e.isGroup)
+                    .put("parentProductId", e.parentProductId ?: JSONObject.NULL)
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
                 if (e.isFood != null) o.put("isFood", e.isFood)

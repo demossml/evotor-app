@@ -71,6 +71,13 @@ object CatalogApi {
         val sizeValue: Int? = null,
         val sizeUnit: String? = null,
         val hideFromMenu: Boolean = false,
+        /**
+         * Backend products.is_group (миграция 027): папка Эвотора (Молоко/Сиропы/…),
+         * не SKU. На витрине не показываем — как isModifier.
+         */
+        val isGroup: Boolean = false,
+        /** Backend products.parent_product_id — локальный id группы-родителя (не Evotor uuid). */
+        val parentProductId: Int? = null,
     )
 
     fun fetch(storeUuid: String? = null): Payload {
@@ -147,7 +154,8 @@ object CatalogApi {
                 featured = featured,
                 // Схема добавок с backend = можно открывать item-sheet с опциями.
                 supportsMods = p.supportsMods || tops.isNotEmpty(),
-                hideFromMenu = p.hideFromMenu || (e?.hideFromMenu ?: false),
+                // isGroup/isModifier с backend → не плитка; parentUuid в Inventory уже даёт groupName.
+                hideFromMenu = p.hideFromMenu || (e?.hideFromMenu ?: false) || (e?.isGroup == true),
                 // Admin-managed product groups/variants are authoritative; do not require
                 // staff to maintain #group/#size markers manually in Evotor descriptions.
                 variantGroup = e?.groupId?.let { "admin-group:$it" } ?: groupId?.let { "admin-group:$it" } ?: p.variantGroup,
@@ -211,7 +219,11 @@ object CatalogApi {
                 variantSort = if (o.has("variantSort")) o.optInt("variantSort") else null,
                 sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
                 sizeUnit = o.optString("sizeUnit").ifBlank { null },
-                hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isModifier", false),
+                hideFromMenu = o.optBoolean("hideFromMenu", false)
+                    || o.optBoolean("isModifier", false)
+                    || o.optBoolean("isGroup", false),
+                isGroup = o.optBoolean("isGroup", false),
+                parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
             )
             enrichAll.add(enrich)
             if (uuid.isNotEmpty()) map[uuid] = enrich
