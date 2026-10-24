@@ -273,6 +273,11 @@ class MainActivity : AppCompatActivity() {
             StoreUuidResolver.remember(ctx, enrich.storeUuid ?: storeUuid)
             CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
             val merged = CatalogApi.merge(inv, enrich)
+            for (mp in merged) {
+                if (mp.groupId != null || mp.toppings.isNotEmpty()) {
+                    Log.i("SC_TOP", "merge name=${mp.name} uuid=${mp.uuid.take(8)} tops=${mp.toppings.size} groupId=${mp.groupId}")
+                }
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 lastEnrich = enrich
@@ -968,6 +973,7 @@ class MainActivity : AppCompatActivity() {
             // Prefer variant that already carries toppings from backend merge.
             variants.firstOrNull { it.toppings.isNotEmpty() } ?: p
         ) else OptionPicker.Opts()
+        Log.i("SC_TOP", "sheet base=${p.name} variants=${variants.size} topsPerVariant=${variants.map { it.toppings.size }} opts(milk=${opts.milk.size},syrup=${opts.syrup.size},extra=${opts.extra.size})")
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
@@ -1054,6 +1060,15 @@ class MainActivity : AppCompatActivity() {
             qtyLabel.text = qty.toString()
         }
         picker.onChange = { paint() }
+        // Смена объёма: пересчитать opts для выбранного варианта (rebind), не оставлять
+        // opts от первого variant на весь sheet.
+        picker.onVariantChanged = { selected ->
+            Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${selected.toppings.size}")
+            val newOpts = if (selected.supportsMods || selected.toppings.isNotEmpty() || !variantModel.options.isEmpty)
+                optionsFor(selected) else OptionPicker.Opts()
+            picker.rebindOpts(selected, newOpts)
+            paint()
+        }
         paint()
 
         val foot = LinearLayout(this).apply {

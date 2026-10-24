@@ -29,6 +29,23 @@ object CatalogApi {
         val categoryNames: List<String> = emptyList(),
         /** Fallback for legacy/store UUID mismatches: only unique normalized product names are used. */
         val byName: Map<String, Enrich> = emptyMap(),
+        /**
+         * Точный fallback по полному имени с объёмом (`Names.normalizeExact`):
+         * «Капучино 350 мл» → «капучино 350 мл». Закрывает случай, когда uuid разошёлся,
+         * а volume-stripped `byName` даёт коллизию «капучино» для всех размеров.
+         */
+        val byNameExact: Map<String, Enrich> = emptyMap(),
+        /**
+         * Group-донор toppings: groupId → toppings (первый enrich в группе с непустыми
+         * toppings). Используется, когда uuid и имя размера разошлись, но groupId общий.
+         */
+        val byGroupId: Map<Int, List<Topping>> = emptyMap(),
+        /**
+         * Разрешение неоднозначного volume-stripped имени к единственному groupId:
+         * «капучино» (250/350/400) → groupId. Заполняется ТОЛЬКО если все продукты с этим
+         * stripped-именем принадлежат одной группе (иначе — риск склеить чужое).
+         */
+        val nameGroupId: Map<String, Int> = emptyMap(),
         /** Store echoed by backend (for multi-store remember). */
         val storeUuid: String? = null,
     )
@@ -93,32 +110,50 @@ object CatalogApi {
     }
 
     fun merge(products: List<CatalogProduct>, payload: Payload): List<CatalogProduct> {
-        if (payload.byUuid.isEmpty() && payload.byName.isEmpty() && payload.categoryNames.isEmpty()) return products
+        val hasAny = payload.byUuid.isNotEmpty() || payload.byName.isNotEmpty() ||
+            payload.byNameExact.isNotEmpty() || payload.byGroupId.isNotEmpty() ||
+            payload.nameGroupId.isNotEmpty() || payload.categoryNames.isNotEmpty()
+        if (!hasAny) return products
         val merged = products.map { p ->
-            val e = payload.byUuid[p.uuid] ?: payload.byName[Names.normalize(p.name)] ?: return@map p
-            val featured = p.featured || e.featured ||
-                ProductMarkers.isFocus(e.description) ||
-                ProductMarkers.isCombo(p.name, e.description)
-            val tops = e.toppings.ifEmpty { p.toppings }
+            // Порядок склейки: uuid → точное имя с объёмом → volume-stripped имя.
+            val e = payload.byUuid[p.uuid]
+                ?: payload.byNameExact[Names.normalizeExact(p.name)]
+                ?: payload.byName[Names.normalize(p.name)]
+            // groupId для group-fallback: matched → e.groupId, иначе локальный p.groupId,
+            // иначе резолв неоднозначного stripped-имени к единственной группе.
+            val groupId = e?.groupId ?: p.groupId ?: payload.nameGroupId[Names.normalize(p.name)]
+            // toppings: matched → e.toppings; иначе group-донор по groupId; иначе локальные.
+            val tops = (e?.toppings ?: emptyList())
+                .ifEmpty { groupId?.let { payload.byGroupId[it] } ?: emptyList() }
+                .ifEmpty { p.toppings }
+            if (e == null && tops.isEmpty()) return@map p
+            val featured = if (e != null) {
+                p.featured || e.featured ||
+                    ProductMarkers.isFocus(e.description) ||
+                    ProductMarkers.isCombo(p.name, e.description)
+            } else {
+                p.featured
+            }
             p.copy(
-                imageUrl = e.imageUrl ?: p.imageUrl,
-                recipe = e.recipe?.takeIf { it.isNotBlank() } ?: p.recipe,
+                imageUrl = e?.imageUrl ?: p.imageUrl,
+                recipe = e?.recipe?.takeIf { it.isNotBlank() } ?: p.recipe,
                 toppings = tops,
-                upsell = e.upsell.ifEmpty { p.upsell },
-                countsAsCupServer = e.countsAsCup,
-                freeEligible = e.freeEligible ?: p.freeEligible,
+                upsell = e?.upsell?.ifEmpty { p.upsell } ?: p.upsell,
+                countsAsCupServer = e?.countsAsCup,
+                freeEligible = e?.freeEligible ?: p.freeEligible,
                 // Если в Эвотор товар без parent-группы — подставляем категорию 6.7.
-                groupName = p.groupName?.takeIf { it.isNotBlank() } ?: e.categoryName,
-                isFood = FoodRules.isFood(p.name, p.groupName, e.categoryName, e.description ?: p.description, e.isFood),
+                groupName = p.groupName?.takeIf { it.isNotBlank() } ?: e?.categoryName,
+                isFood = if (e != null) FoodRules.isFood(p.name, p.groupName, e.categoryName, e.description ?: p.description, e.isFood) else p.isFood,
                 featured = featured,
                 // Схема добавок с backend = можно открывать item-sheet с опциями.
                 supportsMods = p.supportsMods || tops.isNotEmpty(),
-                hideFromMenu = p.hideFromMenu || e.hideFromMenu,
+                hideFromMenu = p.hideFromMenu || (e?.hideFromMenu ?: false),
                 // Admin-managed product groups/variants are authoritative; do not require
                 // staff to maintain #group/#size markers manually in Evotor descriptions.
-                variantGroup = e.groupId?.let { "admin-group:$it" } ?: p.variantGroup,
-                sizeMl = e.sizeValue?.takeIf { e.sizeUnit.equals("ml", true) || e.sizeUnit.isNullOrBlank() } ?: p.sizeMl,
-                optLabel = e.variantLabel?.takeIf { it.isNotBlank() } ?: p.optLabel,
+                variantGroup = e?.groupId?.let { "admin-group:$it" } ?: groupId?.let { "admin-group:$it" } ?: p.variantGroup,
+                sizeMl = e?.let { en -> en.sizeValue?.takeIf { en.sizeUnit.equals("ml", true) || en.sizeUnit.isNullOrBlank() } } ?: p.sizeMl,
+                optLabel = e?.variantLabel?.takeIf { it.isNotBlank() } ?: p.optLabel,
+                groupId = groupId,
             )
         }
         return applySoftFocus(merged)
@@ -146,6 +181,9 @@ object CatalogApi {
         val map = HashMap<String, Enrich>()
         val named = LinkedHashMap<String, Enrich>()
         val ambiguousNames = HashSet<String>()
+        val namedExact = LinkedHashMap<String, Enrich>()
+        val ambiguousExactNames = HashSet<String>()
+        val enrichAll = ArrayList<Enrich>()
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
             val uuid = o.optString("evotorUuid").trim()
@@ -175,13 +213,41 @@ object CatalogApi {
                 sizeUnit = o.optString("sizeUnit").ifBlank { null },
                 hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isModifier", false),
             )
+            enrichAll.add(enrich)
             if (uuid.isNotEmpty()) map[uuid] = enrich
             val nameKey = Names.normalize(productName)
             if (nameKey.isNotEmpty()) {
                 if (named.containsKey(nameKey)) ambiguousNames.add(nameKey) else named[nameKey] = enrich
             }
+            val exactKey = Names.normalizeExact(productName)
+            if (exactKey.isNotEmpty()) {
+                if (namedExact.containsKey(exactKey)) {
+                    // Два разных товара на один точный ключ — не клеить наугад.
+                    if (!ambiguousExactNames.contains(exactKey)) {
+                        Log.w("CatalogApi", "catalog name collision on exact key '$exactKey' — skip name fallback")
+                    }
+                    ambiguousExactNames.add(exactKey)
+                } else {
+                    namedExact[exactKey] = enrich
+                }
+            }
         }
         ambiguousNames.forEach { named.remove(it) }
+        ambiguousExactNames.forEach { namedExact.remove(it) }
+        // Group-донор: groupId → первый enrich с непустыми toppings;
+        // и резолв неоднозначного stripped-имени к единственной группе (если группа одна).
+        val groupTops = LinkedHashMap<Int, List<Topping>>()
+        val strippedToGroups = HashMap<String, MutableSet<Int>>()
+        for (e in enrichAll) {
+            val g = e.groupId ?: continue
+            if (e.toppings.isNotEmpty() && !groupTops.containsKey(g)) groupTops[g] = e.toppings
+            val stripped = Names.normalize(e.name)
+            if (stripped.isNotEmpty()) strippedToGroups.getOrPut(stripped) { HashSet() }.add(g)
+        }
+        val nameGroupId = HashMap<String, Int>()
+        for ((stripped, groups) in strippedToGroups) {
+            if (groups.size == 1) nameGroupId[stripped] = groups.first()
+        }
         val catNames = ArrayList<String>()
         val cats = root.optJSONArray("categories")
         if (cats != null) {
@@ -201,7 +267,16 @@ object CatalogApi {
         }
         val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
         val storeEcho = root.optString("storeUuid").trim().ifBlank { null }
-        return Payload(map, upsellDefault, catNames, named, storeEcho)
+        return Payload(
+            byUuid = map,
+            upsellDefault = upsellDefault,
+            categoryNames = catNames,
+            byName = named,
+            byNameExact = namedExact,
+            byGroupId = groupTops,
+            nameGroupId = nameGroupId,
+            storeUuid = storeEcho,
+        )
     }
 
     private fun parseToppings(a: JSONArray?): List<Topping> {

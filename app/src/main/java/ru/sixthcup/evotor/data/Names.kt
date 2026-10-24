@@ -27,6 +27,19 @@ object Names {
         return s.replace(Regex("\\s+"), " ").trim()
     }
 
+    /**
+     * Нормализация БЕЗ срезания объёма — для точного сопоставления размеров:
+     * «Капучино 350 мл» → «капучино 350 мл» (NFKC, lower, ё→е, схлопнуты пробелы,
+     * число + мл/ml сохранены). Нужна как fallback между uuid и volume-stripped
+     * [normalize]: последний для размеров даёт коллизию «капучино» и выпадает.
+     */
+    fun normalizeExact(value: String?): String =
+        Normalizer.normalize(value.orEmpty(), Normalizer.Form.NFKC)
+            .lowercase(Locale.forLanguageTag("ru-RU"))
+            .replace('ё', 'е')
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
     /** Совпадает ли название товара с названием добавки (с точностью до нормализации). */
     fun sameName(a: String?, b: String?): Boolean {
         val na = normalize(a)

@@ -52,6 +52,8 @@ data class CatalogProduct(
     val imageUrl2: String? = null,
     /** Еда (выпечка/десерт) — по [FoodRules]; нужно для решения «показывать ли upsell». */
     val isFood: Boolean = false,
+    /** Backend product group id (6.7 admin) — для group-fallback toppings при рассинхроне uuid/имени. */
+    val groupId: Int? = null,
 ) {
     /** Товар-определение комбо: продаётся не сам, а набором из двух позиций со скидкой. */
     val isComboDefinition: Boolean get() = comboDrinkUuid != null && comboFoodUuid != null

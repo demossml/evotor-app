@@ -53,6 +53,8 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     )
 
     var onChange: (() -> Unit)? = null
+    /** Вызывается при смене объёма/variant — хост пересчитывает opts и делает rebind. */
+    var onVariantChanged: ((CatalogProduct) -> Unit)? = null
 
     private var variants: List<CatalogProduct> = emptyList()
     private var opts: Opts = Opts()
@@ -83,11 +85,6 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         this.variant = initial?.let { want -> this.variants.firstOrNull { it.uuid == want.uuid } }
             ?: this.variants.firstOrNull { it.defaultVariant }
             ?: this.variants.firstOrNull()
-        fun pickDefault(list: List<Opt>): Opt? =
-            list.firstOrNull { it.isDefault && it.sellable }
-                ?: list.firstOrNull { it.required && it.sellable }
-                ?: list.firstOrNull { (it.zeroOption || it.price.signum() == 0) && it.sellable }
-                ?: list.firstOrNull { it.sellable }
         defMilk = pickDefault(opts.milk)
         defSyrup = pickDefault(opts.syrup)
         defSugar = pickDefault(opts.sugar)
@@ -97,6 +94,33 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         sugar = opts.sugar.firstOrNull { it.key in preselect } ?: defSugar
         extras.clear()
         opts.extra.filter { it.key in preselect || (it.required && it.sellable) }.forEach { extras[it.key] = it }
+        render()
+    }
+
+    private fun pickDefault(list: List<Opt>): Opt? =
+        list.firstOrNull { it.isDefault && it.sellable }
+            ?: list.firstOrNull { it.required && it.sellable }
+            ?: list.firstOrNull { (it.zeroOption || it.price.signum() == 0) && it.sellable }
+            ?: list.firstOrNull { it.sellable }
+
+    /**
+     * Обновить опции при смене объёма, не сбрасывая уже выбранные milk/syrup/extras,
+     * если их ключи остались в новом наборе. В отличие от [bind] не трогает variants.
+     */
+    fun rebindOpts(variant: CatalogProduct, newOpts: Opts) {
+        this.opts = newOpts
+        this.variant = this.variants.firstOrNull { it.uuid == variant.uuid } ?: variant
+        defMilk = pickDefault(newOpts.milk)
+        defSyrup = pickDefault(newOpts.syrup)
+        defSugar = pickDefault(newOpts.sugar)
+        milk = newOpts.milk.firstOrNull { it.key == milk?.key } ?: defMilk
+        syrup = newOpts.syrup.firstOrNull { it.key == syrup?.key } ?: defSyrup
+        sugar = newOpts.sugar.firstOrNull { it.key == sugar?.key } ?: defSugar
+        val kept = LinkedHashMap<String, Opt>()
+        newOpts.extra.forEach { o -> if (extras.containsKey(o.key)) kept[o.key] = o }
+        newOpts.extra.filter { it.required && it.sellable }.forEach { kept[it.key] = it }
+        extras.clear()
+        extras.putAll(kept)
         render()
     }
 
@@ -153,8 +177,13 @@ class OptionPicker(context: Context) : LinearLayout(context) {
                     toggle = false,
                 ) {
                     variant = v
-                    render()
-                    onChange?.invoke()
+                    if (onVariantChanged != null) {
+                        // Хост пересчитает opts для выбранного объёма и сделает rebind (render внутри).
+                        onVariantChanged?.invoke(v)
+                    } else {
+                        render()
+                        onChange?.invoke()
+                    }
                 }
             }, 3)
         }
