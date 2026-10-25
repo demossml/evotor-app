@@ -61,6 +61,7 @@ import ru.sixthcup.evotor.data.Combo
 import ru.sixthcup.evotor.data.Combos
 import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.InventoryRepository
+import ru.sixthcup.evotor.data.MenuTabs
 import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.data.ReceiptIssue
 import ru.sixthcup.evotor.data.ReceiptValidator
@@ -128,6 +129,8 @@ class MainActivity : AppCompatActivity() {
     private var chipsRow: LinearLayout? = null
     private val chipViews = ArrayList<Pair<String?, TextView>>()
     private var groupsCache: List<String> = emptyList()
+    /** Настройка вкладок, под которую построены чипы: меняется — чипы перестраиваем. */
+    private var menuCache: CatalogApi.Menu? = null
     private var recycler: RecyclerView? = null
     private var adapter: CatalogAdapter? = null
     private var searchRunnable: Runnable? = null
@@ -241,6 +244,13 @@ class MainActivity : AppCompatActivity() {
         products = list
         variantModel = DrinkVariants.build(list)
         combos = Combos.from(list)
+        // Диагностика витрины: сколько плиток, сколько строк присоединено к карточкам
+        // и сколько дублей объёма отброшено. Раз на обновление каталога, не на кадр.
+        Log.i(
+            TAG,
+            "menu_tiles tiles=${variantModel.tiles.size} variantsLinked=${variantModel.attachedVariants} " +
+                "duplicatesDropped=${variantModel.droppedDuplicates} products=${list.size}",
+        )
     }
 
     /**
@@ -845,11 +855,14 @@ class MainActivity : AppCompatActivity() {
     /** Поиск/чипы (если набор групп изменился) + строки списка. */
     private fun refreshChromeAndRows(toTop: Boolean) {
         // Группы: из Evotor parent + из merge categoryName (6.7).
-        val groups = products.filter { !it.hideFromMenu }.mapNotNull { it.groupName?.takeIf { n -> n.isNotBlank() } }
+        val labels = products.filter { !it.hideFromMenu }.mapNotNull { it.groupName?.takeIf { n -> n.isNotBlank() } }
             .distinct()
-            .sorted()
-        if (groups != groupsCache || chipViews.isEmpty()) {
+        // Порядок и чип «Всё» — из админки (`menu`); без настройки — алфавит и «Всё», как раньше.
+        val menu = lastEnrich?.menu
+        val groups = MenuTabs.order(labels, products, menu)
+        if (groups != groupsCache || menu != menuCache || chipViews.isEmpty()) {
             groupsCache = groups
+            menuCache = menu
             rebuildChips()
         }
         refreshRows(toTop)
@@ -861,6 +874,10 @@ class MainActivity : AppCompatActivity() {
         row.removeAllViews(); chipViews.clear()
         if (group == GROUP_COMBOS && combos.isEmpty()) group = null
         if (group != null && group != GROUP_COMBOS && group !in groupsCache) group = null
+        // Без чипа «Всё» список не должен остаться «без выбранной вкладки»: открываем первую группу.
+        if (group == null && groupsCache.isNotEmpty() && !MenuTabs.showAll(lastEnrich?.menu)) {
+            group = groupsCache.first()
+        }
         fun add(label: String, value: String?) {
             val tv = TextView(this).apply {
                 text = label
@@ -878,7 +895,7 @@ class MainActivity : AppCompatActivity() {
             row.addView(tv, LinearLayout.LayoutParams(WRAP, dp(38)).apply { rightMargin = dp(6) })
             chipViews.add(value to tv)
         }
-        add("Всё", null)
+        if (MenuTabs.showAll(lastEnrich?.menu)) add("Всё", null)
         if (combos.isNotEmpty()) add("Комбо", GROUP_COMBOS)
         groupsCache.forEach { add(it, it) }
         updateChipStyles()

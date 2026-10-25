@@ -60,6 +60,24 @@ object CatalogApi {
         val groupByProductId: Map<Int, Int> = emptyMap(),
         /** `groups[].variants[].evotorUuid` → groupId (fallback для сопоставления по uuid). */
         val groupByUuid: Map<String, Int> = emptyMap(),
+        /**
+         * Блок `menu` из контракта (`GET /api/devices/catalog`): порядок вкладок групп
+         * и чип «Всё». `null` — backend старее настройки, касса работает как раньше.
+         */
+        val menu: Menu? = null,
+    )
+
+    /** `menu` каталога: как касса рисует чипы групп (админка → Меню → Группы). */
+    data class Menu(
+        /** Показывать чип «Всё». По умолчанию `true` — как было до настройки. */
+        val showAllTab: Boolean = true,
+        /** Имена групп в порядке показа (из `categories.sort_order`). */
+        val order: List<String> = emptyList(),
+        /**
+         * Группы, скрытые на кассе: их товары остаются в `products[]`, но чип рисовать нельзя.
+         * Нет поля (старый backend) — пусто, поведение прежнее.
+         */
+        val hidden: List<String> = emptyList(),
     )
 
     data class Enrich(
@@ -279,6 +297,7 @@ object CatalogApi {
                 } ?: p.sizeMl,
                 optLabel = e?.variantLabel?.takeIf { it.isNotBlank() } ?: p.optLabel,
                 groupId = groupId,
+                categoryName = e?.categoryName ?: p.categoryName,
             )
         }
         return applySoftFocus(merged) to stats
@@ -433,6 +452,7 @@ object CatalogApi {
         }
         val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
         val storeEcho = root.optString("storeUuid").trim().ifBlank { null }
+        val menu = parseMenu(root.optJSONObject("menu"))
         return Payload(
             byUuid = map,
             upsellDefault = upsellDefault,
@@ -446,7 +466,30 @@ object CatalogApi {
             addonCategoryIds = addonCategoryIds,
             groupByProductId = groupByProductId,
             groupByUuid = groupByUuid,
+            menu = menu,
         )
+    }
+
+    /** `menu` = { showAllTab, order[], hidden[] }. Нет блока — `null` (старый backend / старый кэш). */
+    private fun parseMenu(o: JSONObject?): Menu? {
+        if (o == null) return null
+        // Контракт: «показывать, если не false».
+        return Menu(
+            showAllTab = o.optBoolean("showAllTab", true),
+            order = parseNameList(o.optJSONArray("order")),
+            hidden = parseNameList(o.optJSONArray("hidden")),
+        )
+    }
+
+    /** Список имён групп: trim, без пустых, без дублей (регистр не важен). */
+    internal fun parseNameList(a: JSONArray?): List<String> {
+        if (a == null) return emptyList()
+        val out = ArrayList<String>()
+        for (i in 0 until a.length()) {
+            val name = a.optString(i).trim()
+            if (name.isNotEmpty() && out.none { it.equals(name, ignoreCase = true) }) out.add(name)
+        }
+        return out
     }
 
     private fun parseToppings(a: JSONArray?): List<Topping> = ToppingJson.parse(a)

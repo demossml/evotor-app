@@ -156,6 +156,13 @@ object CatalogCache {
                     if (uuid.isNotBlank() && gid > 0) groupByUuid[uuid] = gid
                 }
             }
+            val menu = root.optJSONObject("menu")?.let { m ->
+                CatalogApi.Menu(
+                    showAllTab = m.optBoolean("showAllTab", true),
+                    order = CatalogApi.parseNameList(m.optJSONArray("order")),
+                    hidden = CatalogApi.parseNameList(m.optJSONArray("hidden")),
+                )
+            }
             CatalogApi.Payload(
                 byUuid = map,
                 upsellDefault = upsellDefault,
@@ -169,6 +176,7 @@ object CatalogCache {
                 addonCategoryIds = addonCategoryIds,
                 groupByProductId = groupByProductId,
                 groupByUuid = groupByUuid,
+                menu = menu,
             )
         } catch (_: Throwable) {
             null
@@ -243,6 +251,17 @@ object CatalogCache {
                 .put("groupByProduct", groupByProduct)
                 .put("groupByUuid", groupByUuid)
                 .put("savedAt", System.currentTimeMillis())
+            // Настройка вкладок переживает offline-запуск так же, как остальной каталог.
+            payload.menu?.let { m ->
+                val order = JSONArray()
+                m.order.forEach { order.put(it) }
+                val hidden = JSONArray()
+                m.hidden.forEach { hidden.put(it) }
+                root.put(
+                    "menu",
+                    JSONObject().put("showAllTab", m.showAllTab).put("order", order).put("hidden", hidden),
+                )
+            }
             file.writeText(root.toString())
         } catch (_: Throwable) {
         }

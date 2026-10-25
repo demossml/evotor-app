@@ -54,6 +54,11 @@ data class CatalogProduct(
     val isFood: Boolean = false,
     /** Backend product group id (6.7 admin) — для group-fallback toppings при рассинхроне uuid/имени. */
     val groupId: Int? = null,
+    /**
+     * Категория backend (`products[].categoryName`) — только для порядка вкладок:
+     * если папка Эвотора названа иначе, группа всё равно находится в `menu.order`.
+     */
+    val categoryName: String? = null,
 ) {
     /** Товар-определение комбо: продаётся не сам, а набором из двух позиций со скидкой. */
     val isComboDefinition: Boolean get() = comboDrinkUuid != null && comboFoodUuid != null
