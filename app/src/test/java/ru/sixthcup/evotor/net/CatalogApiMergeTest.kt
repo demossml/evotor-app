@@ -224,4 +224,106 @@ class CatalogApiMergeTest {
         val merged = CatalogApi.merge(listOf(pos("BE-250", "Капучино 250 мл")), payload)
         assertEquals(18, merged.single().toppings.size)
     }
+
+    // ── устойчивая идентичность: артикул важнее имени, скрытие — только по identity ──
+
+    @Test
+    fun `article code match hides addon even when uuid differs`() {
+        val posProduct = CatalogProduct(
+            uuid = "terminal-uuid",
+            name = "Карамель",
+            priceRub = BigDecimal("40"),
+            allowToSell = true,
+            recipe = null,
+            description = null,
+            article = "sc-42",
+        )
+        val addon = CatalogApi.Enrich(
+            productId = 42, name = "Карамель", imageUrl = null, recipe = null,
+            countsAsCup = null, freeEligible = null, toppings = emptyList(), upsell = emptyList(),
+            hideFromMenu = true, categoryId = 4, articleNumber = "sc-42",
+        )
+        val merged = CatalogApi.merge(
+            listOf(posProduct),
+            CatalogApi.Payload(emptyMap(), emptyList(), byArticle = mapOf("sc-42" to addon)),
+        )
+        assertTrue("артикул подтверждает identity → добавка скрыта", merged.single().hideFromMenu)
+    }
+
+    @Test
+    fun `name match alone never hides a regular product`() {
+        val posProduct = CatalogProduct(
+            uuid = "retail-uuid",
+            name = "Карамель",
+            priceRub = BigDecimal("40"),
+            allowToSell = true,
+            recipe = null,
+            description = null,
+            article = null,
+        )
+        val addon = CatalogApi.Enrich(
+            productId = 42, name = "Карамель", imageUrl = null, recipe = null,
+            countsAsCup = null, freeEligible = null, toppings = emptyList(), upsell = emptyList(),
+            hideFromMenu = true, categoryId = 9,
+        )
+        val merged = CatalogApi.merge(
+            listOf(posProduct),
+            CatalogApi.Payload(emptyMap(), emptyList(), byName = mapOf("карамель" to addon)),
+        )
+        assertFalse("совпадение по имени не скрывает обычный товар", merged.single().hideFromMenu)
+    }
+
+    @Test
+    fun `addon category id hides product matched even by name`() {
+        val posProduct = CatalogProduct(
+            uuid = "terminal-uuid",
+            name = "Лаванда",
+            priceRub = BigDecimal("30"),
+            allowToSell = true,
+            recipe = null,
+            description = null,
+            article = null,
+        )
+        val addon = CatalogApi.Enrich(
+            productId = 52, name = "Лаванда", imageUrl = null, recipe = null,
+            countsAsCup = null, freeEligible = null, toppings = emptyList(), upsell = emptyList(),
+            categoryId = 4,
+        )
+        val merged = CatalogApi.merge(
+            listOf(posProduct),
+            CatalogApi.Payload(
+                emptyMap(), emptyList(),
+                byName = mapOf("лаванда" to addon),
+                addonCategoryIds = setOf(4),
+            ),
+        )
+        assertTrue("категория-добавка скрывает по id, не по слову в названии", merged.single().hideFromMenu)
+    }
+
+    @Test
+    fun `groups array from catalog provides variant group when product has no groupId`() {
+        val posProduct = CatalogProduct(
+            uuid = "variant-uuid",
+            name = "Капучино S",
+            priceRub = BigDecimal("200"),
+            allowToSell = true,
+            recipe = null,
+            description = null,
+            article = "sc-77",
+        )
+        val enrich = CatalogApi.Enrich(
+            productId = 77, name = "Капучино S", imageUrl = null, recipe = null,
+            countsAsCup = true, freeEligible = true, toppings = emptyList(), upsell = emptyList(),
+            articleNumber = "sc-77",
+        )
+        val merged = CatalogApi.merge(
+            listOf(posProduct),
+            CatalogApi.Payload(
+                emptyMap(), emptyList(),
+                byArticle = mapOf("sc-77" to enrich),
+                groupByProductId = mapOf(77 to 5),
+            ),
+        )
+        assertEquals("admin-group:5", merged.single().variantGroup)
+    }
 }

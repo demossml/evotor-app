@@ -1,5 +1,9 @@
 {
   "storeUuid": "store-fixture",
+  "addonCategoryIds": [
+    1,
+    4
+  ],
   "categories": [
     {
       "id": 2,
@@ -30,6 +34,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-caramel",
+      "articleNumber": "sc-1",
       "groupId": null,
       "variantLabel": null,
       "variantSort": 0,
@@ -67,6 +72,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-vanilla",
+      "articleNumber": "sc-2",
       "groupId": null,
       "variantLabel": null,
       "variantSort": 0,
@@ -104,6 +110,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-oat",
+      "articleNumber": "sc-3",
       "groupId": null,
       "variantLabel": null,
       "variantSort": 0,
@@ -141,6 +148,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-cinnamon",
+      "articleNumber": "sc-4",
       "groupId": null,
       "variantLabel": null,
       "variantSort": 0,
@@ -178,6 +186,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-cap200",
+      "articleNumber": "sc-5",
       "groupId": 1,
       "variantLabel": "200 мл",
       "variantSort": 0,
@@ -300,6 +309,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-cap400",
+      "articleNumber": "sc-6",
       "groupId": 1,
       "variantLabel": "400 мл",
       "variantSort": 1,
@@ -422,6 +432,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-latte",
+      "articleNumber": "sc-7",
       "groupId": null,
       "variantLabel": null,
       "variantSort": 2,
@@ -544,6 +555,7 @@
       "recipeText": null,
       "recipe": null,
       "evotorUuid": "uuid-croissant",
+      "articleNumber": "sc-8",
       "groupId": null,
       "variantLabel": null,
       "variantSort": 0,

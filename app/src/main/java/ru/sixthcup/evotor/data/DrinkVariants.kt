@@ -67,7 +67,11 @@ object DrinkVariants {
         if (base.isEmpty() || size <= 0) return null
         // «Капучино» без объёма в названии и без #size — группировать не по чему.
         if (base == p.name.trim() && p.sizeMl == null) return null
-        return AUTO_PREFIX + base.lowercase() to size
+        // Legacy-fallback: объём только из имени. Разные категории/папки не склеиваем,
+        // иначе два независимых «Капучино 200 мл» стали бы одной карточкой.
+        val scope = p.groupName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        val key = if (scope != null) "$scope|${base.lowercase()}" else base.lowercase()
+        return AUTO_PREFIX + key to size
     }
 
     fun build(products: List<CatalogProduct>): Model {
@@ -77,26 +81,20 @@ object DrinkVariants {
             sugar = products.filter { it.optGroup == "sugar" },
             extra = products.filter { it.optGroup == "extra" },
         )
-        // Добавки, которые участвуют в схемах: скрываем их с витрины.
-        //  - по uuid товара из toppings[].evotorUuid (основной путь);
-        //  - по нормализованному имени (страховка, когда uuid добавки на терминале
-        //    не совпадает с тем, что прислал backend).
+        // Добавки, которые участвуют в схемах: скрываем их с витрины по UUID SKU
+        // (toppings[].evotorUuid) — это устойчивая связь. Скрывать по совпадению имени
+        // нельзя: обычный товар с таким же названием должен остаться в меню.
+        // Классификация добавок по категории приходит из CatalogApi.merge (hideFromMenu).
         val modifierUuids = products.asSequence()
             .flatMap { it.toppings.asSequence() }
             .mapNotNull { it.evotorUuid?.takeIf { u -> u.isNotBlank() } }
             .toSet()
-        val modifierNames = products.asSequence()
-            .flatMap { it.toppings.asSequence().filter { t -> !t.zeroOption } }
-            .map { Names.normalize(it.name) }
-            .filter { it.isNotEmpty() }
-            .toSet()
-        // Плитками не показываются: #opt=, комбо-определения, hideFromMenu, добавки по uuid/имени.
+        // Плитками не показываются: #opt=, комбо-определения, hideFromMenu, добавки по uuid.
         val drinks = products.filter { p ->
             p.optGroup == null &&
                 !p.isComboDefinition &&
                 !p.hideFromMenu &&
-                p.uuid !in modifierUuids &&
-                Names.normalize(p.name) !in modifierNames
+                p.uuid !in modifierUuids
         }
 
         val grouped = LinkedHashMap<String, MutableList<CatalogProduct>>()
@@ -124,8 +122,10 @@ object DrinkVariants {
         for (p in singles) tiles.add(p)
         for ((key, list) in grouped) {
             // Авто-группа из одной позиции — это обычный товар, а не выбор размера.
+            // ВАЖНО: добавляем именно в tiles; раньше позиция попадала только в singles
+            // и бесследно исчезала с витрины.
             if (list.size == 1 && key.startsWith(AUTO_PREFIX)) {
-                singles.add(list[0].copy(variantGroup = null))
+                tiles.add(list[0].copy(variantGroup = null))
                 continue
             }
             val sorted = list.sortedWith(compareBy({ it.sizeMl ?: Int.MAX_VALUE }, { it.name.lowercase() }))

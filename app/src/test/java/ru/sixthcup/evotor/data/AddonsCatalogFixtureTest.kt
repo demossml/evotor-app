@@ -150,4 +150,26 @@ class AddonsCatalogFixtureTest {
         val removedIssue = ReceiptValidator.validate(cartLines(all), catalogProducts(removed)).first()
         assertEquals("option_removed", removedIssue.reason)
     }
+
+    @Test
+    fun `fixture carries stable identity for addons and variant groups`() {
+        val payload = ru.sixthcup.evotor.net.CatalogApi.parsePayload(root.toString())
+        assertTrue("addonCategoryIds должен присутствовать", payload.addonCategoryIds.isNotEmpty())
+
+        val all = products()
+        val addons = all.filter { it.optBoolean("isModifier", false) }
+        assertTrue("в фикстуре должны быть добавки", addons.isNotEmpty())
+        addons.forEach { p ->
+            assertTrue("добавка скрыта из меню", p.optBoolean("hideFromMenu", false))
+            assertTrue("у добавки есть стабильный артикул", p.optString("articleNumber").startsWith("sc-"))
+            assertTrue("артикул сопоставляется", payload.byArticle.containsKey(p.getString("articleNumber")))
+        }
+
+        val withGroup = all.filter { it.has("groupId") && !it.isNull("groupId") }
+        assertTrue("варианты должны нести groupId", withGroup.isNotEmpty())
+        withGroup.forEach { p ->
+            val gid = p.getInt("groupId")
+            assertTrue("groupId попадает в общий индекс", payload.groupByProductId.containsValue(gid))
+        }
+    }
 }

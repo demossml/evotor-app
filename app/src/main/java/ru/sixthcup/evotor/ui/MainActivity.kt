@@ -317,7 +317,9 @@ class MainActivity : AppCompatActivity() {
             }
             StoreUuidResolver.remember(ctx, enrich.storeUuid ?: storeUuid)
             CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
-            val merged = CatalogApi.merge(inv, enrich)
+            val mergedResult = CatalogApi.mergeWithStats(inv, enrich)
+            val merged = mergedResult.first
+            val match = mergedResult.second
             val withTop = merged.count { it.toppings.isNotEmpty() }
             val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
             runOnUiThread {
@@ -335,6 +337,22 @@ class MainActivity : AppCompatActivity() {
                 // что пришёл каталог другой точки (storeUuid не тот или отсутствует).
                 val matched = merged.count { it.toppings.isNotEmpty() || it.hideFromMenu }
                 if (matched == 0) Log.w(TAG, "enrich merge matched NOTHING store=$storeUuid — toppings will be empty")
+                Log.i(
+                    TAG,
+                    "catalog_match total=${match.total} uuid=${match.byUuid} article=${match.byArticle} " +
+                        "exactName=${match.byExactName} name=${match.byName} unmatched=${match.unmatched} " +
+                        "hiddenFlag=${match.hiddenByFlag} hiddenCategory=${match.hiddenByCategory} " +
+                        "grouped=${match.groupedExplicit} store=${storeUuid ?: "-"}",
+                )
+                if (match.unmatched > 0) {
+                    // Почему товар не сопоставлен: артикул/имя, без секретов. Не больше 3 строк.
+                    val sample = merged.asSequence()
+                        .filter { it.toppings.isEmpty() && !it.hideFromMenu }
+                        .take(3)
+                        .map { "${it.article ?: it.uuid}:${it.name}" }
+                        .toList()
+                    Log.w(TAG, "catalog_unmatched count=${match.unmatched} sample=$sample")
+                }
                 Log.i(TAG, "catalog_loaded products=${merged.size} withToppings=$withTop ms=${System.currentTimeMillis() - startedAt}")
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }

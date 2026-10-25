@@ -104,6 +104,9 @@ object InventoryRepository {
             val allowCol = col(c, "ALLOW_TO_SELL", "allowToSell")
             val descCol = col(c, ProductTable.ROW_DESCRIPTION, "description")
             val parentCol = col(c, ProductTable.ROW_PARENT_UUID, "parentUuid")
+            // CODE = article_number, который backend пишет при выгрузке (`sc-<id>`).
+            // Стабильная связка backend ↔ терминал: не зависит от UUID точки и переименований.
+            val codeCol = col(c, ProductTable.ROW_CODE, "code", "CODE")
             while (c.moveToNext()) {
                 val uuid = uuidCol?.let { c.getString(it) }?.trim().orEmpty()
                 val name = nameCol?.let { c.getString(it) }?.trim().orEmpty()
@@ -119,7 +122,8 @@ object InventoryRepository {
                 if (!allow) continue
                 val desc = descCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
                 val parent = parentCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
-                raw.add(CatalogProduct(uuid, name, price, allow, desc, desc, null, parentUuid = parent))
+                val code = codeCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
+                raw.add(CatalogProduct(uuid, name, price, allow, desc, desc, code, parentUuid = parent))
             }
         }
         return raw.map { p ->

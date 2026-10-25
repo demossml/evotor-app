@@ -49,6 +49,17 @@ object CatalogApi {
         val nameGroupId: Map<String, Int> = emptyMap(),
         /** Store echoed by backend (for multi-store remember). */
         val storeUuid: String? = null,
+        /**
+         * Стабильная связка backend ↔ терминал: `articleNumber` (`sc-<id>`) ↔ `ProductTable.ROW_CODE`.
+         * Приоритетнее имени: не зависит от переименований и UUID конкретной точки.
+         */
+        val byArticle: Map<String, Enrich> = emptyMap(),
+        /** Категории-добавки с backend: скрываем по id категории, а не по слову в названии. */
+        val addonCategoryIds: Set<Int> = emptySet(),
+        /** `groups[]` из каталога: productId → groupId (fallback, если у товара не пришёл groupId). */
+        val groupByProductId: Map<Int, Int> = emptyMap(),
+        /** `groups[].variants[].evotorUuid` → groupId (fallback для сопоставления по uuid). */
+        val groupByUuid: Map<String, Int> = emptyMap(),
     )
 
     data class Enrich(
@@ -79,6 +90,10 @@ object CatalogApi {
         val isGroup: Boolean = false,
         /** Backend products.parent_product_id — локальный id группы-родителя (не Evotor uuid). */
         val parentProductId: Int? = null,
+        /** `sc-<id>` из каталога (та же строка, что в `ProductTable.ROW_CODE`). */
+        val articleNumber: String? = null,
+        /** products.category_id: нужен для скрытия добавок по id категории. */
+        val categoryId: Int? = null,
     )
 
     /** Результат запроса каталога: payload == null — сеть/сервер не отдали данные. */
@@ -143,7 +158,7 @@ object CatalogApi {
             }
             val root = JSONObject(body)
             val empty = (root.optJSONArray("products")?.length() ?: 0) == 0
-            val parsed = parse(body)
+            val parsed = parsePayload(body)
             val withPhoto = parsed.byUuid.values.count { !it.imageUrl.isNullOrBlank() }
             Log.i(
                 "CatalogApi",
@@ -159,20 +174,71 @@ object CatalogApi {
         }
     }
 
-    fun merge(products: List<CatalogProduct>, payload: Payload): List<CatalogProduct> {
+    /** Итоги сопоставления каталога с инвентаризацией — для диагностики (без секретов). */
+    data class MergeStats(
+        val total: Int = 0,
+        val byUuid: Int = 0,
+        val byArticle: Int = 0,
+        val byExactName: Int = 0,
+        val byName: Int = 0,
+        val unmatched: Int = 0,
+        /** Скрыто флагом identity-совпадения (hideFromMenu/isGroup). */
+        val hiddenByFlag: Int = 0,
+        /** Скрыто по id категории-добавки (без опоры на название товара). */
+        val hiddenByCategory: Int = 0,
+        /** Получили явный groupId (не по названию). */
+        val groupedExplicit: Int = 0,
+    )
+
+    fun merge(products: List<CatalogProduct>, payload: Payload): List<CatalogProduct> =
+        mergeWithStats(products, payload).first
+
+    /**
+     * Склейка серверного каталога с номенклатурой Эвотор.
+     *
+     * Идентичность (uuid → артикул `sc-<id>`) — единственный источник **скрытия** и **группировки**.
+     * Имя остаётся ограниченным legacy-fallback: по нему можно дотянуть фото/добавки,
+     * но нельзя скрыть товар или склеить разные позиции.
+     */
+    fun mergeWithStats(
+        products: List<CatalogProduct>,
+        payload: Payload,
+    ): Pair<List<CatalogProduct>, MergeStats> {
         val hasAny = payload.byUuid.isNotEmpty() || payload.byName.isNotEmpty() ||
             payload.byNameExact.isNotEmpty() || payload.byGroupId.isNotEmpty() ||
-            payload.nameGroupId.isNotEmpty() || payload.categoryNames.isNotEmpty()
-        if (!hasAny) return products
+            payload.nameGroupId.isNotEmpty() || payload.categoryNames.isNotEmpty() ||
+            payload.byArticle.isNotEmpty() || payload.addonCategoryIds.isNotEmpty() ||
+            payload.groupByProductId.isNotEmpty() || payload.groupByUuid.isNotEmpty()
+        if (!hasAny) return products to MergeStats(total = products.size, unmatched = products.size)
+
+        var stats = MergeStats(total = products.size)
         val merged = products.map { p ->
-            // Порядок склейки: uuid → точное имя с объёмом → volume-stripped имя.
-            val e = payload.byUuid[p.uuid]
-                ?: payload.byNameExact[Names.normalizeExact(p.name)]
-                ?: payload.byName[Names.normalize(p.name)]
-            // groupId для group-fallback: matched → e.groupId, иначе локальный p.groupId,
-            // иначе резолв неоднозначного stripped-имени к единственной группе.
-            val groupId = e?.groupId ?: p.groupId ?: payload.nameGroupId[Names.normalize(p.name)]
-            // toppings: matched → e.toppings; иначе group-донор по groupId; иначе локальные.
+            val byUuid = payload.byUuid[p.uuid]
+            val articleKey = p.article?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+            val byArticle = articleKey?.let { payload.byArticle[it] }
+            val byExact = payload.byNameExact[Names.normalizeExact(p.name)]
+            val byName = payload.byName[Names.normalize(p.name)]
+            // identity-совпадение разрешает скрытие и группировку; имя — только enrich.
+            val trusted = byUuid ?: byArticle
+            val e = trusted ?: byExact ?: byName
+            stats = when {
+                byUuid != null -> stats.copy(byUuid = stats.byUuid + 1)
+                byArticle != null -> stats.copy(byArticle = stats.byArticle + 1)
+                byExact != null -> stats.copy(byExactName = stats.byExactName + 1)
+                byName != null -> stats.copy(byName = stats.byName + 1)
+                else -> stats.copy(unmatched = stats.unmatched + 1)
+            }
+
+            // Явная группа: identity → локальная → groups[] с сервера → legacy exact-name.
+            // Stripped-имя (byName) для группировки НЕ используется: риск склеить чужие товары.
+            val serverGroup = e?.productId?.let { payload.groupByProductId[it] } ?: payload.groupByUuid[p.uuid]
+            val groupId = trusted?.groupId
+                ?: p.groupId
+                ?: serverGroup
+                ?: byExact?.groupId
+                // legacy: stripped-имя уникально резолвится в одну группу (донор добавок)
+                ?: payload.nameGroupId[Names.normalize(p.name)]
+
             val tops = (e?.toppings ?: emptyList())
                 .ifEmpty { groupId?.let { payload.byGroupId[it] } ?: emptyList() }
                 .ifEmpty { p.toppings }
@@ -184,6 +250,12 @@ object CatalogApi {
             } else {
                 p.featured
             }
+            val hiddenByFlag = trusted?.hideFromMenu == true || trusted?.isGroup == true
+            val hiddenByCategory = e?.categoryId?.let { it in payload.addonCategoryIds } == true
+            if (hiddenByFlag) stats = stats.copy(hiddenByFlag = stats.hiddenByFlag + 1)
+            if (hiddenByCategory && !hiddenByFlag) stats = stats.copy(hiddenByCategory = stats.hiddenByCategory + 1)
+            if (groupId != null && p.variantGroup == null) stats = stats.copy(groupedExplicit = stats.groupedExplicit + 1)
+
             p.copy(
                 imageUrl = e?.imageUrl ?: p.imageUrl,
                 recipe = e?.recipe?.takeIf { it.isNotBlank() } ?: p.recipe,
@@ -197,17 +269,19 @@ object CatalogApi {
                 featured = featured,
                 // Схема добавок с backend = можно открывать item-sheet с опциями.
                 supportsMods = p.supportsMods || tops.isNotEmpty(),
-                // isGroup/isModifier с backend → не плитка; parentUuid в Inventory уже даёт groupName.
-                hideFromMenu = p.hideFromMenu || (e?.hideFromMenu ?: false) || (e?.isGroup == true),
-                // Admin-managed product groups/variants are authoritative; do not require
-                // staff to maintain #group/#size markers manually in Evotor descriptions.
-                variantGroup = e?.groupId?.let { "admin-group:$it" } ?: groupId?.let { "admin-group:$it" } ?: p.variantGroup,
-                sizeMl = e?.let { en -> en.sizeValue?.takeIf { en.sizeUnit.equals("ml", true) || en.sizeUnit.isNullOrBlank() } } ?: p.sizeMl,
+                // Скрытие: локальный флаг, identity-флаг, либо id категории-добавки.
+                // Совпадение по названию НЕ скрывает: обычный товар с тем же именем остаётся.
+                hideFromMenu = p.hideFromMenu || hiddenByFlag || hiddenByCategory,
+                // Группа — только по явной связи (см. выше), иначе метки из DESCRIPTION.
+                variantGroup = groupId?.let { "admin-group:$it" } ?: p.variantGroup,
+                sizeMl = (trusted ?: byExact)?.let { en ->
+                    en.sizeValue?.takeIf { en.sizeUnit.equals("ml", true) || en.sizeUnit.isNullOrBlank() }
+                } ?: p.sizeMl,
                 optLabel = e?.variantLabel?.takeIf { it.isNotBlank() } ?: p.optLabel,
                 groupId = groupId,
             )
         }
-        return applySoftFocus(merged)
+        return applySoftFocus(merged) to stats
     }
 
     /**
@@ -226,7 +300,7 @@ object CatalogApi {
         return list.map { if (it.uuid in preferred) it.copy(featured = true) else it }
     }
 
-    private fun parse(body: String): Payload {
+    internal fun parsePayload(body: String): Payload {
         val root = JSONObject(body)
         val arr = root.optJSONArray("products") ?: JSONArray()
         val map = HashMap<String, Enrich>()
@@ -234,6 +308,8 @@ object CatalogApi {
         val ambiguousNames = HashSet<String>()
         val namedExact = LinkedHashMap<String, Enrich>()
         val ambiguousExactNames = HashSet<String>()
+        val byArticle = LinkedHashMap<String, Enrich>()
+        val ambiguousArticles = HashSet<String>()
         val enrichAll = ArrayList<Enrich>()
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
@@ -267,9 +343,15 @@ object CatalogApi {
                     || o.optBoolean("isGroup", false),
                 isGroup = o.optBoolean("isGroup", false),
                 parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
+                articleNumber = o.optString("articleNumber").trim().ifBlank { null },
+                categoryId = if (o.has("categoryId") && !o.isNull("categoryId")) o.optInt("categoryId") else null,
             )
             enrichAll.add(enrich)
             if (uuid.isNotEmpty()) map[uuid] = enrich
+            val articleKey = enrich.articleNumber?.lowercase()
+            if (!articleKey.isNullOrEmpty()) {
+                if (byArticle.containsKey(articleKey)) ambiguousArticles.add(articleKey) else byArticle[articleKey] = enrich
+            }
             val nameKey = Names.normalize(productName)
             if (nameKey.isNotEmpty()) {
                 if (named.containsKey(nameKey)) ambiguousNames.add(nameKey) else named[nameKey] = enrich
@@ -289,6 +371,35 @@ object CatalogApi {
         }
         ambiguousNames.forEach { named.remove(it) }
         ambiguousExactNames.forEach { namedExact.remove(it) }
+        // Артикул должен быть уникальным: при дубле не угадываем.
+        ambiguousArticles.forEach { byArticle.remove(it) }
+        // groups[]: страховка, если у товара в products[] не оказалось groupId.
+        val groupByProductId = LinkedHashMap<Int, Int>()
+        val groupByUuid = LinkedHashMap<String, Int>()
+        root.optJSONArray("groups")?.let { gs ->
+            for (gi in 0 until gs.length()) {
+                val g = gs.optJSONObject(gi) ?: continue
+                val gid = g.optInt("id", 0)
+                if (gid <= 0) continue
+                val vars = g.optJSONArray("variants") ?: continue
+                for (vi in 0 until vars.length()) {
+                    val v = vars.optJSONObject(vi) ?: continue
+                    if (v.has("productId") && !v.isNull("productId")) {
+                        val pid = v.optInt("productId", 0)
+                        if (pid > 0 && !groupByProductId.containsKey(pid)) groupByProductId[pid] = gid
+                    }
+                    val vu = v.optString("evotorUuid").trim()
+                    if (vu.isNotEmpty() && !groupByUuid.containsKey(vu)) groupByUuid[vu] = gid
+                }
+            }
+        }
+        val addonCategoryIds = LinkedHashSet<Int>()
+        root.optJSONArray("addonCategoryIds")?.let { a ->
+            for (i in 0 until a.length()) {
+                val id = a.optInt(i, 0)
+                if (id > 0) addonCategoryIds.add(id)
+            }
+        }
         // Group-донор: groupId → первый enrich с непустыми toppings;
         // и резолв неоднозначного stripped-имени к единственной группе (если группа одна).
         val groupTops = LinkedHashMap<Int, List<Topping>>()
@@ -331,6 +442,10 @@ object CatalogApi {
             byGroupId = groupTops,
             nameGroupId = nameGroupId,
             storeUuid = storeEcho,
+            byArticle = byArticle,
+            addonCategoryIds = addonCategoryIds,
+            groupByProductId = groupByProductId,
+            groupByUuid = groupByUuid,
         )
     }
 

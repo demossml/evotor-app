@@ -18,13 +18,18 @@ object CatalogCache {
     }
 
     fun load(ctx: Context, storeUuid: String? = null): CatalogApi.Payload? {
+        val f = File(ctx.applicationContext.filesDir, fileName(storeUuid))
+        // migrate: prefer v2, fall back to v1 filename
+        val src = when {
+            f.isFile && f.length() > 0L -> f
+            else -> File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json").takeIf { it.isFile && it.length() > 0L }
+        } ?: return null
+        return loadFrom(src)
+    }
+
+    /** Чтение кэша из конкретного файла (без Android Context) — покрыто юнит-тестом. */
+    internal fun loadFrom(src: File): CatalogApi.Payload? {
         return try {
-            val f = File(ctx.applicationContext.filesDir, fileName(storeUuid))
-            // migrate: prefer v2, fall back to v1 filename
-            val src = when {
-                f.isFile && f.length() > 0L -> f
-                else -> File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json").takeIf { it.isFile && it.length() > 0L }
-            } ?: return null
             val root = JSONObject(src.readText())
             val by = root.optJSONObject("byUuid") ?: JSONObject()
             val map = linkedMapOf<String, CatalogApi.Enrich>()
@@ -55,6 +60,8 @@ object CatalogCache {
                     variantSort = if (o.has("variantSort") && !o.isNull("variantSort")) o.optInt("variantSort") else null,
                     sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
                     sizeUnit = optStr("sizeUnit"),
+                    articleNumber = optStr("articleNumber"),
+                    categoryId = if (o.has("categoryId") && !o.isNull("categoryId")) o.optInt("categoryId") else null,
                 )
             }
             fun parseEnrich(o: JSONObject): CatalogApi.Enrich {
@@ -80,6 +87,8 @@ object CatalogCache {
                     variantSort = if (o.has("variantSort") && !o.isNull("variantSort")) o.optInt("variantSort") else null,
                     sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
                     sizeUnit = str("sizeUnit"),
+                    articleNumber = str("articleNumber"),
+                    categoryId = if (o.has("categoryId") && !o.isNull("categoryId")) o.optInt("categoryId") else null,
                 )
             }
             val named = linkedMapOf<String, CatalogApi.Enrich>()
@@ -116,7 +125,51 @@ object CatalogCache {
             }
             val nameGroupId = HashMap<String, Int>()
             strippedGroups.forEach { (k, v) -> if (v.size == 1) nameGroupId[k] = v.first() }
-            CatalogApi.Payload(map, upsellDefault, cats, named, exact, groupTops, nameGroupId, null)
+            val byArticle = LinkedHashMap<String, CatalogApi.Enrich>()
+            (map.values + named.values).forEach { e ->
+                val key = e.articleNumber?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return@forEach
+                if (!byArticle.containsKey(key)) byArticle[key] = e
+            }
+            val addonCategoryIds = LinkedHashSet<Int>()
+            root.optJSONArray("addonCategoryIds")?.let { a ->
+                for (i in 0 until a.length()) {
+                    val id = a.optInt(i, 0)
+                    if (id > 0) addonCategoryIds.add(id)
+                }
+            }
+            val groupByProductId = LinkedHashMap<Int, Int>()
+            root.optJSONObject("groupByProduct")?.let { obj ->
+                val k = obj.keys()
+                while (k.hasNext()) {
+                    val key = k.next()
+                    val pid = key.toIntOrNull() ?: continue
+                    val gid = obj.optInt(key, 0)
+                    if (pid > 0 && gid > 0) groupByProductId[pid] = gid
+                }
+            }
+            val groupByUuid = LinkedHashMap<String, Int>()
+            root.optJSONObject("groupByUuid")?.let { obj ->
+                val k = obj.keys()
+                while (k.hasNext()) {
+                    val uuid = k.next()
+                    val gid = obj.optInt(uuid, 0)
+                    if (uuid.isNotBlank() && gid > 0) groupByUuid[uuid] = gid
+                }
+            }
+            CatalogApi.Payload(
+                byUuid = map,
+                upsellDefault = upsellDefault,
+                categoryNames = cats,
+                byName = named,
+                byNameExact = exact,
+                byGroupId = groupTops,
+                nameGroupId = nameGroupId,
+                storeUuid = null,
+                byArticle = byArticle,
+                addonCategoryIds = addonCategoryIds,
+                groupByProductId = groupByProductId,
+                groupByUuid = groupByUuid,
+            )
         } catch (_: Throwable) {
             null
         }
@@ -135,6 +188,12 @@ object CatalogCache {
     }
 
     fun save(ctx: Context, payload: CatalogApi.Payload, storeUuid: String? = null) {
+        if (payload.byUuid.isEmpty() && payload.byName.isEmpty()) return
+        saveTo(File(ctx.applicationContext.filesDir, fileName(storeUuid ?: payload.storeUuid)), payload)
+    }
+
+    /** Запись кэша в конкретный файл (без Android Context) — покрыто юнит-тестом. */
+    internal fun saveTo(file: File, payload: CatalogApi.Payload) {
         if (payload.byUuid.isEmpty() && payload.byName.isEmpty()) return
         try {
             fun enrichJson(e: CatalogApi.Enrich): JSONObject {
@@ -156,6 +215,8 @@ object CatalogCache {
                     .put("variantSort", e.variantSort ?: JSONObject.NULL)
                     .put("sizeValue", e.sizeValue ?: JSONObject.NULL)
                     .put("sizeUnit", e.sizeUnit ?: JSONObject.NULL)
+                    .put("articleNumber", e.articleNumber ?: JSONObject.NULL)
+                    .put("categoryId", e.categoryId ?: JSONObject.NULL)
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
                 if (e.isFood != null) o.put("isFood", e.isFood)
@@ -167,13 +228,22 @@ object CatalogCache {
             for ((name, e) in payload.byName) byName.put(name, enrichJson(e))
             val cats = JSONArray()
             payload.categoryNames.forEach { cats.put(it) }
+            val addonCats = JSONArray()
+            payload.addonCategoryIds.forEach { addonCats.put(it) }
+            val groupByProduct = JSONObject()
+            payload.groupByProductId.forEach { (pid, gid) -> groupByProduct.put(pid.toString(), gid) }
+            val groupByUuid = JSONObject()
+            payload.groupByUuid.forEach { (uuid, gid) -> groupByUuid.put(uuid, gid) }
             val root = JSONObject()
                 .put("byUuid", by)
                 .put("byName", byName)
                 .put("categoryNames", cats)
                 .put("upsellDefault", upsellJson(payload.upsellDefault))
+                .put("addonCategoryIds", addonCats)
+                .put("groupByProduct", groupByProduct)
+                .put("groupByUuid", groupByUuid)
                 .put("savedAt", System.currentTimeMillis())
-            File(ctx.applicationContext.filesDir, fileName(storeUuid ?: payload.storeUuid)).writeText(root.toString())
+            file.writeText(root.toString())
         } catch (_: Throwable) {
         }
     }

@@ -92,4 +92,40 @@ class DrinkVariantsTest {
         assertEquals(1, model.tiles.size)
         assertEquals(1, model.options.milk.size)
     }
+
+    @Test
+    fun `same drink name in different groups is not merged`() {
+        val model = DrinkVariants.build(
+            listOf(
+                product("a", "Раф 200 мл", 200).copy(groupName = "Категория A"),
+                product("b", "Раф 200 мл", 200).copy(groupName = "Категория B"),
+            ),
+        )
+        assertEquals(2, model.tiles.size)
+    }
+
+    @Test
+    fun `addon with the same name as a topping is not hidden without identity`() {
+        val top = Topping(id = 1, name = "Карамель", priceRub = BigDecimal("30"), groupKey = "syrup", evotorUuid = "other-uuid")
+        val drink = product("d", "Капучино", 250, toppings = listOf(top))
+        val retail = product("retail", "Карамель", 30, supportsMods = false)
+        val model = DrinkVariants.build(listOf(drink, retail))
+        assertEquals("совпадение имени не скрывает обычный товар", 2, model.tiles.size)
+    }
+
+    @Test
+    fun `addon sku is hidden by its evotor uuid`() {
+        val top = Topping(id = 1, name = "Карамель", priceRub = BigDecimal("30"), groupKey = "syrup", evotorUuid = "addon-uuid")
+        val drink = product("d", "Капучино", 250, toppings = listOf(top))
+        val addon = product("addon-uuid", "Карамель", 30, supportsMods = false)
+        val model = DrinkVariants.build(listOf(drink, addon))
+        assertEquals(1, model.tiles.size)
+    }
+
+    @Test
+    fun `lone size-labelled product is not lost from the menu`() {
+        val model = DrinkVariants.build(listOf(product("u1", "Капучино 200 мл", 200)))
+        assertEquals(1, model.tiles.size)
+        assertEquals("Капучино 200 мл", model.tiles.first().name)
+    }
 }
