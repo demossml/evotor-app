@@ -9,8 +9,8 @@ android {
         applicationId = "ru.sixthcup.evotor"
         minSdk = 23
         targetSdk = 30
-        versionCode = 114
-        versionName = "5.0.0-evotor-receipt"
+        versionCode = 115
+        versionName = "5.1.0-addons-contract"
         buildConfigField("String", "APP_UUID", "\"151071e8-88a4-44f6-b71a-b17c559f9b7d\"")
         // Единицы PRICE_OUT из ProductTable: KOPECKS (по умолчанию, как делает integration-library) | AUTO | RUBLES.
         buildConfigField("String", "PRICE_UNITS", "\"${project.findProperty("PRICE_UNITS") ?: "KOPECKS"}\"")

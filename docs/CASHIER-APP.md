@@ -1,4 +1,4 @@
-# 6.7 Coffee — кассовый клиент Эвотор (5.0.0-evotor-receipt / versionCode 114)
+# 6.7 Coffee — кассовый клиент Эвотор (5.1.0-addons-contract / versionCode 115)
 
 ## Поток
 1. Карта: QR (токен резолвится на backend) или короткий номер; можно продолжить без карты.
@@ -17,7 +17,7 @@
 7. Backend обрабатывает SELL по poll и начисляет бонусы. Loyalty-запросы идут через HTTPS-прокси Эвотора
    (секретов в APK нет).
 
-Подробности и список изменений: `CHANGELOG-5.0.0-evotor-receipt.md`.
+Подробности и список изменений: `CHANGELOG-5.1.0-addons-contract.md` (добавки) и `CHANGELOG-5.0.0-evotor-receipt.md` (передача позиций в POS).
 
 ## Сборка
 `./gradlew :app:assembleRelease -PAPI_BASE_URL=https://app.67coffee.ru`
