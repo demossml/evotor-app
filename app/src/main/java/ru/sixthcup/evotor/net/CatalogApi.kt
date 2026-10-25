@@ -80,28 +80,68 @@ object CatalogApi {
         val parentProductId: Int? = null,
     )
 
-    fun fetch(storeUuid: String? = null): Payload {
+    /** Результат запроса каталога: payload == null — сеть/сервер не отдали данные. */
+    data class FetchResult(
+        val payload: Payload?,
+        val httpStatus: Int = 0,
+        val error: String? = null,
+        /** 200, но products=[] — такой ответ НЕ должен затирать кэш. */
+        val emptyResponse: Boolean = false,
+    )
+
+    /** Последний успешный/неуспешный ответ: удобно для тестов и для UI-плашки. */
+    fun fetch(storeUuid: String? = null): Payload =
+        fetchDetailed(storeUuid).payload ?: Payload(emptyMap(), emptyList())
+
+    /**
+     * GET /api/devices/catalog с повторами: 5xx и сетевые ошибки повторяем с backoff 1с/3с,
+     * всего не более 3 попыток. Таймауты контракта: connect ≤ 5с, read ≤ 10с.
+     */
+    fun fetchDetailed(storeUuid: String? = null): FetchResult {
+        val backoff = longArrayOf(0L, 1000L, 3000L)
+        var last = FetchResult(null, 0, "unknown")
+        for (attempt in backoff.indices) {
+            if (attempt > 0) {
+                try { Thread.sleep(backoff[attempt]) } catch (_: InterruptedException) { return last }
+            }
+            last = attemptFetch(storeUuid)
+            if (last.payload != null) return last
+            // 4xx повторять бессмысленно (401/403/404 — вопрос конфигурации точки).
+            if (last.httpStatus in 400..499) break
+            if (attempt < backoff.lastIndex) {
+                Log.w(
+                    "CatalogApi",
+                    "http_retry GET /api/devices/catalog attempt=${attempt + 2} code=${last.httpStatus}",
+                )
+            }
+        }
+        return last
+    }
+
+    private fun attemptFetch(storeUuid: String?): FetchResult {
+        var conn: HttpURLConnection? = null
         return try {
             val q = if (!storeUuid.isNullOrBlank()) "?storeUuid=" + android.net.Uri.encode(storeUuid) else ""
             val url = BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/catalog" + q
-            val conn = (URL(url).openConnection() as HttpURLConnection)
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 4000
-            conn.readTimeout = 8000
-            conn.setRequestProperty("Accept", "application/json")
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 10000
+                setRequestProperty("Accept", "application/json")
+            }
             if (!storeUuid.isNullOrBlank()) conn.setRequestProperty("X-Evotor-Store-Uuid", storeUuid)
             DeviceHeaders.apply(conn) // device uuid; store already set above when known
             Log.i("CatalogApi", "catalog request store=${storeUuid ?: "-"}")
             // No Authorization in APK: Evotor Cloud injects it when installed from cabinet.
-            // Backend allows catalog without token unless EVOTOR_PROXY_ENFORCE=1.
             val status = conn.responseCode
             val body = (if (status in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
-            conn.disconnect()
             if (status !in 200..299) {
                 Log.w("CatalogApi", "catalog HTTP $status len=${body.length}")
-                return Payload(emptyMap(), emptyList())
+                return FetchResult(null, status, "HTTP $status")
             }
+            val root = JSONObject(body)
+            val empty = (root.optJSONArray("products")?.length() ?: 0) == 0
             val parsed = parse(body)
             val withPhoto = parsed.byUuid.values.count { !it.imageUrl.isNullOrBlank() }
             Log.i(
@@ -109,10 +149,12 @@ object CatalogApi {
                 "catalog ok byUuid=${parsed.byUuid.size} byName=${parsed.byName.size} " +
                     "withImageUrl=$withPhoto store=${storeUuid ?: "-"}",
             )
-            parsed
+            FetchResult(parsed, status, null, empty)
         } catch (e: Throwable) {
             Log.e("CatalogApi", "catalog fetch failed", e)
-            Payload(emptyMap(), emptyList())
+            FetchResult(null, 0, e.message ?: e.javaClass.simpleName)
+        } finally {
+            try { conn?.disconnect() } catch (_: Throwable) {}
         }
     }
 

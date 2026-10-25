@@ -1,6 +1,7 @@
 package ru.sixthcup.evotor.integration
 
 import android.os.RemoteException
+import android.util.Log
 import org.json.JSONObject
 import ru.evotor.framework.core.IntegrationService
 import ru.evotor.framework.core.action.event.receipt.changes.receipt.SetExtra
@@ -57,9 +58,19 @@ class DiscountIntegrationService : IntegrationService() {
                     // Скидка комбо — фиксированная выгода набора (позиции в чеке реальные, цена полная).
                     val comboRub = CheckoutChoice.comboRub(applicationContext)
                     val total = calc.total.add(comboRub).min(gross)
-                    val sc = CardSession.sc(info, freeDiscount.signum() > 0, cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong())
+                    val cbKopecks = cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong()
+                    val freeApplied = freeDiscount.signum() > 0
+                    Log.i(
+                        "DiscountIntegration",
+                        "extras_written v=2 hasOp=${info.reservationId != null} free=${if (freeApplied) 1 else 0} cb=$cbKopecks",
+                    )
                     callback.onResult(
-                        ReceiptDiscountEventResult(total, SetExtra(JSONObject().put("sc", sc)), emptyList(), null),
+                        ReceiptDiscountEventResult(
+                            total,
+                            SetExtra(CardSession.extras(info, freeApplied, cbKopecks)),
+                            emptyList(),
+                            null,
+                        ),
                     )
                 } catch (_: Throwable) {
                     try { callback.skip() } catch (_: Exception) {}

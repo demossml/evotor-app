@@ -7,6 +7,7 @@ import java.math.BigDecimal
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 /**
  * Локальное хранилище очереди заказов, счётчика номеров и итогов смены.
@@ -21,6 +22,8 @@ object OrderQueueStore {
     private const val K_T_EPOCH = "tally_epoch"
     private const val K_T_COUNT = "tally_count"
     private const val K_T_SUM = "tally_sum"
+    private const val K_PENDING_ID = "pending_id"
+    private const val K_SHOW_PENDING = "show_pending"
 
     private fun prefs(c: Context) = c.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)
 
@@ -39,15 +42,32 @@ object OrderQueueStore {
                     createdAt = o.getLong("at"),
                     items = (0 until items.length()).map { items.getString(it) },
                     totalRub = BigDecimal(o.optString("sum", "0")),
-                    status = if (o.optString("st") == "READY") OrderStatus.READY else OrderStatus.PREPARING,
+                    status = statusOf(o.optString("st")),
                     readyAt = if (o.has("rt") && !o.isNull("rt")) o.optLong("rt") else null,
+                    id = o.optString("id").ifBlank { legacyId(o.optLong("at"), o.optInt("n")) },
+                    confirmedAt = if (o.has("ca") && !o.isNull("ca")) o.optLong("ca") else null,
                 )
             }
         } catch (_: Throwable) { emptyList() }
-        val pruned = QueueOps.prune(list, now)
-        if (pruned.size != list.size) save(c, pruned)
+        // TTL: PENDING без подтверждения (процесс убили) → EXPIRED, затем обычная очистка.
+        val expired = QueueOps.expire(list, now)
+        val pruned = QueueOps.prune(expired, now)
+        if (pruned != list) save(c, pruned)
         return pruned
     }
+
+    /**
+     * Статус из хранилища. `PREPARING` — имя состояния «в работе» в версиях до 5.0.1:
+     * читаем как CONFIRMED, чтобы старые заказы не потерялись и не стали фантомами.
+     */
+    private fun statusOf(raw: String): OrderStatus = when (raw) {
+        "PENDING" -> OrderStatus.PENDING
+        "READY" -> OrderStatus.READY
+        "EXPIRED" -> OrderStatus.EXPIRED
+        else -> OrderStatus.CONFIRMED
+    }
+
+    private fun legacyId(at: Long, n: Int): String = "legacy-$at-$n"
 
     @Synchronized
     fun save(c: Context, list: List<QueueOrder>) {
@@ -56,32 +76,69 @@ object OrderQueueStore {
             list.forEach { q ->
                 arr.put(JSONObject().put("n", q.number).put("at", q.createdAt)
                     .put("items", JSONArray(q.items)).put("sum", q.totalRub.toPlainString())
-                    .put("st", q.status.name).put("rt", q.readyAt ?: JSONObject.NULL))
+                    .put("st", q.status.name).put("rt", q.readyAt ?: JSONObject.NULL)
+                    .put("id", q.id).put("ca", q.confirmedAt ?: JSONObject.NULL))
             }
             prefs(c).edit().putString(K_ORDERS, arr.toString()).apply()
         } catch (_: Throwable) {}
     }
 
     /**
-     * Выдаёт номер новому заказу и кладёт его в очередь. [sessionNumber] — номер смены Эвотора или null.
-     * Вызывать ровно один раз на оплаченный чек.
+     * Заказ ждёт подтверждения оплаты: номер НЕ присваивается, бариста его не видит.
+     * Состав фиксируется в момент передачи позиций в чек. Идемпотентно по [id].
      */
     @Synchronized
-    fun enqueue(c: Context, items: List<String>, totalRub: BigDecimal, sessionNumber: Long?, now: Long = System.currentTimeMillis()): QueueOrder {
+    fun addPending(c: Context, items: List<String>, totalRub: BigDecimal, id: String = UUID.randomUUID().toString(), now: Long = System.currentTimeMillis()): QueueOrder {
+        val order = QueueOrder(0, now, items, totalRub, OrderStatus.PENDING, null, id)
+        save(c, QueueOps.addPending(load(c, now), order))
+        prefs(c).edit().putString(K_PENDING_ID, id).apply()
+        return order
+    }
+
+    /** id текущего PENDING-заказа (переживает убийство процесса), либо null. */
+    @Synchronized
+    fun pendingId(c: Context): String? {
+        val id = prefs(c).getString(K_PENDING_ID, null)?.takeIf { it.isNotBlank() } ?: return null
+        return if (QueueOps.hasPending(load(c), id)) id else { prefs(c).edit().remove(K_PENDING_ID).apply(); null }
+    }
+
+    /**
+     * Оплата подтверждена (чек в POS закрыт): присваиваем номер и учитываем его в tally смены.
+     * Идемпотентно — повторный вызов по тому же id номер второй раз не выдаёт.
+     * Возвращает заказ или null, если подтверждать нечего.
+     */
+    @Synchronized
+    fun confirm(c: Context, id: String, sessionNumber: Long?, now: Long = System.currentTimeMillis()): QueueOrder? {
+        val current = load(c, now)
+        if (!QueueOps.hasPending(current, id)) {
+            prefs(c).edit().remove(K_PENDING_ID).apply()
+            return null
+        }
         val p = prefs(c)
         val epoch = OrderNumbers.epochKey(sessionNumber, dayKey(now))
-        val current = load(c, now)
         val (n, counter) = OrderNumbers.next(
             NumberCounter(p.getString(K_EPOCH, null), p.getInt(K_LAST, 0)),
             epoch,
-            current.map { it.number }.toSet(),
+            QueueOps.activeNumbers(current),
         )
-        p.edit().putString(K_EPOCH, counter.key).putInt(K_LAST, counter.last).apply()
-        val order = QueueOrder(n, now, items, totalRub)
-        save(c, QueueOps.add(current, order))
-        recordReceipt(c, epoch, totalRub)
+        p.edit().putString(K_EPOCH, counter.key).putInt(K_LAST, counter.last).remove(K_PENDING_ID).apply()
+        val updated = QueueOps.confirm(current, id, n, now)
+        save(c, updated)
+        val order = updated.firstOrNull { it.id == id }
+        if (order != null) recordReceipt(c, epoch, order.totalRub)
         return order
     }
+
+    /** Оплата не прошла / чек остался открытым: PENDING удаляется, номер не израсходован. */
+    @Synchronized
+    fun cancelPending(c: Context, id: String) {
+        save(c, QueueOps.cancelPending(load(c), id))
+        prefs(c).edit().remove(K_PENDING_ID).apply()
+    }
+
+    /** Точки, где начинают готовить до оплаты: PENDING виден баристе. По умолчанию выключено. */
+    fun showPending(c: Context): Boolean = prefs(c).getBoolean(K_SHOW_PENDING, false)
+    fun setShowPending(c: Context, on: Boolean) { prefs(c).edit().putBoolean(K_SHOW_PENDING, on).apply() }
 
     @Synchronized
     fun markReady(c: Context, number: Int, now: Long = System.currentTimeMillis()) = save(c, QueueOps.markReady(load(c, now), number, now))
@@ -89,6 +146,9 @@ object OrderQueueStore {
     fun reopen(c: Context, number: Int) = save(c, QueueOps.reopen(load(c), number))
     @Synchronized
     fun remove(c: Context, number: Int) = save(c, QueueOps.remove(load(c), number))
+
+    @Synchronized
+    fun removeById(c: Context, id: String) = save(c, QueueOps.removeById(load(c), id))
 
     private fun recordReceipt(c: Context, epoch: String, amount: BigDecimal) {
         val p = prefs(c)

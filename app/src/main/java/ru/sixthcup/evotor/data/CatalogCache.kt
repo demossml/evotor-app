@@ -50,6 +50,11 @@ object CatalogCache {
                     hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isGroup", false),
                     isGroup = o.optBoolean("isGroup", false),
                     parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
+                    groupId = if (o.has("groupId") && !o.isNull("groupId")) o.optInt("groupId") else null,
+                    variantLabel = optStr("variantLabel"),
+                    variantSort = if (o.has("variantSort") && !o.isNull("variantSort")) o.optInt("variantSort") else null,
+                    sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
+                    sizeUnit = optStr("sizeUnit"),
                 )
             }
             fun parseEnrich(o: JSONObject): CatalogApi.Enrich {
@@ -70,6 +75,11 @@ object CatalogCache {
                     hideFromMenu = o.optBoolean("hideFromMenu", false) || o.optBoolean("isGroup", false),
                     isGroup = o.optBoolean("isGroup", false),
                     parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
+                    groupId = if (o.has("groupId") && !o.isNull("groupId")) o.optInt("groupId") else null,
+                    variantLabel = str("variantLabel"),
+                    variantSort = if (o.has("variantSort") && !o.isNull("variantSort")) o.optInt("variantSort") else null,
+                    sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
+                    sizeUnit = str("sizeUnit"),
                 )
             }
             val named = linkedMapOf<String, CatalogApi.Enrich>()
@@ -90,9 +100,37 @@ object CatalogCache {
                 if (n.isNotBlank()) cats.add(n)
             }
             val upsellDefault = parseUpsell(root.optJSONArray("upsellDefault"))
-            CatalogApi.Payload(map, upsellDefault, cats, named)
+            // Производные карты восстанавливаем из сохранённых: иначе после перезапуска offline
+            // теряется group-fallback добавок и сопоставление по точному имени с объёмом.
+            val exact = LinkedHashMap<String, CatalogApi.Enrich>()
+            val groupTops = LinkedHashMap<Int, List<Topping>>()
+            val strippedGroups = HashMap<String, MutableSet<Int>>()
+            (map.values + named.values).forEach { e ->
+                val en = e.name ?: return@forEach
+                val ex = Names.normalizeExact(en)
+                if (ex.isNotEmpty() && !exact.containsKey(ex)) exact[ex] = e
+                val g = e.groupId ?: return@forEach
+                if (e.toppings.isNotEmpty() && !groupTops.containsKey(g)) groupTops[g] = e.toppings
+                val stripped = Names.normalize(en)
+                if (stripped.isNotEmpty()) strippedGroups.getOrPut(stripped) { HashSet() }.add(g)
+            }
+            val nameGroupId = HashMap<String, Int>()
+            strippedGroups.forEach { (k, v) -> if (v.size == 1) nameGroupId[k] = v.first() }
+            CatalogApi.Payload(map, upsellDefault, cats, named, exact, groupTops, nameGroupId, null)
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    /** Время последнего успешного сохранения каталога (0 — кэша нет). Для плашки «данные от HH:MM». */
+    fun savedAt(ctx: Context, storeUuid: String? = null): Long {
+        return try {
+            val f = File(ctx.applicationContext.filesDir, fileName(storeUuid))
+            val src = if (f.isFile && f.length() > 0L) f
+            else File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json").takeIf { it.isFile && it.length() > 0L }
+            src?.let { JSONObject(it.readText()).optLong("savedAt", 0L) } ?: 0L
+        } catch (_: Throwable) {
+            0L
         }
     }
 
@@ -113,6 +151,11 @@ object CatalogCache {
                     .put("hideFromMenu", e.hideFromMenu)
                     .put("isGroup", e.isGroup)
                     .put("parentProductId", e.parentProductId ?: JSONObject.NULL)
+                    .put("groupId", e.groupId ?: JSONObject.NULL)
+                    .put("variantLabel", e.variantLabel ?: JSONObject.NULL)
+                    .put("variantSort", e.variantSort ?: JSONObject.NULL)
+                    .put("sizeValue", e.sizeValue ?: JSONObject.NULL)
+                    .put("sizeUnit", e.sizeUnit ?: JSONObject.NULL)
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
                 if (e.isFood != null) o.put("isFood", e.isFood)
@@ -129,6 +172,7 @@ object CatalogCache {
                 .put("byName", byName)
                 .put("categoryNames", cats)
                 .put("upsellDefault", upsellJson(payload.upsellDefault))
+                .put("savedAt", System.currentTimeMillis())
             File(ctx.applicationContext.filesDir, fileName(storeUuid ?: payload.storeUuid)).writeText(root.toString())
         } catch (_: Throwable) {
         }

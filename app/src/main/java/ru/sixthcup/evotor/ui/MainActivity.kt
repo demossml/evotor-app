@@ -38,8 +38,10 @@ import androidx.core.widget.NestedScrollView
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardSession
@@ -60,6 +62,9 @@ import ru.sixthcup.evotor.data.Combos
 import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.PendingPayment
+import ru.sixthcup.evotor.data.ReceiptIssue
+import ru.sixthcup.evotor.data.ReceiptValidator
+import ru.sixthcup.evotor.net.DeviceHeaders
 import ru.sixthcup.evotor.net.LoyaltyApi
 import ru.sixthcup.evotor.net.CatalogApi
 import ru.sixthcup.evotor.net.StoreUuidResolver
@@ -75,7 +80,8 @@ import kotlin.concurrent.thread
 
 /**
  * Кассовый UI 6.7 Coffee (редизайн 4.2.0, см. CHANGELOG-CASHIER-UX.md).
- * Экран = верхняя полоса (карта) + прокручиваемый контент + нижняя полоса (итог и «К оплате»).
+ * Экран = верхняя полоса (карта) + прокручиваемый контент + нижняя полоса (счётчик, сумма чека, «В чек»).
+ * Оплаты в APK нет: «В чек» отдаёт позиции Эвотору, дальше POS сам принимает деньги и печатает чек.
  * Никаких новых зависимостей: только платформа, AppCompat, Material (уже подключены).
  */
 class MainActivity : AppCompatActivity() {
@@ -145,13 +151,13 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var qrRunnable: Runnable? = null
 
-    private enum class Screen { CARD, ORDER, PAYMENT, SHIFT, DONE, QUEUE }
+    private enum class Screen { CARD, ORDER, SHIFT, QUEUE }
     private enum class Kind { ERROR, WARN, INFO, OK }
 
     private val scanReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val code = intent.getStringExtra(ScannerReceiver.EXTRA_CODE).orEmpty().trim()
-            if (code.isEmpty() || resolving || screen == Screen.PAYMENT) return
+            if (code.isEmpty() || resolving) return
             val active = CardSession.get(this@MainActivity)?.takeIf { it.code.isNotEmpty() }
             if (screen == Screen.CARD || active == null) {
                 applyScan(code)
@@ -210,6 +216,7 @@ class MainActivity : AppCompatActivity() {
             }
             loadProducts()
             safeRender()
+            Log.i(TAG, "app_start v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) store=${StoreUuidResolver.peek(this)?.take(8)}")
         } catch (e: Throwable) {
             Log.e(TAG, "onCreate", e)
             Toast.makeText(this, "Не удалось запустить приложение. Перезапустите его.", Toast.LENGTH_LONG).show()
@@ -226,6 +233,9 @@ class MainActivity : AppCompatActivity() {
      */
     private var catalogLoadedAt = 0L
     private var catalogAttemptAt = 0L
+    /** Плашка о происхождении каталога: кэш/пустой ответ сервера. null — данные свежие. */
+    private var catalogNote: String? = null
+    private var swipeRefresh: SwipeRefreshLayout? = null
 
     private fun setProducts(list: List<CatalogProduct>) {
         products = list
@@ -233,18 +243,25 @@ class MainActivity : AppCompatActivity() {
         combos = Combos.from(list)
     }
 
-    private fun loadProducts() {
-        catalogAttemptAt = System.currentTimeMillis()
+    /**
+     * Каталог: (1) номенклатура Эвотор локально → витрина сразу; (2) backend /api/devices/catalog → фото,
+     * добавки, upsell. Фоновое обновление — не чаще раза в 60 с; ручное (pull-to-refresh/меню) — всегда.
+     * Пустой ответ сервера и сетевые ошибки НЕ затирают кэш: показываем сохранённое с пометкой времени.
+     */
+    private fun loadProducts(userInitiated: Boolean = true) {
+        val now = System.currentTimeMillis()
+        if (!userInitiated && now - catalogAttemptAt < CATALOG_REFRESH_MS) return
+        catalogAttemptAt = now
         val gen = ++catalogGen
         productsLoading = products.isEmpty(); productsError = false
         if (screen == Screen.ORDER) refreshChromeAndRows(false)
         val ctx = applicationContext
         thread(name = "catalog-load") {
+            val startedAt = System.currentTimeMillis()
             val inv = try { InventoryRepository.load(ctx) } catch (e: Throwable) { Log.e(TAG, "catalog", e); null }
-            val known = lastEnrich ?: CatalogCache.load(ctx, StoreUuidResolver.peek(ctx))
-            if (lastEnrich == null && known != null) {
-                // restore RAM pointer for subsequent merges this process
-            }
+            val cachedStore = StoreUuidResolver.peek(ctx)
+            val known = lastEnrich ?: CatalogCache.load(ctx, cachedStore)
+            val knownAt = CatalogCache.savedAt(ctx, cachedStore)
             val first = when {
                 inv != null && known != null -> CatalogApi.merge(inv, known)
                 inv != null -> CatalogApi.applySoftFocus(inv)
@@ -253,47 +270,72 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 productsLoading = false
-                // Mark refresh only after local Evotor inventory was actually read successfully.
-                if (inv != null) catalogLoadedAt = System.currentTimeMillis()
+                // Время «свежести» — по последнему реальному ответу (сеть или кэш).
+                if (inv != null) catalogLoadedAt = if (knownAt > 0L) knownAt else System.currentTimeMillis()
                 if (known != null) {
                     lastEnrich = known
                     upsellDefault = known.upsellDefault
+                    if (knownAt > 0L) {
+                        catalogNote = "Сохранённые данные от " + hhmm(knownAt)
+                        Log.i(TAG, "catalog_cache ageMin=${((System.currentTimeMillis() - knownAt) / 60_000L).coerceAtLeast(0L)}")
+                    }
                 }
                 if (first == null) { if (products.isEmpty()) productsError = true } else setProducts(first)
                 CheckoutChoice.saveCombo(this, comboDiscountRub())
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
-            if (inv == null) return@thread
-            val storeUuid = StoreUuidResolver.resolve(ctx)
-            val enrich = try { CatalogApi.fetch(storeUuid) } catch (e: Throwable) {
-                Log.e(TAG, "enrich", e)
-                CatalogApi.Payload(emptyMap(), emptyList())
+            if (inv == null) {
+                runOnUiThread { swipeRefresh?.isRefreshing = false }
+                Log.e(TAG, "catalog_inventory_failed source=ProductTable")
+                return@thread
             }
-            if (enrich.byUuid.isEmpty() && enrich.byName.isEmpty()) return@thread
+            val storeUuid = StoreUuidResolver.resolve(ctx)
+            val res = CatalogApi.fetchDetailed(storeUuid)
+            val enrich = res.payload
+            if (enrich == null || res.emptyResponse || (enrich.byUuid.isEmpty() && enrich.byName.isEmpty())) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
+                    swipeRefresh?.isRefreshing = false
+                    val keep = lastEnrich
+                    val at = " от " + hhmm(if (knownAt > 0L) knownAt else System.currentTimeMillis())
+                    catalogNote = when {
+                        res.emptyResponse -> "Сервер вернул пустой каталог — оставлены сохранённые данные$at"
+                        res.httpStatus >= 500 -> "Сервер каталога недоступен (HTTP ${res.httpStatus}) — данные$at"
+                        else -> "Нет связи с сервером — данные$at"
+                    }
+                    if (keep == null && products.isEmpty()) productsError = true
+                    val ms = System.currentTimeMillis() - startedAt
+                    when {
+                        res.httpStatus >= 400 ->
+                            Log.e(TAG, "http_error GET /api/devices/catalog code=${res.httpStatus} ms=$ms")
+                        res.emptyResponse -> Log.w(TAG, "catalog_empty ms=$ms")
+                        else -> Log.w(TAG, "catalog_offline ms=$ms")
+                    }
+                    if (screen == Screen.ORDER) refreshChromeAndRows(false)
+                }
+                return@thread
+            }
             StoreUuidResolver.remember(ctx, enrich.storeUuid ?: storeUuid)
             CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
             val merged = CatalogApi.merge(inv, enrich)
-            for (mp in merged) {
-                if (mp.groupId != null || mp.toppings.isNotEmpty()) {
-                    Log.i("SC_TOP", "merge name=${mp.name} uuid=${mp.uuid.take(8)} tops=${mp.toppings.size} groupId=${mp.groupId}")
-                }
-            }
+            val withTop = merged.count { it.toppings.isNotEmpty() }
+            val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
+                swipeRefresh?.isRefreshing = false
                 lastEnrich = enrich
                 products = merged
                 variantModel = DrinkVariants.build(merged)
                 combos = Combos.from(merged)
                 upsellDefault = enrich.upsellDefault
-                val withTop = merged.count { it.toppings.isNotEmpty() }
-                val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
-                Log.i(TAG, "enrich ok products=${merged.size} matchedUuid=${enrich.byUuid.size} matchedName=${enrich.byName.size} withToppings=$withTop sellableToppings=$withSellable upsellDefault=${enrich.upsellDefault.size} store=$storeUuid")
+                catalogNote = null
+                catalogLoadedAt = System.currentTimeMillis()
+                Log.i(TAG, "enrich ok products=${merged.size} matchedUuid=${enrich.byUuid.size} matchedName=${enrich.byName.size} withToppings=$withTop sellableToppings=$withSellable store=$storeUuid")
                 // Диагностика: ответ непустой, но ни один товар не обогащён — обычно значит,
                 // что пришёл каталог другой точки (storeUuid не тот или отсутствует).
                 val matched = merged.count { it.toppings.isNotEmpty() || it.hideFromMenu }
-                if (matched == 0) {
-                    Log.w(TAG, "enrich merge matched NOTHING store=$storeUuid — toppings will be empty")
-                }
+                if (matched == 0) Log.w(TAG, "enrich merge matched NOTHING store=$storeUuid — toppings will be empty")
+                Log.i(TAG, "catalog_loaded products=${merged.size} withToppings=$withTop ms=${System.currentTimeMillis() - startedAt}")
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
             }
         }
@@ -322,9 +364,7 @@ class MainActivity : AppCompatActivity() {
         when (screen) {
             Screen.CARD -> renderCard()
             Screen.ORDER -> renderOrder()
-            Screen.PAYMENT -> renderPayment()
             Screen.SHIFT -> renderShift()
-            Screen.DONE -> renderDone()
             Screen.QUEUE -> renderQueue()
         }
         if (screen != Screen.QUEUE) stopQueueTicker()
@@ -560,12 +600,18 @@ class MainActivity : AppCompatActivity() {
                 resolving = false
                 if (info.code.isNotEmpty()) {
                     CardSession.set(this, info)
+                    Log.i(TAG, "card_resolved kind=${CardSession.kindOf(code)} free=${info.freeAvailable} cb=${info.cashbackKopecks} reserved=${info.reservationId != null}")
                     lastCardCode = code; lastCardLabel = info.cardCode.ifBlank { null }
                     screen = Screen.ORDER
                     // Причина сбоя/ограничения остаётся видна на экране заказа.
                     if (info.freeStatus == "OFFLINE" && info.note != null) { notice = info.note; noticeKind = Kind.WARN } else notice = null
                 } else {
                     CardSession.clear(this)
+                    if (info.freeStatus == "ERROR") {
+                        Log.e(TAG, "resolve_failed kind=${CardSession.kindOf(code)} code=${info.errorCode ?: "unknown"} reason=${info.note}")
+                    } else {
+                        Log.w(TAG, "resolve_offline kind=${CardSession.kindOf(code)}")
+                    }
                     if (info.freeStatus == "ERROR") {
                         notice = info.note ?: "Карта не найдена"; noticeKind = Kind.ERROR
                     } else {
@@ -593,6 +639,9 @@ class MainActivity : AppCompatActivity() {
         topBar.setPadding(dp(m.headPadH), dp(m.headPadTop), dp(m.headPadH), dp(m.headPadBottom))
         topBar.addView(buildPosHead(card), LinearLayout.LayoutParams(MATCH, WRAP))
         notice?.let { topBar.addView(banner(it, noticeKind, 12f).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6) }) }
+        catalogNote?.let {
+            topBar.addView(banner(it, Kind.WARN, 11f).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(6) })
+        }
 
         val stage = FrameLayout(this)
         val content = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP }
@@ -656,7 +705,15 @@ class MainActivity : AppCompatActivity() {
             contentDescription = "Каталог товаров"
         }
         recycler = rv
-        catalogColumn.addView(rv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        // Pull-to-refresh: ручное обновление каталога (п.6 контракта) без перезапуска приложения.
+        val swipe = SwipeRefreshLayout(this).apply {
+            setColorSchemeColors(UiKit.BRAND, INK)
+            setProgressBackgroundColorSchemeColor(WHITE)
+            setOnRefreshListener { loadProducts(userInitiated = true) }
+            addView(rv, ViewGroup.LayoutParams(MATCH, MATCH))
+        }
+        swipeRefresh = swipe
+        catalogColumn.addView(swipe, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
         if (wideLayout) {
             // Закреплённый чек справа 372 (`.mode-10 #cartOverlay .sheet`).
@@ -914,50 +971,42 @@ class MainActivity : AppCompatActivity() {
      * Схема опций: приоритет — товары Эвотор с метками `#opt=`;
      * если их нет, берём топпинги из `/api/devices/catalog` (совместимость с текущим каталогом).
      */
+    /** backend `productId` по uuid терминала — для короткого meta в журнале. */
+    private fun productIdOf(uuid: String): Int? =
+        lastEnrich?.byUuid?.get(uuid)?.productId?.takeIf { it > 0 }
+
     private fun optionsFor(p: CatalogProduct): OptionPicker.Opts {
         val evotor = variantModel.options
-        fun mapEv(list: List<CatalogProduct>) = list.map {
-            OptionPicker.Opt(it.uuid, it.optionLabel, it.priceRub, it.uuid, it.defaultVariant)
+        // maxCount у опций из номенклатуры не задан: milk/syrup/sugar — одиночный выбор,
+        // extra — «можно несколько» (лимит backend-схемы применяется к её же опциям).
+        fun mapEv(list: List<CatalogProduct>, max: Int = 1) = list.map {
+            OptionPicker.Opt(it.uuid, it.optionLabel, it.priceRub, it.uuid, it.defaultVariant, maxCount = max)
         }
+        // Одна точка сборки: поля схемы и `Topping.id` (нужен ReceiptValidator) не расходятся.
+        fun fromTopping(t: Topping) = OptionPicker.Opt(
+            key = "t:${t.id}",
+            label = t.name,
+            price = t.priceRub,
+            evotorUuid = t.evotorUuid?.takeIf { u -> u.isNotBlank() },
+            isDefault = t.isDefault,
+            required = t.required,
+            zeroOption = t.zeroOption,
+            available = t.available,
+            maxCount = t.maxCount,
+            id = t.id,
+        )
         // Backend scheme may use any groupKey; map known ones, rest → extra.
         val byGroup = p.toppings.groupBy { it.groupKey.trim().lowercase() }
         val known = setOf("milk", "молоко", "syrup", "сироп", "sugar", "сахар", "topping", "extra", "other", "добавки", "добавка")
-        fun toOpts(vararg keys: String) = keys.flatMap { k ->
-            byGroup[k].orEmpty().map {
-                OptionPicker.Opt(
-                    key = "t:${it.id}",
-                    label = it.name,
-                    price = it.priceRub,
-                    evotorUuid = it.evotorUuid?.takeIf { u -> u.isNotBlank() },
-                    isDefault = it.isDefault,
-                    required = it.required,
-                    zeroOption = it.zeroOption,
-                    available = it.available,
-                )
-            }
-        }
-        val restExtra = byGroup
-            .filterKeys { it !in known }
-            .values
-            .flatten()
-            .map {
-                OptionPicker.Opt(
-                    key = "t:${it.id}",
-                    label = it.name,
-                    price = it.priceRub,
-                    evotorUuid = it.evotorUuid?.takeIf { u -> u.isNotBlank() },
-                    isDefault = it.isDefault,
-                    required = it.required,
-                    zeroOption = it.zeroOption,
-                    available = it.available,
-                )
-            }
+        fun toOpts(vararg keys: String) = keys.flatMap { k -> byGroup[k].orEmpty().map { fromTopping(it) } }
+        val restExtra = byGroup.filterKeys { it !in known }.values.flatten().map { fromTopping(it) }
         // Merge Evotor #opt= inventory items with backend toppings (do not drop one for the other).
         return OptionPicker.Opts(
             milk = mapEv(evotor.milk) + toOpts("milk", "молоко"),
             syrup = mapEv(evotor.syrup) + toOpts("syrup", "сироп"),
             sugar = mapEv(evotor.sugar) + toOpts("sugar", "сахар"),
-            extra = mapEv(evotor.extra) + toOpts("topping", "extra", "other", "добавки", "добавка") + restExtra,
+            extra = mapEv(evotor.extra, max = EVOTOR_EXTRA_LIMIT) +
+                toOpts("topping", "extra", "other", "добавки", "добавка") + restExtra,
         )
     }
 
@@ -1050,13 +1099,24 @@ class MainActivity : AppCompatActivity() {
         }
         var qty = 1
 
+        // Платная добавка без товара Эвотор не выбирается: фиксируем в журнале, что схема неполная.
+        val blockedToppings = listOf(opts.milk, opts.syrup, opts.sugar, opts.extra).flatten()
+            .filter { it.price.signum() > 0 && !it.zeroOption && it.evotorUuid.isNullOrBlank() }
+            .mapNotNull { it.id }
+        if (blockedToppings.isNotEmpty()) {
+            Log.w(TAG, "topping_blocked_no_uuid productId=${productIdOf(p.uuid)} toppingIds=$blockedToppings")
+        }
+
         val picker = OptionPicker(this)
         picker.bind(variants, opts, p)
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
 
         fun paint() {
             priceView.text = rub(picker.unitPrice())
-            addBtn.text = "В чек · ${rub(picker.unitPrice().multiply(BigDecimal(qty)))}"
+            val blocked = picker.blockers()
+            addBtn.text = if (blocked.isEmpty()) "В чек · ${rub(picker.unitPrice().multiply(BigDecimal(qty)))}" else blocked.first()
+            addBtn.alpha = if (blocked.isEmpty()) 1f else 0.55f
+            addBtn.isEnabled = blocked.isEmpty()
             qtyLabel.text = qty.toString()
         }
         picker.onChange = { paint() }
@@ -1102,7 +1162,21 @@ class MainActivity : AppCompatActivity() {
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
         addBtn.setOnClickListener {
+            val blocked = picker.blockers()
+            if (blocked.isNotEmpty()) {
+                Toast.makeText(this, blocked.first(), Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             val variant = picker.selectedVariant ?: return@setOnClickListener
+            val chosen = picker.chosen()
+            if (chosen.isNotEmpty()) {
+                Log.i(
+                    TAG,
+                    "toppings_selected productId=${productIdOf(variant.uuid)} " +
+                        "toppingIds=${chosen.mapNotNull { it.id }} " +
+                        "total=${chosen.fold(BigDecimal.ZERO) { acc, o -> acc.add(o.price) }.toPlainString()}",
+                )
+            }
             val signature = picker.signature().ifBlank { variant.uuid }
             repeat(qty) {
                 Cart.add(
@@ -1119,7 +1193,7 @@ class MainActivity : AppCompatActivity() {
                 // Каждая опция с товаром Эвотор — отдельная позиция: склад и отчётность сходятся.
                 picker.chosen().forEach { o ->
                     val uuid = o.evotorUuid?.takeIf { it.isNotBlank() } ?: return@forEach
-                    Cart.add(CartLine(uuid, "${o.label} (${variant.name})", o.price, BigDecimal.ONE))
+                    Cart.add(CartLine(uuid, "${o.label} (${variant.name})", o.price, BigDecimal.ONE, optionId = o.id))
                 }
             }
             onCartChanged()
@@ -1387,8 +1461,12 @@ class MainActivity : AppCompatActivity() {
         fun paint() {
             val total = picker.unitPrice().add(foodPrice)
             priceView.text = rub(total.subtract(combo.discountRub))
-            addBtn.text = (if (editingGroupId != null) "Сохранить · " else "В заказ · ") +
-                rub(total.subtract(combo.discountRub))
+            val blocked = picker.blockers()
+            addBtn.text = if (blocked.isEmpty()) {
+                (if (editingGroupId != null) "Сохранить · " else "В заказ · ") + rub(total.subtract(combo.discountRub))
+            } else blocked.first()
+            addBtn.alpha = if (blocked.isEmpty()) 1f else 0.55f
+            addBtn.isEnabled = blocked.isEmpty()
         }
         picker.onChange = { paintDrinkRow(); paint() }
         paint()
@@ -1402,6 +1480,11 @@ class MainActivity : AppCompatActivity() {
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
         addBtn.setOnClickListener {
+            val blocked = picker.blockers()
+            if (blocked.isNotEmpty()) {
+                Toast.makeText(this, blocked.first(), Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             val variant = picker.selectedVariant ?: drink
             val groupId = editingGroupId ?: ("combo-" + System.nanoTime())
             if (editingGroupId != null) Cart.removeComboGroup(editingGroupId)
@@ -1443,6 +1526,7 @@ class MainActivity : AppCompatActivity() {
                         cartKey = "$groupId#opt:$uuid",
                         comboGroupId = groupId,
                         comboId = combo.id,
+                        optionId = o.id,
                     ),
                 )
             }
@@ -1550,8 +1634,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * cartbar index: dark bar height 66, count circle, sum, CTA brand «К оплате».
-     * Тап по count/sum → showCart; CTA → showUpsellThenCheckout (существующий pay-flow).
+     * cartbar index: dark bar height 66, count circle, sum, CTA brand «В чек».
+     * Тап по count/sum → showCart; CTA «В чек» → showUpsellThenReceipt.
      * empty-cartbar: без «Повторить» — прошлого заказа в APK нет (не выдумываем).
      */
     private fun buildCartBar(card: CardInfo?): View {
@@ -1660,7 +1744,7 @@ class MainActivity : AppCompatActivity() {
         bar.addView(sumCol, LinearLayout.LayoutParams(0, WRAP, 1f))
 
         val cta = TextView(this).apply {
-            text = "К оплате"
+            text = "В чек"
             textSize = 12f
             letterSpacing = 0.01f
             weight(Fonts.SEMIBOLD)
@@ -1672,8 +1756,8 @@ class MainActivity : AppCompatActivity() {
             background = rounded(BRAND, 14, null)
             isClickable = true
             isFocusable = true
-            contentDescription = "К оплате"
-            setOnClickListener { showUpsellThenCheckout(card) }
+            contentDescription = "Передать позиции в чек Эвотор"
+            setOnClickListener { showUpsellThenReceipt(card) }
         }
         bar.addView(cta, LinearLayout.LayoutParams(WRAP, dp(m.ctaH)))
         bar.tag = cta
@@ -1862,7 +1946,7 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * cart-sheet 1:1 index: head (Чек + count + Очистить + close),
-     * order-type, cart-list rows, note, foot (Итого + К оплате).
+     * order-type, cart-list rows, note, foot (Итого + «В чек»).
      * Upsell track — из upsellDefault, только товары с evotorUuid в каталоге.
      * orderType — только подпись UI, в Эвотор не уходит.
      */
@@ -1980,7 +2064,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Лояльность в чеке (index `.loyalty-card`): тёмная карта с чашками и бонусами.
      * Без карты — пунктирная плашка «Привязать карту гостя».
-     * Список бонусов/подарка остаётся на экране «К оплате»: там же решается резерв.
+     * Список бонусов/подарка решается в листе «Лояльность» перед «В чек».
      */
     private fun buildCartLoyalty(card: CardInfo?): View {
         if (card == null || card.code.isEmpty()) {
@@ -2184,7 +2268,7 @@ class MainActivity : AppCompatActivity() {
         footPriceCol.addView(footTotal)
         foot.addView(footPriceCol, LinearLayout.LayoutParams(0, WRAP, 1f))
         val goPay = TextView(this).apply {
-            text = "К оплате"
+            text = "В чек"
             textSize = 12.5f
             setOnest(true)
             setTextColor(WHITE)
@@ -2237,7 +2321,7 @@ class MainActivity : AppCompatActivity() {
             goPay.setOnClickListener {
                 close()
                 val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
-                showUpsellThenCheckout(card)
+                showUpsellThenReceipt(card)
             }
             clearBtn.setOnClickListener {
                 confirm(
@@ -2469,18 +2553,18 @@ class MainActivity : AppCompatActivity() {
         dialog.behavior.skipCollapsed = true
     }
 
-    // ── Экран 3: «К оплате» с лояльностью ──
+    // ── Лояльность и передача позиций в Эвотор ──
 
 
     /** Есть ли в чеке еда — тогда рекомендации не нужны (index: !hasFood()). */
     private fun hasFoodInCart(): Boolean =
         FoodRules.cartHasFood(Cart.all(), products.filter { it.isFood }.map { it.uuid }.toSet())
 
-    private fun showUpsellThenCheckout(card: CardInfo?) {
+    private fun showUpsellThenReceipt(card: CardInfo?) {
         val hasFood = hasFoodInCart()
         if (recShown || hasFood) {
             Log.i(TAG, "hasFood=$hasFood upsellShown=false (recShown=$recShown)")
-            checkout(card)
+            openLoyaltyOrSend(card)
             return
         }
         Log.i(TAG, "hasFood=false upsellShown=true")
@@ -2512,11 +2596,11 @@ class MainActivity : AppCompatActivity() {
             if (id in modUuidsRec) return@forEach
             if (Names.normalize(u.name) in modNamesRec) return@forEach
             if (products.firstOrNull { it.uuid == id }?.hideFromMenu == true) return@forEach
-            candidates.putIfAbsent(id, u.copy(evotorUuid = id))
+            if (!candidates.containsKey(id)) candidates[id] = u.copy(evotorUuid = id)
         }
         val list = candidates.entries.take(3)
         if (list.isEmpty()) {
-            checkout(card)
+            openLoyaltyOrSend(card)
             return
         }
         recShown = true
@@ -2528,7 +2612,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        sheetHead(root, "Что-то к напитку?", "Выпечка к кофе · можно пропустить") { dialog.dismiss(); checkout(card) }
+        sheetHead(root, "Что-то к напитку?", "Выпечка к кофе · можно пропустить") { dialog.dismiss(); openLoyaltyOrSend(card) }
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2542,8 +2626,8 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, dp(9))
         })
 
-        val payCta = btn("", "primary") { dialog.dismiss(); checkout(card) }.apply { textSize = 11.5f }
-        fun paintPay() { payCta.text = "К оплате · ${rub(cartTotalRub())}" }
+        val payCta = btn("", "primary") { dialog.dismiss(); openLoyaltyOrSend(card) }.apply { textSize = 11.5f }
+        fun paintPay() { payCta.text = "В чек · ${rub(cartTotalRub())}" }
         paintPay()
 
         val listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -2612,7 +2696,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14), dp(10), dp(14), dp(11))
             background = topBorder(WHITE)
         }
-        foot.addView(btn("Пропустить", "ghost") { dialog.dismiss(); checkout(card) }, LinearLayout.LayoutParams(WRAP, dp(50)).apply { rightMargin = dp(10) })
+        foot.addView(btn("Пропустить", "ghost") { dialog.dismiss(); openLoyaltyOrSend(card) }, LinearLayout.LayoutParams(WRAP, dp(50)).apply { rightMargin = dp(10) })
         foot.addView(payCta, LinearLayout.LayoutParams(0, dp(50), 1f))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -2708,51 +2792,54 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * pay-sheet 1:1: гость · «К оплате» · выбор подарка/кэшбэка · способы (Картой / Наличными) · примечание.
-     * Деньги принимает штатный экран Эвотора (SellLauncher): здесь способ — подсказка кассиру,
-     * для наличных открывается калькулятор сдачи (справочный).
+     * Перед передачей в чек. Экрана оплаты в APK нет: способ оплаты, сумма, сдача и чек — это Эвотор POS.
+     * Здесь решается только льгота по карте гостя (подарок / списание кэшбэка) — и только из резерва.
      */
-    private fun checkout(card: CardInfo?) {
+    private fun openLoyaltyOrSend(card: CardInfo?) {
         if (Cart.isEmpty()) {
             notice = "Корзина пуста — добавьте позиции."
             noticeKind = Kind.WARN
             safeRender()
             return
         }
-        notice = null
         val now = System.currentTimeMillis() / 1000
         val reserved = card != null && DiscountCalc.reserved(card, now)
-        val eligibleLines = Cart.all().filter { it.freeEligible }
-        val eligiblePrices = eligibleLines.map { it.priceRub }
-        val giftPossible = card != null && card.freeAvailable > 0 && eligiblePrices.isNotEmpty()
-        val cbPossible = card != null && card.cashbackKopecks > 0 && card.reservationId != null
+        val giftPossible = reserved && card != null && card.freeAvailable > 0 && Cart.all().any { it.freeEligible }
+        val cbPossible = reserved && card != null && card.cashbackKopecks > 0
+        if (card == null || (!giftPossible && !cbPossible)) {
+            sendReceipt(false, false, 0L)
+            return
+        }
+        showLoyaltySheet(card, giftPossible, cbPossible)
+    }
 
+    /** Компактный лист «Лояльность»: подарок и кэшбэк из резерва → «В чек». Никаких способов оплаты. */
+    private fun showLoyaltySheet(card: CardInfo, giftPossible: Boolean, cbPossible: Boolean) {
         dismissSheets()
         val dialog = BottomSheetDialog(this)
-        dialog.setCanceledOnTouchOutside(false)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        sheetHead(root, "Оплата", "Чек · ${orderType.lowercase()} · Эвотор") { dialog.dismiss() }
+        sheetHead(root, "Лояльность", "Чек · ${orderType.lowercase()} · Эвотор") { dialog.dismiss() }
 
-        val scroll = NestedScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), dp(14))
         }
-        scroll.addView(box)
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        root.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        // .pay-order
+        val now = System.currentTimeMillis() / 1000
+        val eligibleLines = Cart.all().filter { it.freeEligible }
+        val cheapest = DiscountCalc.cheapestEligible(eligibleLines.map { it.priceRub }) ?: BigDecimal.ZERO
+        val cheapestName = eligibleLines.minByOrNull { it.priceRub }?.name
+
+        // .pay-order: только справочная информация о госте и составе, без сумм к оплате.
         val order = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(11), dp(9), dp(11), dp(9))
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(UiKit.SURFACE_2); cornerRadius = dp(11).toFloat()
-                setStroke(dp(1), UiKit.LINE_STRONG, dp(3).toFloat(), dp(3).toFloat())
-            }
+            background = rounded(UiKit.SURFACE_2, 11, UiKit.LINE_STRONG)
         }
         fun small(t: String, end: Boolean = false) = TextView(this).apply {
             text = t; textSize = 10f; setTextColor(UiKit.MUTED); letterSpacing = 0.02f
@@ -2761,7 +2848,7 @@ class MainActivity : AppCompatActivity() {
         val oLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         oLeft.addView(small("Гость"))
         oLeft.addView(TextView(this).apply {
-            text = if (card != null) card.cardCode.ifBlank { "по QR" } else "Без карты"
+            text = card.cardCode.ifBlank { "по QR" }
             textSize = 11.5f; weight(Fonts.SEMIBOLD); setTextColor(INK)
         })
         order.addView(oLeft, LinearLayout.LayoutParams(0, WRAP, 1f))
@@ -2774,50 +2861,23 @@ class MainActivity : AppCompatActivity() {
         order.addView(oRight)
         box.addView(order, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        // .pay-total
-        val totalWrap = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, dp(16), 0, dp(14))
-            background = bottomBorder(WHITE)
+        val resExpiry = card.reservationExpiresAt
+        val resText = when {
+            card.reservationId == null -> "Резерв не создан: льгота не применится."
+            resExpiry == 0L -> null
+            resExpiry - now > 0 -> "Бонусы зарезервированы ещё ~${(resExpiry - now + 59) / 60} мин."
+            else -> "Резерв истёк: бонус применится, только если его не занял другой чек."
         }
-        totalWrap.addView(TextView(this).apply {
-            text = "К ОПЛАТЕ"; textSize = 10f; letterSpacing = 0.12f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
-        })
-        val totalTv = TextView(this).apply {
-            textSize = 38f; letterSpacing = -0.045f; weight(Fonts.BOLD); setTextColor(INK)
-            includeFontPadding = false; setPadding(0, dp(3), 0, 0)
+        resText?.let {
+            box.addView(
+                banner(it, if (DiscountCalc.reserved(card, now)) Kind.INFO else Kind.WARN, 11f),
+                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) },
+            )
         }
-        totalWrap.addView(totalTv)
-        val discTv = TextView(this).apply {
-            textSize = 10f; setTextColor(UiKit.MUTED); setPadding(0, dp(4), 0, 0)
-        }
-        totalWrap.addView(discTv)
-        box.addView(totalWrap, LinearLayout.LayoutParams(MATCH, WRAP))
 
-        var useGift = giftPossible && reserved
+        var useGift = giftPossible
         var useCb = false
-        lateinit var recompute: () -> Unit
-
-        if (card != null) {
-            val resExpiry = card.reservationExpiresAt
-            val resText = when {
-                card.reservationId == null -> null
-                resExpiry == 0L -> null
-                resExpiry - now > 0 -> "Бонусы зарезервированы ещё ~${(resExpiry - now + 59) / 60} мин."
-                reserved -> "Резерв истёк: бонус применится, только если его не занял другой чек."
-                else -> "Резерв истёк — бонус не применится. Отсканируйте карту заново."
-            }
-            resText?.let { box.addView(banner(it, if (reserved) Kind.INFO else Kind.WARN, 11f), LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) }) }
-            if ((giftPossible || cbPossible) && !reserved) {
-                box.addView(banner("Бонус по карте недоступен: резерв не создан или истёк. Оплата пройдёт без скидки.", Kind.WARN, 11f),
-                    LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
-            }
-        }
-        val cheapestName = eligibleLines.minByOrNull { it.priceRub }?.name
-        val cheapest = DiscountCalc.cheapestEligible(eligiblePrices) ?: BigDecimal.ZERO
-
-        fun choiceBlock(title: String, hint: String, a: String, aSub: String?, b: String, bSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
+        fun block(title: String, first: String, firstSub: String?, second: String, secondSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
             val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             wrap.addView(TextView(this).apply {
                 text = title.uppercase(); textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
@@ -2826,88 +2886,38 @@ class MainActivity : AppCompatActivity() {
             val cells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             fun paint() {
                 cells.removeAllViews()
-                cells.addView(choiceCell(a, aSub, firstOn()) { set(true); paint(); recompute() }, LinearLayout.LayoutParams(MATCH, WRAP))
-                cells.addView(choiceCell(b, bSub, !firstOn()) { set(false); paint(); recompute() }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
+                cells.addView(choiceCell(first, firstSub, firstOn()) { set(true); paint() }, LinearLayout.LayoutParams(MATCH, WRAP))
+                cells.addView(choiceCell(second, secondSub, !firstOn()) { set(false); paint() }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
                 Fonts.apply(cells)
             }
             paint()
             wrap.addView(cells)
             box.addView(wrap)
         }
-        if (giftPossible && reserved) {
-            choiceBlock("Подарок", "", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) { useGift = it }
-        } else useGift = false
-        if (cbPossible && reserved && card != null) {
-            choiceBlock("Кэшбэк", "", "Копить кэшбэк", null, "Списать кэшбэк", "до ${card.cashbackKopecks / 100} ₽", { !useCb }) { useCb = !it }
+        if (giftPossible) {
+            block("Подарок", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) { useGift = it }
+        }
+        if (cbPossible) {
+            block("Кэшбэк", "Копить кэшбэк", null, "Списать кэшбэк", "до ${card.cashbackKopecks / 100} ₽", { !useCb }) { useCb = !it }
         }
 
-        recompute = {
-            val gross = Cart.gross()
-            val r = if (card != null) DiscountCalc.compute(
-                gross, eligiblePrices, reserved, useGift, card.freeAvailable,
-                if (useCb) card.cashbackKopecks else 0L, card.cashbackKopecks,
-            ) else DiscountCalc.Result(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO)
-            val combo = comboDiscountRub()
-            val dueNow = gross.subtract(r.total).subtract(combo).max(BigDecimal.ZERO)
-            val disc = gross.subtract(dueNow)
-            totalTv.text = rub(dueNow)
-            discTv.text = if (disc.signum() > 0) "Скидка −${rub(disc)}" else ""
-            discTv.setTextColor(if (disc.signum() > 0) UiKit.SUCCESS else UiKit.MUTED)
-            payDue = dueNow
-        }
-        recompute()
+        box.addView(
+            noteRow("Льготу применит Эвотор по резерву. Способ оплаты, сумму и чек считает POS."),
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },
+        )
 
-        // .pay-methods
-        fun method(label: String, sub: String, iconRes: Int, primary: Boolean, onClick: () -> Unit): View {
-            val c = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(11), dp(11), dp(11), dp(11))
-                minimumHeight = dp(92)
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { onClick() }
-            }
-            val base = rounded(WHITE, 14, if (primary) BRAND else LINE)
-            c.background = if (!primary) base else android.graphics.drawable.LayerDrawable(arrayOf(base, GradientDrawable().apply {
-                setColor(0); cornerRadius = dp(13).toFloat(); setStroke(dp(1), BRAND)
-            })).apply { setLayerInset(1, dp(1), dp(1), dp(1), dp(1)) }
-            c.addView(FrameLayout(this).apply {
-                background = rounded(if (primary) BRAND else UiKit.SURFACE_2, 9, if (primary) BRAND else LINE)
-                addView(icon(this@MainActivity, iconRes, 17f, if (primary) WHITE else INK), FrameLayout.LayoutParams(dp(17), dp(17), Gravity.CENTER))
-            }, LinearLayout.LayoutParams(dp(32), dp(32)))
-            c.addView(TextView(this).apply {
-                text = label; textSize = 11.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); setPadding(0, dp(7), 0, 0)
-            })
-            c.addView(TextView(this).apply {
-                text = sub; textSize = 10f; setTextColor(UiKit.MUTED); setLineSpacing(0f, 1.15f); setPadding(0, dp(7), 0, 0)
-            })
-            return c
+        val foot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(11))
+            background = topBorder(WHITE)
         }
-        val methods = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        methods.addView(method("Картой", "Приложить к терминалу", R.drawable.ic_card, true) {
-            dialog.dismiss(); pay(useGift && reserved, useCb && reserved, if (useCb && reserved) card!!.cashbackKopecks else 0L)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        methods.addView(method("Наличными", "Ввод суммы и сдача", R.drawable.ic_cash, false) {
+        foot.addView(btn("В чек", "primary") {
+            val free = useGift && giftPossible
+            val spend = useCb && cbPossible
             dialog.dismiss()
-            showCashSheet(payDue) { pay(useGift && reserved, useCb && reserved, if (useCb && reserved) card!!.cashbackKopecks else 0L) }
-        }, LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(8) })
-        box.addView(methods, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(13) })
-
-        // .pay-note
-        val note = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(10), dp(9), dp(10), dp(9))
-            background = rounded(UiKit.SURFACE_2, 10, LINE)
-        }
-        note.addView(icon(this, R.drawable.ic_info, 13f, UiKit.INK_2), LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(7); topMargin = dp(1) })
-        note.addView(TextView(this).apply {
-            val sp = android.text.SpannableString("Выберите способ — Эвотор примет оплату, передаст скидку и напечатает фискальный чек.")
-            val i = sp.indexOf("Эвотор")
-            sp.setSpan(android.text.style.ForegroundColorSpan(UiKit.INK_2), i, i + 6, 0)
-            sp.setSpan(android.text.style.StyleSpan(Typeface.BOLD), i, i + 6, 0)
-            text = sp; textSize = 10f; setTextColor(UiKit.MUTED); setLineSpacing(0f, 1.15f)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        box.addView(note, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(13) })
+            sendReceipt(free, spend, if (spend) card.cashbackKopecks else 0L)
+        }, LinearLayout.LayoutParams(MATCH, dp(50)))
+        root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
         Fonts.apply(root)
         dialog.setContentView(root)
@@ -2915,154 +2925,110 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnDismissListener { if (checkoutDialog === dialog) checkoutDialog = null }
         checkoutDialog = dialog
         dialog.show()
-        dialog.behavior.isDraggable = false
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
     }
 
-    private var payDue: BigDecimal = BigDecimal.ZERO
-
-    private fun bottomBorder(color: Int): android.graphics.drawable.Drawable {
-        val line = android.graphics.drawable.ColorDrawable(LINE)
-        val fill = android.graphics.drawable.ColorDrawable(color)
-        return android.graphics.drawable.LayerDrawable(arrayOf(line, fill)).apply { setLayerInset(1, 0, 0, 0, dp(1)) }
-    }
+    /** Защита от двойного нажатия «В чек»: второй вызов, пока первый не завершился, игнорируется. */
+    private var sendingReceipt = false
 
     /**
-     * cash-sheet 1:1: «К оплате» · «Получено» · сдача · быстрые суммы · клавиатура · «Принять».
-     * Расчёт справочный: деньги вводятся и фиксируются на экране оплаты Эвотора,
-     * который откроется по «Принять».
+     * Финальная проверка корзины по последнему каталогу и передача позиций Эвотору.
+     * Платная добавка без evotorUuid / удалённый товар / изменившаяся схема — чек не открываем.
      */
-    private fun showCashSheet(due: BigDecimal, onAccept: () -> Unit) {
-        dismissSheets()
-        val dialog = BottomSheetDialog(this)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(WHITE) }
-        sheetHead(root, "Наличные", "Чек · ${orderType.lowercase()} · расчёт сдачи") { dialog.dismiss() }
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), 0, dp(16), dp(12)) }
-        root.addView(body, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        val dueRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
-            setPadding(0, dp(6), 0, dp(9)); background = bottomBorder(WHITE)
+    private fun sendReceipt(free: Boolean, spend: Boolean, cashbackKopecks: Long) {
+        if (sendingReceipt) return
+        if (Cart.isEmpty()) {
+            notice = "Корзина пуста — добавьте позиции."
+            noticeKind = Kind.WARN
+            safeRender()
+            return
         }
-        dueRow.addView(TextView(this).apply {
-            text = "К ОПЛАТЕ"; textSize = 10f; letterSpacing = 0.1f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        dueRow.addView(TextView(this).apply {
-            text = rub(due); textSize = 24f; letterSpacing = -0.035f; weight(Fonts.BOLD); setTextColor(INK)
-        })
-        body.addView(dueRow, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        val display = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
-            setPadding(dp(12), dp(10), dp(12), dp(10)); background = rounded(UiKit.SURFACE_2, 12, LINE)
+        val issues = ReceiptValidator.validate(Cart.all(), products)
+        if (issues.isNotEmpty()) {
+            showReceiptIssues(issues)
+            return
         }
-        display.addView(TextView(this).apply {
-            text = "Получено"; textSize = 10f; weight(Fonts.MEDIUM); setTextColor(UiKit.MUTED)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val recvTv = TextView(this).apply { textSize = 25f; letterSpacing = -0.03f; weight(Fonts.BOLD); setTextColor(INK) }
-        display.addView(recvTv)
-        body.addView(display, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10); bottomMargin = dp(8) })
-
-        val changeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(2), 0, dp(2), dp(8)) }
-        changeRow.addView(TextView(this).apply { text = "Сдача"; textSize = 10f; setTextColor(UiKit.MUTED) }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val changeTv = TextView(this).apply { textSize = 13f; weight(Fonts.STRONG) }
-        changeRow.addView(changeTv)
-        body.addView(changeRow)
-
-        var typed = ""
-        val acceptBtn = btn("Принять", "primary") {}
-        fun received(): BigDecimal = if (typed.isEmpty()) BigDecimal.ZERO else BigDecimal(typed)
-        fun paint() {
-            val rcv = received()
-            recvTv.text = rub(rcv)
-            val ch = rcv.subtract(due)
-            val ok = rcv >= due
-            changeTv.text = if (typed.isEmpty()) "—" else if (ok) rub(ch) else "не хватает ${rub(ch.negate())}"
-            changeTv.setTextColor(if (typed.isEmpty()) UiKit.MUTED else if (ok) UiKit.SUCCESS else UiKit.DANGER)
-            acceptBtn.isEnabled = ok
-            acceptBtn.background = rounded(if (ok) BRAND else 0xFFC9C3B9.toInt(), 14, null)
-        }
-
-        val quick = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun q(label: String, v: BigDecimal?) {
-            quick.addView(TextView(this).apply {
-                text = label; textSize = 10f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.INK_2); gravity = Gravity.CENTER
-                background = rounded(WHITE, 9, LINE); isClickable = true
-                setOnClickListener { typed = (v ?: due).stripTrailingZeros().toPlainString().let { if (it.contains("E")) BigDecimal(it).toPlainString() else it }; paint() }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { if (quick.childCount > 0) leftMargin = dp(5) })
-        }
-        q("Без сдачи", null); q("500", BigDecimal(500)); q("1 000", BigDecimal(1000)); q("2 000", BigDecimal(2000))
-        body.addView(quick, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
-
-        val keys = listOf("1","2","3","4","5","6","7","8","9","00","0","⌫")
-        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (r in 0 until 4) {
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            for (c in 0 until 3) {
-                val k = keys[r * 3 + c]
-                val cell: View = if (k == "⌫") FrameLayout(this).apply {
-                    background = rounded(UiKit.SURFACE_2, 10, null)
-                    addView(icon(this@MainActivity, R.drawable.ic_backspace, 20f, UiKit.MUTED), FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
-                } else TextView(this).apply {
-                    text = k; textSize = 17f; weight(Fonts.MEDIUM); gravity = Gravity.CENTER
-                    setTextColor(if (k == "00") UiKit.MUTED else INK)
-                    background = rounded(UiKit.SURFACE_2, 10, null)
-                }
-                cell.isClickable = true
-                cell.setOnClickListener {
-                    when (k) {
-                        "⌫" -> typed = typed.dropLast(1)
-                        else -> if (typed.length < 7 && !(typed.isEmpty() && (k == "0" || k == "00"))) typed += k
-                    }
-                    paint()
-                }
-                row.addView(cell, LinearLayout.LayoutParams(0, dp(48), 1f).apply { if (c > 0) leftMargin = dp(6) })
-            }
-            grid.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { if (r > 0) topMargin = dp(6) })
-        }
-        body.addView(grid)
-
-        val foot = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(11)); background = topBorder(WHITE) }
-        acceptBtn.setOnClickListener { if (acceptBtn.isEnabled) { dialog.dismiss(); onAccept() } }
-        foot.addView(acceptBtn, LinearLayout.LayoutParams(MATCH, dp(50)))
-        foot.addView(TextView(this).apply {
-            text = "Сумму и сдачу подтвердит экран оплаты Эвотора."
-            textSize = 10f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
-        })
-        root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
-        paint()
-
-        Fonts.apply(root)
-        dialog.setContentView(root)
-        styleSheet(dialog)
-        dialog.show()
-        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
-        dialog.behavior.skipCollapsed = true
-    }
-
-    /** Защита от двойного нажатия «Оплатить»: второй вызов, пока первый не завершился, игнорируется. */
-    private var paying = false
-
-    private fun pay(free: Boolean, spend: Boolean, amount: Long) {
-        if (paying) return
-        paying = true
+        sendingReceipt = true
         // Выгода комбо должна быть уже записана: её применяет DiscountIntegrationService.
         CheckoutChoice.saveCombo(this, comboDiscountRub())
-        // Оплата только штатным экраном Эвотор (SellLauncher → createIntentForSellReceiptPayment).
-        // Свой экран Screen.PAYMENT больше не показываем.
-        SellLauncher.openSellReceipt(this, free, spend, amount) { ok, msg ->
-            paying = false
-            if (ok) {
+        SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks) { outcome ->
+            sendingReceipt = false
+            if (outcome.ok) {
+                // Чек открыт, но оплата не подтверждена: заказ ждёт (PENDING), номер не тратится.
+                markPendingOrder()
                 PendingPayment.set(this)
                 // Уходим на экран Эвотор; по возврату onResume решит: успех → QUEUE, отмена → ORDER+корзина.
                 screen = Screen.ORDER
-                // не safeRender — activity уходит в оплату
             } else {
-                notice = msg; noticeKind = Kind.ERROR
+                notice = outcome.message
+                noticeKind = Kind.ERROR
+                if (outcome.catalogRefresh) loadProducts(userInitiated = true)
                 if (screen == Screen.ORDER) safeRender()
             }
         }
+    }
+
+    /**
+     * Заказ ждёт оплаты: состав фиксируется сейчас, номер выдаётся только после подтверждения.
+     * Локально на терминале, backend не участвует.
+     */
+    private fun markPendingOrder() {
+        try {
+            val lines = Cart.all()
+            if (lines.isEmpty()) return
+            OrderQueueStore.addPending(
+                this,
+                lines.map { l ->
+                    val q = l.quantity.stripTrailingZeros().toPlainString()
+                    if (q == "1") l.name else "${l.name} × $q"
+                },
+                cartTotalRub(),
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "queue pending", t)
+        }
+    }
+
+    /** Оплата подтверждена (чек закрыт в POS): присвоить номер и поставить в очередь бариста. */
+    private fun confirmPendingOrder() {
+        try {
+            val id = OrderQueueStore.pendingId(this) ?: return
+            OrderQueueStore.confirm(this, id, shiftInfo?.number)
+        } catch (t: Throwable) {
+            Log.e(TAG, "queue confirm", t)
+        }
+    }
+
+    /** Чек остался открытым: оплаты не было, PENDING удаляем — номер не израсходован. */
+    private fun cancelPendingOrder() {
+        try {
+            val id = OrderQueueStore.pendingId(this) ?: return
+            OrderQueueStore.cancelPending(this, id)
+        } catch (t: Throwable) {
+            Log.e(TAG, "queue cancel", t)
+        }
+    }
+
+    /** Позиции, которые нельзя провести в чеке: показываем причину и после подтверждения убираем их. */
+    private fun showReceiptIssues(issues: List<ReceiptIssue>) {
+        Log.w(
+            TAG,
+            "receipt_blocked count=${issues.size} reasons=${issues.map { it.reason }.distinct()} " +
+                "options_without_uuid=${issues.count { it.reason == "option_without_uuid" }}",
+        )
+        val text = issues.take(8).joinToString("\n") { "• ${it.name}: ${it.message}" }
+        AlertDialog.Builder(this)
+            .setTitle("Позиции не попадут в чек")
+            .setMessage(text)
+            .setPositiveButton("Убрать и обновить") { _, _ ->
+                issues.forEach { Cart.remove(it.cartKey) }
+                onCartChanged()
+                loadProducts(userInitiated = true)
+                safeRender()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     // ── Экран SHIFT: хаб смены (index shift-page) ──
@@ -3968,174 +3934,6 @@ class MainActivity : AppCompatActivity() {
         root.addView(card)
     }
 
-    // ── Экран 4: ожидание подтверждения оплаты (processing / done visual) ──
-
-    /**
-     * После SellLauncher терминал показывает штатную оплату Эвотора.
-     * Этот экран — подтверждение результата баристой (как и раньше через PendingPayment).
-     * Не эмулируем фискализацию — только UI + те же clear/set.
-     */
-    private fun renderPayment() {
-        val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
-        topBar.setPadding(dp(16), dp(14), dp(16), dp(8))
-        topBar.addView(TextView(this).apply {
-            text = "Оплата · Эвотор"
-            textSize = 16f
-            setOnest(true)
-            setTextColor(INK)
-        })
-        topBar.addView(TextView(this).apply {
-            text = "Чек · ${orderType.lowercase()}"
-            textSize = 10f
-            setTextColor(UiKit.MUTED)
-        })
-
-        // processing block (centered)
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(20), dp(24), dp(20), dp(16))
-            background = rounded(WHITE, 20, LINE)
-        }
-        // static "spinner" ring (no animation dependency)
-        val ring = View(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setStroke(dp(3), BRAND)
-                setColor(UiKit.BRAND_SOFT)
-            }
-        }
-        panel.addView(ring, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            bottomMargin = dp(10)
-        })
-        panel.addView(TextView(this).apply {
-            text = "Чек открыт на терминале"
-            textSize = 14f
-            setOnest(true)
-            setTextColor(INK)
-            gravity = Gravity.CENTER
-        })
-        panel.addView(TextView(this).apply {
-            text = "После возврата с экрана оплаты Эвотора подтвердите результат ниже."
-            textSize = 10.5f
-            setTextColor(UiKit.MUTED)
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(6), dp(8), 0)
-        })
-        panel.addView(TextView(this).apply {
-            text = rub(cartTotalRub())
-            textSize = 22f
-            setOnest(true)
-            setTextColor(INK)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, 0)
-        })
-        if (card != null) {
-            panel.addView(TextView(this).apply {
-                text = "Гость · ${card.cardCode.ifBlank { "QR" }} · ${card.paidCups}/${card.cupsForFree}"
-                textSize = 11f
-                setTextColor(UiKit.MUTED)
-                gravity = Gravity.CENTER
-                setPadding(0, dp(6), 0, 0)
-            })
-            panel.addView(TextView(this).apply {
-                // Чашки начисляет сервер по SELL: не обещаем цифру, которую не можем подтвердить.
-                text = "Чашки и бонусы обновятся после синхронизации чека"
-                textSize = 10f
-                setTextColor(UiKit.MUTED)
-                gravity = Gravity.CENTER
-                setPadding(dp(8), dp(4), dp(8), 0)
-            })
-        }
-        root.addView(panel, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-
-        // order lines compact
-        if (!Cart.isEmpty()) {
-            root.addView(TextView(this).apply {
-                text = "ПОЗИЦИИ"
-                textSize = 10f
-                setOnest(true)
-                setTextColor(UiKit.MUTED)
-                letterSpacing = 0.11f
-                setPadding(0, 0, 0, dp(6))
-            })
-            Cart.all().forEach { l ->
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, dp(6), 0, dp(6))
-                }
-                row.addView(TextView(this).apply {
-                    text = "${l.name} × ${l.quantity.stripTrailingZeros().toPlainString()}"
-                    textSize = 12.5f
-                    setTextColor(INK)
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                }, LinearLayout.LayoutParams(0, WRAP, 1f))
-                row.addView(TextView(this).apply {
-                    text = rub(l.lineTotal())
-                    textSize = 12.5f
-                    setOnest(true)
-                    setTextColor(INK)
-                })
-                root.addView(row)
-                root.addView(View(this).apply { setBackgroundColor(0xFFF1EBE1.toInt()) }, LinearLayout.LayoutParams(MATCH, 1))
-            }
-        }
-
-        bottomBar.setPadding(dp(14), dp(10), dp(14), dp(11))
-        bottomBar.background = topBorder(WHITE)
-        bottomBar.addView(btn("Чек пробит", "primary") {
-            // Снимок для экрана «Готово» — корзина сейчас будет очищена.
-            doneLines = Cart.all()
-            doneTotal = cartTotalRub()
-            doneCard = card
-            // Один тап «Чек пробит» = один номер (кнопка исчезает вместе с корзиной).
-            doneOrder = try {
-                OrderQueueStore.enqueue(
-                    this@MainActivity,
-                    doneLines.map { l -> val q = l.quantity.stripTrailingZeros().toPlainString(); if (q == "1") l.name else "${l.name} × $q" },
-                    doneTotal,
-                    shiftInfo?.number,
-                )
-            } catch (t: Throwable) { Log.e(TAG, "queue enqueue", t); null }
-            CardSession.clear(this@MainActivity)
-            Cart.rememberAsLast()
-            Cart.clear()
-            PendingPayment.clear(this@MainActivity)
-            CheckoutChoice.saveCombo(this@MainActivity, BigDecimal.ZERO)
-            notice = null
-            screen = Screen.DONE
-            safeRender()
-        }, LinearLayout.LayoutParams(MATCH, dp(50)).apply { bottomMargin = dp(6) })
-        bottomBar.addView(TextView(this).apply {
-            text = "Не оплачено — к заказу"
-            textSize = 10.5f
-            weight(Fonts.SEMIBOLD)
-            gravity = Gravity.CENTER
-            setTextColor(UiKit.MUTED)
-            isClickable = true
-            setOnClickListener {
-                PendingPayment.clear(this@MainActivity)
-                notice = null
-                screen = Screen.ORDER
-                safeRender()
-            }
-        }, LinearLayout.LayoutParams(MATCH, dp(38)))
-    }
-
-
-    private var doneLines: List<CartLine> = emptyList()
-    private var doneTotal: BigDecimal = BigDecimal.ZERO
-    private var doneCard: CardInfo? = null
-    private var doneOrder: QueueOrder? = null
-
-    /**
-     * `.done` 1:1: шапка (логотип + «Касса · 6.7»), круг-галочка 72, «Оплачено», сумма 38/700,
-     * список позиций, плашка лояльности, «Новый заказ».
-     * Метод оплаты и сдачу знает только Эвотор — на экране их нет, пока не прочитаны из чека.
-     */
-
     // ── Очередь бариста (локально на терминале) ──
 
     private val queueHandler = Handler(Looper.getMainLooper())
@@ -4157,7 +3955,7 @@ class MainActivity : AppCompatActivity() {
     /** Компактный индикатор в шапке: часы + номера «готовится», галочка + номера «готов». Пусто → нет индикатора. */
     private fun queueIndicator(): View? {
         val all = try { OrderQueueStore.load(this) } catch (_: Throwable) { emptyList() }
-        val prep = QueueOps.preparing(all)
+        val prep = QueueOps.preparing(all, OrderQueueStore.showPending(this))
         val ready = QueueOps.ready(all)
         if (prep.isEmpty() && ready.isEmpty()) return null
         fun nums(l: List<QueueOrder>): String {
@@ -4192,7 +3990,7 @@ class MainActivity : AppCompatActivity() {
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         head.addView(closeButtonBack("К заказам") { screen = Screen.ORDER; safeRender() })
         val all = try { OrderQueueStore.load(this) } catch (_: Throwable) { emptyList() }
-        val prep = QueueOps.preparing(all)
+        val prep = QueueOps.preparing(all, OrderQueueStore.showPending(this))
         val ready = QueueOps.ready(all)
         head.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         head.addView(TextView(this).apply {
@@ -4215,8 +4013,14 @@ class MainActivity : AppCompatActivity() {
             }
             row.addView(TextView(this).apply {
                 text = o.label; textSize = 26f; weight(Fonts.BOLD); gravity = Gravity.CENTER
-                setTextColor(if (isReady) UiKit.SUCCESS else WHITE)
-                background = rounded(if (isReady) UiKit.SUCCESS_SOFT else INK, 12, null)
+                setTextColor(
+                    when {
+                        isReady -> UiKit.SUCCESS
+                        o.isPending -> UiKit.MUTED
+                        else -> WHITE
+                    },
+                )
+                background = rounded(if (isReady) UiKit.SUCCESS_SOFT else if (o.isPending) UiKit.SURFACE_2 else INK, 12, null)
             }, LinearLayout.LayoutParams(dp(64), dp(56)).apply { rightMargin = dp(12) })
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             col.addView(TextView(this).apply {
@@ -4224,22 +4028,39 @@ class MainActivity : AppCompatActivity() {
                 textSize = 12.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
             })
             col.addView(TextView(this).apply {
-                text = if (isReady) "Готов в ${hhmm(o.readyAt ?: o.createdAt)} · скроется через ${QueueOps.READY_TTL_MS / 60_000L} мин" else "${hhmm(o.createdAt)} · ${agoText(o.createdAt)}"
+                text = when {
+                    isReady -> "Готов в ${hhmm(o.readyAt ?: o.createdAt)} · скроется через ${QueueOps.READY_TTL_MS / 60_000L} мин"
+                    o.isPending -> "Ждёт оплаты · ${hhmm(o.createdAt)} (номер после чека)"
+                    else -> "${hhmm(o.createdAt)} · ${agoText(o.createdAt)}"
+                }
                 textSize = 10f; setTextColor(UiKit.MUTED); setPadding(0, dp(3), 0, 0)
             })
             row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
-            val action = if (isReady) btn("В работу", "ghost") {
-                OrderQueueStore.reopen(this@MainActivity, o.number); safeRender()
-            } else btn("Готово", "primary") {
-                OrderQueueStore.markReady(this@MainActivity, o.number); safeRender()
+            if (!o.isPending) {
+                val action = if (isReady) btn("В работу", "ghost") {
+                    OrderQueueStore.reopen(this@MainActivity, o.number); safeRender()
+                } else btn("Готово", "primary") {
+                    OrderQueueStore.markReady(this@MainActivity, o.number); safeRender()
+                }
+                row.addView(action, LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(10) })
             }
-            row.addView(action, LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(10) })
+            row.addView(TextView(this).apply {
+                text = "✕"; textSize = 13f; gravity = Gravity.CENTER
+                setTextColor(UiKit.MUTED); contentDescription = "Убрать из очереди"
+                isClickable = true; isFocusable = true
+                setPadding(dp(8), 0, dp(4), 0)
+                setOnClickListener {
+                    if (o.isPending) OrderQueueStore.removeById(this@MainActivity, o.id)
+                    else OrderQueueStore.remove(this@MainActivity, o.number)
+                    safeRender()
+                }
+            }, LinearLayout.LayoutParams(WRAP, dp(44)))
             root.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
         }
 
         section("В РАБОТЕ", prep.size)
         if (prep.isEmpty()) root.addView(TextView(this).apply {
-            text = "Нет заказов в работе. Новый номер появится после оплаты чека."
+            text = "Нет заказов в работе. Номер появится после подтверждения оплаты."
             textSize = 12f; setTextColor(UiKit.MUTED); setPadding(dp(2), 0, 0, dp(8))
         })
         prep.forEach { orderRow(it, false) }
@@ -4251,98 +4072,6 @@ class MainActivity : AppCompatActivity() {
             text = "Очередь хранится на этом терминале. Готовые заказы скрываются через ${QueueOps.READY_TTL_MS / 60_000L} мин."
             textSize = 10f; setTextColor(UiKit.MUTED); setPadding(dp(2), dp(8), 0, 0)
         })
-    }
-
-    private fun renderDone() {
-        val m = Ds.metrics(this)
-        topBar.setPadding(dp(18), dp(16), dp(18), 0)
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        head.addView(android.widget.ImageView(this).apply { setImageResource(R.drawable.logo_67_mark) }, LinearLayout.LayoutParams(dp(30), dp(30)))
-        head.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        head.addView(TextView(this).apply {
-            text = "ЧЕК ПРОБИТ"; textSize = 10f; letterSpacing = 0.12f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED)
-        })
-        topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(20), dp(22), dp(20), dp(12))
-        }
-        root.setPadding(0, 0, 0, 0)
-        val check = FrameLayout(this).apply {
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(BRAND) }
-            elevation = 8f * resources.displayMetrics.density
-            addView(icon(this@MainActivity, R.drawable.ic_check_big, 30f, WHITE), FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER))
-        }
-        col.addView(check, LinearLayout.LayoutParams(dp(72), dp(72)).apply { bottomMargin = dp(14) })
-        doneOrder?.let { o ->
-            col.addView(TextView(this).apply {
-                text = "НОМЕР ЗАКАЗА"; textSize = 10f; letterSpacing = 0.12f; weight(Fonts.SEMIBOLD); setTextColor(UiKit.MUTED); gravity = Gravity.CENTER
-            })
-            col.addView(TextView(this).apply {
-                text = o.label; textSize = 72f; letterSpacing = -0.04f; weight(Fonts.BOLD); setTextColor(INK); gravity = Gravity.CENTER
-                includeFontPadding = false; setPadding(0, dp(2), 0, dp(10))
-            })
-        }
-        col.addView(TextView(this).apply {
-            text = "Оплачено"; textSize = 23f; letterSpacing = -0.03f; weight(Fonts.STRONG); setTextColor(INK); gravity = Gravity.CENTER
-        })
-        col.addView(TextView(this).apply {
-            text = "Фискальный чек — на терминале Эвотор"; textSize = 10.5f; setTextColor(UiKit.MUTED); gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, 0)
-        })
-        col.addView(TextView(this).apply {
-            text = rub(doneTotal); textSize = 38f; letterSpacing = -0.05f; weight(Fonts.BOLD); setTextColor(INK); gravity = Gravity.CENTER
-            includeFontPadding = false; setPadding(0, dp(12), 0, 0)
-        })
-
-        val items = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = rounded(WHITE, 14, LINE)
-        }
-        val lines = doneLines
-        lines.forEachIndexed { i, l ->
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(5), 0, dp(5)) }
-            val qty = l.quantity.stripTrailingZeros().toPlainString()
-            row.addView(TextView(this).apply {
-                text = if (qty == "1") l.name else "${l.name} × $qty"
-                textSize = 10.5f; setTextColor(INK); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
-            }, LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(10) })
-            row.addView(TextView(this).apply { text = rub(l.lineTotal()); textSize = 10.5f; weight(Fonts.SEMIBOLD); setTextColor(INK); maxLines = 1 })
-            items.addView(row)
-            if (i < lines.size - 1) items.addView(View(this).apply { setBackgroundColor(0xFFF3EEE5.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
-        }
-        if (lines.isNotEmpty()) col.addView(items, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(16) })
-
-        val card = doneCard
-        if (card != null) {
-            val loy = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(11), dp(9), dp(11), dp(9))
-                background = rounded(UiKit.SUCCESS_SOFT, 12, null)
-            }
-            loy.addView(FrameLayout(this).apply {
-                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(UiKit.SUCCESS) }
-                addView(icon(this@MainActivity, R.drawable.ic_check, 14f, WHITE), FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER))
-            }, LinearLayout.LayoutParams(dp(29), dp(29)).apply { rightMargin = dp(9) })
-            val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            t.addView(TextView(this).apply { text = "Гость ${card.cardCode.ifBlank { "по QR" }}"; textSize = 10.5f; weight(Fonts.SEMIBOLD); setTextColor(0xFF145C39.toInt()) })
-            // Начисляет сервер по SELL — цифру заранее не обещаем.
-            t.addView(TextView(this).apply { text = "Чашки и бонусы обновятся после синхронизации чека"; textSize = 10f; setTextColor(0xFF3A7357.toInt()); setPadding(0, dp(1), 0, 0) })
-            loy.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
-            col.addView(loy, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(9) })
-        }
-        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
-        wrap.addView(col, LinearLayout.LayoutParams(if (m.mode == Ds.Mode.M5) MATCH else dp(520), WRAP))
-        root.addView(wrap, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        bottomBar.setPadding(dp(16), dp(10), dp(16), dp(12))
-        bottomBar.background = topBorder(WHITE)
-        bottomBar.addView(btn("Новый заказ", "primary") { notice = null; screen = Screen.ORDER; safeRender() }, LinearLayout.LayoutParams(MATCH, dp(50)))
-        if (doneOrder != null) bottomBar.addView(btn("Очередь бариста", "ghost") { screen = Screen.QUEUE; safeRender() }, LinearLayout.LayoutParams(MATCH, dp(44)).apply { topMargin = dp(8) })
     }
 
     // ───────────────────────── view-хелперы ─────────────────────────
@@ -4444,6 +4173,7 @@ class MainActivity : AppCompatActivity() {
             when (sellOpen) {
                 false -> {
                     // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
+                    confirmPendingOrder()
                     Cart.clear()
                     PendingPayment.clear(this)
                     screen = Screen.QUEUE
@@ -4451,12 +4181,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 true -> {
                     // Чек продажи ещё открыт — оплата отменена/не завершена, корзину оставляем.
+                    cancelPendingOrder()
                     PendingPayment.clear(this)
                     screen = Screen.ORDER
                     safeRender()
                 }
                 null -> {
-                    // Не удалось проверить — не теряем корзину, уходим в заказ.
+                    // Не удалось проверить — не теряем корзину, уходим в заказ. PENDING снимет TTL.
                     PendingPayment.clear(this)
                     screen = Screen.ORDER
                     safeRender()
@@ -4464,17 +4195,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
         // Каталог/цены не должны «залёживаться» на кассе, которая днями не закрывает приложение.
-        if (::root.isInitialized && products.isNotEmpty() && System.currentTimeMillis() - catalogLoadedAt > CATALOG_STALE_MS && System.currentTimeMillis() - catalogAttemptAt > CATALOG_STALE_MS) loadProducts()
+        // Фоновое обновление не чаще раза в 60 с (п.6 контракта) — гейт внутри loadProducts.
+        if (::root.isInitialized) loadProducts(userInitiated = false)
     }
 
-    override fun onPause() { try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}; super.onPause() }
+    override fun onPause() {
+        try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}
+        super.onPause()
+    }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         when (screen) {
             Screen.ORDER -> { notice = null; screen = Screen.CARD; safeRender() }
-            Screen.PAYMENT -> { screen = Screen.ORDER; safeRender() } // legacy; обычно не попадаем
-            Screen.DONE -> { screen = Screen.ORDER; safeRender() }
             Screen.SHIFT -> { screen = Screen.ORDER; safeRender() }
             Screen.QUEUE -> { screen = Screen.ORDER; safeRender() }
             Screen.CARD -> super.onBackPressed()
@@ -4484,7 +4217,10 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val TAG = "SixthCup"
         const val GROUP_COMBOS = "@combos"
-        const val CATALOG_STALE_MS = 5 * 60 * 1000L
+        /** Фоновое обновление каталога — не чаще раза в минуту (п.6 контракта). */
+        const val CATALOG_REFRESH_MS = 60 * 1000L
+        /** Лимит «можно несколько» для добавок из номенклатуры Эвотор (у них нет maxCount с backend). */
+        const val EVOTOR_EXTRA_LIMIT = 99
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         val BRAND = UiKit.BRAND

@@ -2,6 +2,7 @@ package ru.sixthcup.evotor.data
 
 import android.content.Context
 import org.json.JSONObject
+import ru.sixthcup.evotor.BuildConfig
 
 /**
  * Guest identified for the CURRENT sale only. The QR is just an identity; the balance and the
@@ -20,6 +21,8 @@ data class CardInfo(
     /** "RESERVED" | "ALREADY_RESERVED" | "NONE" | "OFFLINE" | "ERROR" */
     val freeStatus: String,
     val note: String? = null,
+    /** Причина отказа backend: invalid_card | card_not_found | card_blocked (для журнала). */
+    val errorCode: String? = null,
 )
 
 object CardSession {
@@ -59,11 +62,37 @@ object CardSession {
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
+    /**
+     * Добавка к чеку: `{ appId: { sc: { v, c, op, free, cb, ts, kind } } }`.
+     * Плоский `sc` продублирован для текущего SellHandler; значения в обоих ключах идентичны,
+     * поэтому backend читает любую из форм и не применит льготу дважды (документ один).
+     *
+     * `v` — число ≥ 2 (иначе сервер игнорирует), `c` — cardCode из ответа resolve,
+     * `op` — reservationId (без него списание не применится), `cb` — копейки, `ts` — unix ms.
+     */
+    fun extras(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+        val sc = sc(info, freeApplied, cashbackKopecks)
+        // Плоский ключ нужен текущему парсеру: если appId не совпал с EVOTOR_APP_ID на backend,
+        // льгота не потеряется. Оба значения одинаковые — двойного списания нет.
+        return JSONObject()
+            .put(BuildConfig.APP_UUID, JSONObject().put("sc", sc))
+            .put("sc", sc)
+    }
+
     /** extras.sc written into the receipt. The backend re-checks everything when it reads the SELL. */
     fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
-        val o = JSONObject().put("v", 2).put("c", info.code).put("ts", System.currentTimeMillis() / 1000)
+        val card = info.cardCode.ifBlank { info.code }
+        val o = JSONObject()
+            .put("v", 2)
+            .put("c", card)
+            .put("ts", System.currentTimeMillis())
+            .put("kind", kindOf(info.code))
         if (info.reservationId != null) o.put("op", info.reservationId)
         o.put("free", if (freeApplied) 1 else 0).put("cb", cashbackKopecks)
         return o
     }
+
+    /** Подписанный QR содержит точку (`<payload>.<sig>`), короткий код карты — только цифры. */
+    fun kindOf(code: String): String = if (code.contains('.')) "token" else "code"
+
 }

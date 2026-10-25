@@ -1,5 +1,6 @@
 package ru.sixthcup.evotor.net
 
+import android.util.Log
 import org.json.JSONObject
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.CardInfo
@@ -15,6 +16,7 @@ import java.net.URL
 object LoyaltyApi {
     fun resolve(code: String): CardInfo {
         val isToken = code.contains('.')
+        val startedAt = System.currentTimeMillis()
         return try {
             val conn = (URL(BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/loyalty/resolve").openConnection() as HttpURLConnection)
             conn.requestMethod = "POST"
@@ -38,12 +40,24 @@ object LoyaltyApi {
                     freeStatus = o.optString("freeStatus", "NONE"),
                 )
             } else {
+                // Серверная ошибка нашего API (не проблема карты) — отдельное событие в журнале.
+                if (status >= 500 || status == 401 || status == 403) {
+                    Log.e(
+                        "LoyaltyApi",
+                        "http_error POST /api/devices/loyalty/resolve code=$status ms=${System.currentTimeMillis() - startedAt}",
+                    )
+                }
+                val reason = o.optString("error").ifBlank { o.optString("code") }.ifBlank { null }
                 // Unknown/invalid card: do not attach it to the receipt at all.
                 when {
-                    status == 404 || status == 400 -> offline(code, isToken, "Карта не найдена или недействительна. Проверьте номер или QR.", drop = true)
-                    status == 401 || status == 403 -> offline(code, isToken, "Нет доступа к серверу лояльности ($status). Сообщите администратору.", drop = false)
-                    status >= 500 -> offline(code, isToken, "Сервер лояльности временно недоступен ($status).", drop = false)
-                    else -> offline(code, isToken, "Неожиданный ответ сервера ($status).", drop = false)
+                    status == 404 || status == 400 ->
+                        offline(code, isToken, "Карта не найдена или недействительна. Проверьте номер или QR.", drop = true, errorCode = reason ?: "card_not_found")
+                    status == 401 || status == 403 ->
+                        offline(code, isToken, "Нет доступа к серверу лояльности ($status). Сообщите администратору.", drop = false, errorCode = reason)
+                    status >= 500 ->
+                        offline(code, isToken, "Сервер лояльности временно недоступен ($status).", drop = false, errorCode = reason)
+                    else ->
+                        offline(code, isToken, "Неожиданный ответ сервера ($status).", drop = false, errorCode = reason)
                 }
             }
         } catch (e: Throwable) {
@@ -55,7 +69,8 @@ object LoyaltyApi {
      * Server unreachable: a signed QR still goes into the receipt so the cup can be credited after the sale
      * (the backend verifies the signature itself) — but WITHOUT any bonus. A bare number is not accepted offline.
      */
-    private fun offline(code: String, isToken: Boolean, note: String, drop: Boolean): CardInfo =
+    private fun offline(code: String, isToken: Boolean, note: String, drop: Boolean, errorCode: String? = null): CardInfo =
         CardInfo(code = if (drop || !isToken) "" else code, cardCode = "", paidCups = 0, cupsForFree = 5, freeAvailable = 0,
-            cashbackKopecks = 0, reservationId = null, reservationExpiresAt = 0, freeStatus = if (drop) "ERROR" else "OFFLINE", note = note)
+            cashbackKopecks = 0, reservationId = null, reservationExpiresAt = 0, freeStatus = if (drop) "ERROR" else "OFFLINE",
+            note = note, errorCode = errorCode)
 }
