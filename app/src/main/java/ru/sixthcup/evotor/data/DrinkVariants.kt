@@ -32,6 +32,10 @@ object DrinkVariants {
         /** Ключ плитки → все варианты этой группы по возрастанию объёма. */
         val variantsByKey: Map<String, List<CatalogProduct>> = emptyMap(),
         val options: Options = Options(),
+        /** Строк присоединено к подтверждённым карточкам (своя группа/без группы). */
+        val attachedVariants: Int = 0,
+        /** Строк отброшено: такой объём уже есть в подтверждённой карточке. */
+        val droppedDuplicates: Int = 0,
     ) {
         fun variantsOf(tile: CatalogProduct): List<CatalogProduct> =
             variantsByKey[tileKey(tile)].orEmpty().ifEmpty { listOf(tile) }
@@ -55,25 +59,30 @@ object DrinkVariants {
 
     fun tileKey(p: CatalogProduct): String = p.variantGroup ?: p.uuid
 
-    private const val AUTO_PREFIX = "auto:"
+    private data class BaseKey(val scope: String?, val base: String)
 
-    /**
-     * Объём из названия товара, если метки `#size=` нет: «Капучино 350 мл» → 350.
-     * Возвращает ключ авто-группы (по названию без объёма) и объём в мл.
-     */
-    private fun autoVariant(p: CatalogProduct): Pair<String, Int>? {
-        val base = p.name.replace(SIZE_SUFFIX, "").trim()
-        val size = p.sizeMl ?: SIZE_IN_NAME.find(p.name.trim())?.groupValues?.get(2)?.toIntOrNull() ?: return null
-        if (base.isEmpty() || size <= 0) return null
-        // «Капучино» без объёма в названии и без #size — группировать не по чему.
-        if (base == p.name.trim() && p.sizeMl == null) return null
-        // Legacy-fallback: объём только из имени. Разные категории/папки не склеиваем,
-        // иначе два независимых «Капучино 200 мл» стали бы одной карточкой.
+    /** Объём: из backend (`sizeValue`) или из названия «… 300 мл». */
+    private fun sizeOf(p: CatalogProduct): Int? =
+        p.sizeMl ?: SIZE_IN_NAME.find(p.name.trim())?.groupValues?.get(2)?.toIntOrNull()
+
+    /** Название без хвоста объёма: «Капучино 300 мл» → «капучино». */
+    private fun baseKeyOf(p: CatalogProduct): BaseKey? {
+        val base = p.name.replace(SIZE_SUFFIX, "").trim().lowercase()
+        if (base.isEmpty()) return null
         val scope = p.groupName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-        val key = if (scope != null) "$scope|${base.lowercase()}" else base.lowercase()
-        return AUTO_PREFIX + key to size
+        return BaseKey(scope, base)
     }
 
+    /**
+     * Плитки главного экрана.
+     *
+     * Правило: объёмы одной карточки определяются только **подтверждённой** связью
+     * (backend `groupId`/`groups[]` или метка `#group=`). Строки, которые ссылаются на
+     * ту же карточку лишь названием/объёмом (своя «слабая» группа из одной позиции или
+     * её отсутствие), не создают отдельную плитку: они присоединяются к подтверждённой
+     * карточке, а при совпадении объёма — отбрасываются как дубль.
+     * Совпадение названия само по себе никогда не объединяет товары.
+     */
     fun build(products: List<CatalogProduct>): Model {
         val options = Options(
             milk = products.filter { it.optGroup == "milk" },
@@ -97,41 +106,72 @@ object DrinkVariants {
                 p.uuid !in modifierUuids
         }
 
-        val grouped = LinkedHashMap<String, MutableList<CatalogProduct>>()
-        val singles = ArrayList<CatalogProduct>()
+        val explicit = LinkedHashMap<String, MutableList<CatalogProduct>>()
+        val loose = ArrayList<CatalogProduct>()
         for (p in drinks) {
-            // Явная метка #group= приоритетнее; без неё пробуем найти объём в названии
-            // («Капучино 350 мл») — тогда размеры работают и без разметки номенклатуры.
-            val explicit = p.variantGroup
-            val auto = if (explicit == null) autoVariant(p) else null
-            val key = explicit ?: auto?.first
-            if (key == null) {
-                singles.add(p)
-            } else {
-                val withSize = if (p.sizeMl == null && auto != null) {
-                    p.copy(sizeMl = auto.second, variantGroup = key)
-                } else {
-                    p
-                }
-                grouped.getOrPut(key) { ArrayList() }.add(withSize)
-            }
+            val key = p.variantGroup
+            if (key != null) explicit.getOrPut(key) { ArrayList() }.add(p) else loose.add(p)
         }
 
-        val variantsByKey = LinkedHashMap<String, List<CatalogProduct>>()
-        val tiles = ArrayList<CatalogProduct>(singles.size + grouped.size)
-        for (p in singles) tiles.add(p)
-        for ((key, list) in grouped) {
-            // Авто-группа из одной позиции — это обычный товар, а не выбор размера.
-            // ВАЖНО: добавляем именно в tiles; раньше позиция попадала только в singles
-            // и бесследно исчезала с витрины.
-            if (list.size == 1 && key.startsWith(AUTO_PREFIX)) {
-                tiles.add(list[0].copy(variantGroup = null))
-                continue
+        // Внутри одной группы один объём — одна позиция (иначе в карточке два «300 мл»).
+        var droppedDuplicates = 0
+        for ((key, list) in explicit.entries.toList()) {
+            val seen = HashSet<Int>()
+            val unique = ArrayList<CatalogProduct>(list.size)
+            for (p in list) {
+                val size = sizeOf(p)
+                if (size != null && !seen.add(size)) {
+                    droppedDuplicates++
+                    continue
+                }
+                unique.add(p)
             }
-            val sorted = list.sortedWith(compareBy({ it.sizeMl ?: Int.MAX_VALUE }, { it.name.lowercase() }))
+            explicit[key] = unique
+        }
+
+        // Подтверждённая карточка = явная группа с 2+ объёмами. Если одно и то же
+        // (папка|база) встречается в разных подтверждённых группах — неоднозначно,
+        // такие товары не склеиваем.
+        val baseIndex = HashMap<BaseKey, MutableSet<String>>()
+        for ((key, list) in explicit) {
+            if (list.size < 2) continue
+            for (p in list) baseKeyOf(p)?.let { baseIndex.getOrPut(it) { HashSet() }.add(key) }
+        }
+        val confirmed: Map<BaseKey, String> =
+            baseIndex.filterValues { it.size == 1 }.mapValues { it.value.first() }
+
+        var attachedVariants = 0
+        fun attachToConfirmed(p: CatalogProduct): Boolean {
+            val size = sizeOf(p) ?: return false
+            val key = baseKeyOf(p)?.let { confirmed[it] } ?: return false
+            val target = explicit[key] ?: return false
+            if (target.any { sizeOf(it) == size }) {
+                // Тот же объём уже есть в карточке: исходная строка — дубль, не плитка.
+                droppedDuplicates++
+                return true
+            }
+            target.add(p.copy(variantGroup = key, sizeMl = size))
+            attachedVariants++
+            return true
+        }
+
+        // «Слабые» явные группы (одна позиция) — в подтверждённую карточку по base+size.
+        for ((key, list) in explicit.entries.toList()) {
+            if (list.size != 1) continue
+            if (attachToConfirmed(list.first())) explicit.remove(key)
+        }
+        // Строки без группы — туда же; иначе остаются самостоятельной плиткой.
+        val singles = ArrayList<CatalogProduct>()
+        for (p in loose) if (!attachToConfirmed(p)) singles.add(p)
+
+        val variantsByKey = LinkedHashMap<String, List<CatalogProduct>>()
+        val tiles = ArrayList<CatalogProduct>(singles.size + explicit.size)
+        tiles.addAll(singles)
+        for ((key, list) in explicit) {
+            val sorted = list.sortedWith(compareBy({ sizeOf(it) ?: Int.MAX_VALUE }, { it.name.lowercase() }))
             variantsByKey[key] = sorted
             val representative = sorted.firstOrNull { it.defaultVariant }
-                ?: sorted.minByOrNull { kotlin.math.abs((it.sizeMl ?: 350) - 350) }
+                ?: sorted.minByOrNull { kotlin.math.abs((sizeOf(it) ?: 350) - 350) }
                 ?: sorted.first()
             tiles.add(representative.copy(name = groupName(representative)))
         }
@@ -139,6 +179,8 @@ object DrinkVariants {
             tiles = tiles.sortedBy { it.name.lowercase() },
             variantsByKey = variantsByKey,
             options = options,
+            attachedVariants = attachedVariants,
+            droppedDuplicates = droppedDuplicates,
         )
     }
 

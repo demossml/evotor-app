@@ -31,12 +31,25 @@ class DrinkVariantsTest {
     )
 
     @Test
-    fun `sizes are grouped automatically by name`() {
+    fun `name alone never merges unrelated products`() {
+        // Без подтверждённой группы объём в названии — не основание склеивать товары.
         val model = DrinkVariants.build(
             listOf(
                 product("u250", "Капучино 250 мл", 220),
                 product("u350", "Капучино 350 мл", 250),
                 product("u450", "Капучино 450 мл", 300),
+            ),
+        )
+        assertEquals(3, model.tiles.size)
+    }
+
+    @Test
+    fun `sizes are grouped by confirmed group`() {
+        val model = DrinkVariants.build(
+            listOf(
+                product("u250", "Капучино 250 мл", 220, variantGroup = "admin-group:5", sizeMl = 250),
+                product("u350", "Капучино 350 мл", 250, variantGroup = "admin-group:5", sizeMl = 350),
+                product("u450", "Капучино 450 мл", 300, variantGroup = "admin-group:5", sizeMl = 450),
             ),
         )
         assertEquals(1, model.tiles.size)
