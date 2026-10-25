@@ -57,7 +57,7 @@ object OrderQueueStore {
     }
 
     /**
-     * Статус из хранилища. `PREPARING` — имя состояния «в работе» в версиях до 5.0.1:
+     * Статус из хранилища. `PREPARING` — имя состояния «в работе» в версиях до 5.0.0:
      * читаем как CONFIRMED, чтобы старые заказы не потерялись и не стали фантомами.
      */
     private fun statusOf(raw: String): OrderStatus = when (raw) {
