@@ -8,6 +8,7 @@ import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.ProductMarkers
 import ru.sixthcup.evotor.data.Topping
+import ru.sixthcup.evotor.data.ToppingJson
 import ru.sixthcup.evotor.data.UpsellItem
 import java.math.BigDecimal
 import java.net.HttpURLConnection
@@ -333,33 +334,7 @@ object CatalogApi {
         )
     }
 
-    private fun parseToppings(a: JSONArray?): List<Topping> {
-        if (a == null) return emptyList()
-        val out = ArrayList<Topping>()
-        for (i in 0 until a.length()) {
-            val o = a.getJSONObject(i)
-            val price = when {
-                o.has("priceRub") -> o.optDouble("priceRub", 0.0)
-                else -> o.optDouble("price", 0.0)
-            }
-            out.add(
-                Topping(
-                    id = o.optInt("id"),
-                    name = o.optString("name"),
-                    priceRub = BigDecimal.valueOf(price),
-                    groupKey = o.optString("groupKey", "extra"),
-                    maxCount = o.optInt("maxCount", 2).coerceAtLeast(1),
-                    evotorUuid = o.optString("evotorUuid").ifBlank { null },
-                    required = o.optBoolean("required", false),
-                    isDefault = o.optBoolean("isDefault", false),
-                    zeroOption = o.optBoolean("zeroOption", false),
-                    available = if (o.has("available")) o.optBoolean("available", true) else true,
-                    productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
-                )
-            )
-        }
-        return out
-    }
+    private fun parseToppings(a: JSONArray?): List<Topping> = ToppingJson.parse(a)
 
     private fun parseUpsell(a: JSONArray?): List<UpsellItem> {
         if (a == null) return emptyList()

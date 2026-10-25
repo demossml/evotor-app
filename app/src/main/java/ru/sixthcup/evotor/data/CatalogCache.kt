@@ -178,26 +178,7 @@ object CatalogCache {
         }
     }
 
-    private fun toppingsJson(list: List<Topping>): JSONArray {
-        val a = JSONArray()
-        list.forEach { t ->
-            a.put(
-                JSONObject()
-                    .put("id", t.id)
-                    .put("name", t.name)
-                    .put("priceRub", t.priceRub.toPlainString())
-                    .put("groupKey", t.groupKey)
-                    .put("maxCount", t.maxCount)
-                    .put("evotorUuid", t.evotorUuid ?: JSONObject.NULL)
-                    .put("required", t.required)
-                    .put("isDefault", t.isDefault)
-                    .put("zeroOption", t.zeroOption)
-                    .put("available", t.available)
-                    .put("productId", t.productId ?: JSONObject.NULL),
-            )
-        }
-        return a
-    }
+    private fun toppingsJson(list: List<Topping>): JSONArray = ToppingJson.toJson(list)
 
     private fun upsellJson(list: List<UpsellItem>): JSONArray {
         val a = JSONArray()
@@ -214,29 +195,7 @@ object CatalogCache {
         return a
     }
 
-    private fun parseToppings(a: JSONArray?): List<Topping> {
-        if (a == null) return emptyList()
-        val out = ArrayList<Topping>()
-        for (i in 0 until a.length()) {
-            val o = a.optJSONObject(i) ?: continue
-            out.add(
-                Topping(
-                    id = o.optInt("id"),
-                    name = o.optString("name"),
-                    priceRub = try { BigDecimal(o.optString("priceRub", "0")) } catch (_: Throwable) { BigDecimal.ZERO },
-                    groupKey = o.optString("groupKey", "extra"),
-                    maxCount = o.optInt("maxCount", 1).coerceAtLeast(1),
-                    evotorUuid = o.optString("evotorUuid").ifBlank { null },
-                    required = o.optBoolean("required", false),
-                    isDefault = o.optBoolean("isDefault", false),
-                    zeroOption = o.optBoolean("zeroOption", false),
-                    available = if (o.has("available")) o.optBoolean("available", true) else true,
-                    productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
-                ),
-            )
-        }
-        return out
-    }
+    private fun parseToppings(a: JSONArray?): List<Topping> = ToppingJson.parse(a)
 
     private fun parseUpsell(a: JSONArray?): List<UpsellItem> {
         if (a == null) return emptyList()
