@@ -20,3 +20,10 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Distributions and local secrets — never commit
+dist/
+*.jks
+*.keystore
+.env
+.env.*

@@ -18,6 +18,11 @@ data class CartLine(
     val comboGroupId: String? = null,
     /** Какой комбо-набор (`Combos.id`) описывает группу. */
     val comboId: String? = null,
+    /**
+     * `Topping.id`, если строка — платная добавка из схемы каталога.
+     * Нужен, чтобы перед «В чек» сверить опцию с последним каталогом (наличие, available, evotorUuid).
+     */
+    val optionId: Int? = null,
 ) {
     fun lineTotal(): BigDecimal = priceRub.multiply(quantity)
 }
@@ -112,7 +117,8 @@ object Cart {
             put(JSONObject().put("u", l.productUuid).put("k", l.cartKey.ifBlank { l.productUuid })
                 .put("n", l.name).put("p", l.priceRub.toPlainString())
                 .put("q", l.quantity.toPlainString()).put("r", l.recipe ?: JSONObject.NULL).put("f", l.freeEligible)
-                .put("cg", l.comboGroupId ?: JSONObject.NULL).put("ci", l.comboId ?: JSONObject.NULL))
+                .put("cg", l.comboGroupId ?: JSONObject.NULL).put("ci", l.comboId ?: JSONObject.NULL)
+                .put("oi", l.optionId ?: JSONObject.NULL))
         }
     }
 
@@ -123,6 +129,7 @@ object Cart {
             freeEligible = o.optBoolean("f"), cartKey = o.optString("k", o.getString("u")),
             comboGroupId = if (o.isNull("cg")) null else o.getString("cg"),
             comboId = if (o.isNull("ci")) null else o.getString("ci"),
+            optionId = if (o.isNull("oi")) null else o.optInt("oi").takeIf { it > 0 },
         )
     } catch (_: Throwable) { null }
 

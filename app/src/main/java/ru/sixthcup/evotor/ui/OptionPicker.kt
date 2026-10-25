@@ -10,6 +10,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.DrinkVariants
+import ru.sixthcup.evotor.data.OptionRule
+import ru.sixthcup.evotor.data.ToppingRules
 import java.math.BigDecimal
 
 /**
@@ -32,17 +34,24 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         val required: Boolean = false,
         val zeroOption: Boolean = false,
         val available: Boolean = true,
+        val maxCount: Int = 1,
+        /** `Topping.id` из схемы каталога; null — опция из номенклатуры Эвотор (`#opt=`). */
+        val id: Int? = null,
     ) {
-        /**
-         * Фискально: реальный uuid; или zero-option / цена 0 (не в чек отдельной строкой).
-         * available=false с backend — disabled.
-         */
-        val sellable: Boolean
-            get() {
-                if (!available) return false
-                if (zeroOption || price.signum() == 0) return true
-                return !evotorUuid.isNullOrBlank()
-            }
+        /** Правила те же, что проверяет валидатор чека: платная опция без uuid недоступна. */
+        fun rule(): OptionRule = OptionRule(
+            key = key,
+            price = price,
+            evotorUuid = evotorUuid?.takeIf { it.isNotBlank() },
+            required = required,
+            isDefault = isDefault,
+            zeroOption = zeroOption,
+            available = available,
+            maxCount = maxCount,
+        )
+
+        /** Фискально: реальный uuid; или zero-option / цена 0 (не в чек отдельной строкой). */
+        val sellable: Boolean get() = rule().sellable
     }
 
     data class Opts(
@@ -68,6 +77,11 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     private var defSyrup: Opt? = null
     private var defSugar: Opt? = null
 
+    private companion object {
+        /** Опции из номенклатуры Эвотор: «можно несколько» без схемного maxCount. */
+        const val UNLIMITED = 99
+    }
+
     private val density = resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).toInt()
 
@@ -89,19 +103,32 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         defSyrup = pickDefault(opts.syrup)
         defSugar = pickDefault(opts.sugar)
         // При редактировании восстанавливаем отмеченные ранее опции (в корзине они лежат отдельными строками).
-        milk = opts.milk.firstOrNull { it.key in preselect } ?: defMilk
-        syrup = opts.syrup.firstOrNull { it.key in preselect } ?: defSyrup
-        sugar = opts.sugar.firstOrNull { it.key in preselect } ?: defSugar
+        milk = opts.milk.firstOrNull { it.key in preselect && it.sellable } ?: defMilk
+        syrup = opts.syrup.firstOrNull { it.key in preselect && it.sellable } ?: defSyrup
+        sugar = opts.sugar.firstOrNull { it.key in preselect && it.sellable } ?: defSugar
         extras.clear()
-        opts.extra.filter { it.key in preselect || (it.required && it.sellable) }.forEach { extras[it.key] = it }
+        opts.extra.filter { it.key in preselect && it.sellable }.forEach { extras[it.key] = it }
+        selectRequiredExtras(opts.extra)
         render()
     }
 
+    /**
+     * Обязательные добавки отмечаем сами, только если это бесплатный вариант или isDefault,
+     * и не больше лимита группы (maxCount). Платную обязательную опцию выбирает кассир.
+     */
+    private fun selectRequiredExtras(list: List<Opt>) {
+        val limit = ToppingRules.groupLimit(list.map { it.rule() })
+        var left = if (limit > 0) (limit - extras.size) else Int.MAX_VALUE
+        list.filter { it.required && (it.zeroOption || it.isDefault) && it.sellable && !extras.containsKey(it.key) }.forEach { o ->
+            if (left > 0) {
+                extras[o.key] = o
+                left--
+            }
+        }
+    }
+
     private fun pickDefault(list: List<Opt>): Opt? =
-        list.firstOrNull { it.isDefault && it.sellable }
-            ?: list.firstOrNull { it.required && it.sellable }
-            ?: list.firstOrNull { (it.zeroOption || it.price.signum() == 0) && it.sellable }
-            ?: list.firstOrNull { it.sellable }
+        ToppingRules.defaultOf(list.map { it.rule() })?.let { r -> list.firstOrNull { it.key == r.key } }
 
     /**
      * Обновить опции при смене объёма, не сбрасывая уже выбранные milk/syrup/extras,
@@ -113,14 +140,14 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         defMilk = pickDefault(newOpts.milk)
         defSyrup = pickDefault(newOpts.syrup)
         defSugar = pickDefault(newOpts.sugar)
-        milk = newOpts.milk.firstOrNull { it.key == milk?.key } ?: defMilk
-        syrup = newOpts.syrup.firstOrNull { it.key == syrup?.key } ?: defSyrup
-        sugar = newOpts.sugar.firstOrNull { it.key == sugar?.key } ?: defSugar
+        milk = newOpts.milk.firstOrNull { it.key == milk?.key && it.sellable } ?: defMilk
+        syrup = newOpts.syrup.firstOrNull { it.key == syrup?.key && it.sellable } ?: defSyrup
+        sugar = newOpts.sugar.firstOrNull { it.key == sugar?.key && it.sellable } ?: defSugar
         val kept = LinkedHashMap<String, Opt>()
-        newOpts.extra.forEach { o -> if (extras.containsKey(o.key)) kept[o.key] = o }
-        newOpts.extra.filter { it.required && it.sellable }.forEach { kept[it.key] = it }
+        newOpts.extra.forEach { o -> if (extras.containsKey(o.key) && o.sellable) kept[o.key] = o }
         extras.clear()
         extras.putAll(kept)
+        selectRequiredExtras(newOpts.extra)
         render()
     }
 
@@ -160,7 +187,25 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     /** Выбранные опции с товаром Эвотор — отдельные строки чека (zero-option без uuid не входят). */
     fun chosen(): List<Opt> =
         (listOfNotNull(milk, syrup, sugar) + extras.values)
-            .filter { !it.evotorUuid.isNullOrBlank() && !it.zeroOption }
+            .filter { it.sellable && !it.zeroOption && !it.evotorUuid.isNullOrBlank() }
+
+    /** Ключи выбранных опций — для проверки обязательных групп и лимитов. */
+    fun selectedKeys(): Set<String> =
+        (listOfNotNull(milk, syrup, sugar) + extras.values).map { it.key }.toSet()
+
+    /**
+     * Почему текущий выбор нельзя отдать в чек (пустой список — можно).
+     * Обязательная группа без доступных опций тоже блокирует позицию.
+     */
+    fun blockers(): List<String> = ToppingRules.blockers(
+        listOf(
+            "Молоко" to opts.milk.map { it.rule() },
+            "Сироп" to opts.syrup.map { it.rule() },
+            "Сахар" to opts.sugar.map { it.rule() },
+            "Добавки" to opts.extra.map { it.rule() },
+        ),
+        selectedKeys(),
+    )
 
     private fun render() {
         removeAllViews()
@@ -215,12 +260,24 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             }, 3)
         }
         if (opts.extra.isNotEmpty()) {
-            header("Добавки", if (opts.extra.any { it.required && it.sellable }) "обязательные отмечены" else "можно несколько")
+            val rules = opts.extra.map { it.rule() }
+            val max = ToppingRules.groupLimit(rules)
+            val full = max > 0 && extras.size >= max
+            val hint = when {
+                opts.extra.any { it.required && it.sellable } -> "обязательные отмечены"
+                full && max < UNLIMITED -> "не больше $max"
+                max in 1 until UNLIMITED -> "можно несколько · до $max"
+                else -> "можно несколько"
+            }
+            header("Добавки", hint)
             grid(opts.extra.map { o ->
-                cell(o.label, o.price, extras.containsKey(o.key), o.sellable, true) {
-                    if (extras.containsKey(o.key)) {
-                        if (!o.required) extras.remove(o.key)
-                    } else extras[o.key] = o
+                val on = extras.containsKey(o.key)
+                cell(o.label, o.price, on, o.sellable, true) {
+                    when {
+                        on -> if (!o.required) extras.remove(o.key)
+                        ToppingRules.canSelect(rules, extras.keys, o.key) -> extras[o.key] = o
+                        else -> return@cell
+                    }
                     render(); onChange?.invoke()
                 }
             }, 2)
