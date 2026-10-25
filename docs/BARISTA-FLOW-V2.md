@@ -8,7 +8,7 @@ The order screen uses the Evotor terminal inventory (`ProductTable` / `Inventory
 
 ## Экраны в 4.2.0
 
-Экран заказа: сверху чип карты (баланс, подарок, OFFLINE/«Без карты») и меню «Ещё»; в центре поиск и плитки каталога; снизу липкая панель «Позиций / Корзина / К оплате · сумма». Корзина — шторка. «К оплате» при наличии бонусов открывает одно окно выбора (подарок, кэшбэк, итог, срок резерва). После открытия чека — экран ожидания подтверждения оплаты. Подробно: `CHANGELOG-CASHIER-UX.md`.
+Экран заказа: сверху чип карты (баланс, подарок, OFFLINE/«Без карты») и меню «Ещё»; в центре поиск и плитки каталога; снизу липкая панель «Позиций / Сумма чека / В чек». Корзина — шторка. «В чек» при наличии живого резерва открывает компактный лист «Лояльность» (подарок, кэшбэк). Экрана оплаты в APK нет: после формирования позиций управление возвращается Эвотору, оплату и чек делает POS. Подробно: `CHANGELOG-5.0.0-evotor-receipt.md`.
 
 ## Resolve contract
 
@@ -16,7 +16,12 @@ The order screen uses the Evotor terminal inventory (`ProductTable` / `Inventory
 
 ## Loyalty and extras
 
-The receipt extras contract remains `extras.sc`, with `v:2`, `c` (signed token or numeric code), optional `op` (reservation ID), `free` (applied free cup claim), `cb` (cashback claim in kopecks), and `ts`. This matches `SellHandler.getSc`. The checkout integration applies only cashier-selected benefits, bounded by the backend reservation and receipt total.
+The receipt extras contract is `{ "<APP_UUID>": { "sc": {...} } }` with a legacy flat `sc` written alongside:
+`v:2`, `c` (`cardCode` from resolve, falls back to the scanned token), optional `op` (reservation ID),
+`free` (applied free cup claim), `cb` (cashback claim in kopecks), `ts` (unix ms) and
+`kind` (`token` | `code`). Both keys carry the same payload, so a backend that still reads `extras.sc`
+keeps working and the benefit is applied at most once per fiscal document. The checkout integration
+applies only cashier-selected benefits, bounded by the backend reservation and receipt total.
 
 **Фактическое поведение 4.3.0:** подарок предлагается только за позиции, которые `FreeCupRules` считает напитками (метка `#cup`/`#nocup` в описании → слова в названии → группа Эвотор); скидка — на самую дешёвую такую единицу. Подробно: `CHANGELOG-CASHIER-UX-v2.md`.
 
@@ -24,7 +29,7 @@ The APK's terminal inventory API does not expose backend `freeEligible` / `count
 
 ## Session reset
 
-Card state is one-sale state. A successful resolve creates the session; a card reset detaches loyalty but does not clear the cart. On the current Integration Library API, `openSellReceipt` confirms that the receipt was opened, not that fiscal payment has completed. When the cashier returns from the payment screen, the app shows a waiting screen (state persisted): “Чек пробит — следующий гость” clears the cart and customer, while “Не оплачено — вернуться к заказу” preserves them. This avoids treating “receipt opened” as a confirmed fiscal sale. Fully automatic reset still requires a documented fiscal-completion callback verified on a terminal.
+Card state is one-sale state. A successful resolve creates the session; a card reset detaches loyalty but does not clear the cart. On the current Integration Library API, `openSellReceipt` confirms that the receipt was opened, not that fiscal payment has completed. When the cashier returns from the Evotor payment screen, the app checks whether a SELL receipt is still open: if it is closed (paid or cancelled) the cart is cleared and the barista queue is shown, otherwise the order is preserved. This avoids treating “receipt opened” as a confirmed fiscal sale.
 
 ## Manual terminal checklist
 
@@ -35,5 +40,7 @@ Card state is one-sale state. A successful resolve creates the session; a card r
 5. Scan the customer QR using the Evotor scanner; it should use the same field/resolve path.
 6. Load catalog from Evotor inventory; confirm prices and UUIDs against the terminal catalog.
 7. Add/remove quantities, reset customer and confirm cart remains.
-8. Test cashier-selected cashback/free decisions and inspect `extras.sc` on the resulting SELL document.
+8. Test cashier-selected cashback/free decisions and inspect `extras.sc` (and `<APP_UUID>.sc`) on the resulting SELL document.
 9. Return from payment: confirm successful receipt clears customer/cart; confirm failed/cancelled payment keeps the order. This needs real-terminal verification.
+10. Добавка без `evotorUuid` и добавка с `available=false` блокируются в карточке товара и не попадают в чек.
+11. `zeroOption` не создаёт позицию; чек = товар + платные добавки с их `evotorUuid`.

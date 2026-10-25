@@ -10,9 +10,10 @@
 - `upsellDefault[]`: общие допы (#upsell в description или круассан)
 
 ## Поведение APK
-1. Inventory Эвотор + merge catalog по uuid.
-2. Тап по товару с toppings → sheet добавок → в корзину напиток + допы.
-3. «К оплате» → рекомендации upsell → оплата / лояльность.
+1. Inventory Эвотор + merge catalog по uuid (storeUuid — на каждый запрос; кэш с временем сохранения).
+2. Тап по товару с toppings → sheet добавок → в корзину напиток + платные допы (`Topping.id` в строке корзины).
+3. «В чек» → рекомендации upsell → [лист «Лояльность»] → `ReceiptValidator` → позиции в Эвотор.
+   Оплату, сумму и чек делает POS; APK их не считает.
 
 ## Фото
 - В админке: `products.image_url` (upload → `/uploads/...`).
