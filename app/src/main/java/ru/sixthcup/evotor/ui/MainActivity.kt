@@ -47,6 +47,8 @@ import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.CardRefresh
+import ru.sixthcup.evotor.data.QueueNumber
+import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.net.ShiftApi
 import ru.sixthcup.evotor.data.OrderQueueStore
@@ -70,6 +72,7 @@ import ru.sixthcup.evotor.data.ReceiptIssue
 import ru.sixthcup.evotor.data.ReceiptValidator
 import ru.sixthcup.evotor.net.DeviceHeaders
 import ru.sixthcup.evotor.net.LoyaltyApi
+import ru.sixthcup.evotor.net.QueueNumberApi
 import ru.sixthcup.evotor.net.CatalogApi
 import ru.sixthcup.evotor.net.StoreUuidResolver
 import ru.sixthcup.evotor.data.Topping
@@ -3036,6 +3039,9 @@ class MainActivity : AppCompatActivity() {
         sendingReceipt = true
         // Выгода комбо должна быть уже записана: её применяет DiscountIntegrationService.
         CheckoutChoice.saveCombo(this, comboDiscountRub())
+        // Номер очереди нужен ДО печати чека: PrintExtra читает его из хранилища.
+        // Сервер недоступен — чек печатается без номера, продажа не блокируется.
+        requestQueueNumber()
         SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks) { outcome ->
             sendingReceipt = false
             if (outcome.ok) {
@@ -3049,6 +3055,22 @@ class MainActivity : AppCompatActivity() {
                 noticeKind = Kind.ERROR
                 if (outcome.catalogRefresh) loadProducts(userInitiated = true)
                 if (screen == Screen.ORDER) safeRender()
+            }
+        }
+    }
+
+    /**
+     * Запросить публичный номер заказа у backend под текущую продажу.
+     * Блокирующий вызов уходит в фон; на экран ничего не влияет.
+     */
+    private fun requestQueueNumber() {
+        QueueNumberStore.clear(this)
+        thread(name = "queue-number") {
+            val number = try { QueueNumberApi.issue() } catch (t: Throwable) { Log.w(TAG, "queue_number", t); null }
+            if (number != null) {
+                QueueNumberStore.save(this, number)
+            } else {
+                Log.i(TAG, "queue_number_skipped offline_or_error")
             }
         }
     }
@@ -3078,7 +3100,9 @@ class MainActivity : AppCompatActivity() {
     private fun confirmPendingOrder(): QueueOrder? {
         return try {
             val id = OrderQueueStore.pendingId(this) ?: return null
-            OrderQueueStore.confirm(this, id, shiftInfo?.number)
+            // Номер на чеке выдаёт сервер; локальный счётчик — только аварийный fallback.
+            val serverNumber = QueueNumberStore.peek(this)?.publicNumber?.toIntOrNull()
+            OrderQueueStore.confirm(this, id, shiftInfo?.number, publicNumber = serverNumber)
         } catch (t: Throwable) {
             Log.e(TAG, "queue confirm", t)
             null
@@ -4410,6 +4434,7 @@ class MainActivity : AppCompatActivity() {
                 false -> {
                     // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
                     val done = confirmPendingOrder()
+                    QueueNumberStore.clear(this)
                     Cart.clear()
                     PendingPayment.clear(this)
                     // Номер и состояние карты показываем сразу после оплаты (post-pay).

@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="ru.evotor.permission.PRINT_SESSION_OPENING_REPORT" />
     <uses-permission android:name="ru.evotor.permission.PRINT_Z_REPORT" />
+    <!-- Печать публичного номера заказа (Queue Number) на чеке продажи. -->
+    <uses-permission android:name="ru.evotor.permission.receipt.printExtra.SET" />
     <application
         android:name=".SixthCupApp"
         android:allowBackup="false"
@@ -35,6 +37,11 @@
         <service android:name=".integration.DiscountIntegrationService" android:exported="true">
             <intent-filter>
                 <action android:name="evo.v2.receipt.sell.receiptDiscount" />
+            </intent-filter>
+        </service>
+        <service android:name=".integration.ReceiptPrintExtraService" android:exported="true">
+            <intent-filter>
+                <action android:name="evo.v2.receipt.sell.printExtra.REQUIRED" />
             </intent-filter>
         </service>
         <receiver android:name=".scanner.ScannerReceiver" android:exported="true">

@@ -108,7 +108,14 @@ object OrderQueueStore {
      * Возвращает заказ или null, если подтверждать нечего.
      */
     @Synchronized
-    fun confirm(c: Context, id: String, sessionNumber: Long?, now: Long = System.currentTimeMillis()): QueueOrder? {
+    fun confirm(
+        c: Context,
+        id: String,
+        sessionNumber: Long?,
+        now: Long = System.currentTimeMillis(),
+        /** Публичный номер с backend: он и попадает на чек. null — локальный счётчик (offline). */
+        publicNumber: Int? = null,
+    ): QueueOrder? {
         val current = load(c, now)
         if (!QueueOps.hasPending(current, id)) {
             prefs(c).edit().remove(K_PENDING_ID).apply()
@@ -121,8 +128,9 @@ object OrderQueueStore {
             epoch,
             QueueOps.activeNumbers(current),
         )
+        val number = publicNumber?.takeIf { it > 0 } ?: n
         p.edit().putString(K_EPOCH, counter.key).putInt(K_LAST, counter.last).remove(K_PENDING_ID).apply()
-        val updated = QueueOps.confirm(current, id, n, now)
+        val updated = QueueOps.confirm(current, id, number, now)
         save(c, updated)
         val order = updated.firstOrNull { it.id == id }
         if (order != null) recordReceipt(c, epoch, order.totalRub)
