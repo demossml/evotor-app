@@ -183,3 +183,20 @@ Backend отдаёт `{ "error": "<code>" }` (`app.ts:61`), коды: `invalid_c
 - `docs/CASHIER-APP.md` п.7 дополнен явной формулировкой «подпись проверяет сервер, не APK» + ссылка на новый документ.
 
 **Остаётся расхождение вне зоны этой серии:** `sixth-cup/ANDROID_INTEGRATION_CONTRACT.md:79-83` всё ещё утверждает, что APK проверяет Ed25519. Правка требует отдельного разрешения на backend-репозиторий — зафиксировано в отчёте как follow-up.
+
+## STEP-A06 — Version, self-check
+
+- `versionCode` 118 → **119**, `versionName` 5.1.3 → **5.1.4** (`app/build.gradle.kts`). Почему не 118: APK с versionCode 118 уже собирался до исправления L-00, один номер = одно состояние кода.
+- Полный прогон: `:app:testDebugUnitTest` → **139 тестов, 0 падений**; `:app:lintDebug` → **0 errors, 111 warnings** (baseline не менялся); `assembleRelease` → BUILD SUCCESSFUL.
+
+### Self-check
+
+- [x] **QR path: `sc.c` is server token (not pure cardCode when token exists)** — `yes` (`CardSession.scValue`, тест `qr session puts the signed token…`)
+- [x] **Manual path: `sc.c` is numeric code** — `yes` (тест `manual card code stays numeric…`)
+- [x] **`sc.op` set when reservation exists** — `yes` (тест `reservation id is written as op…`; без резерва `op` отсутствует и `free/cb` = 0)
+- [x] **`CardSessionExtrasTest` covers QR + manual** — `yes` (11 кейсов: QR, manual, регрессия, op, q, offline, форма extras)
+- [x] **No files from sixth-cup backend modified** — `yes`: все коммиты серии в `evotor-app`; в `sixth-cup` моих правок нет
+- [x] **CONTRACT matches actual APK crypto behavior** — `yes` в пределах репозитория APK (`docs/LOYALTY-EXTRAS-CONTRACT.md`); `sixth-cup/ANDROID_INTEGRATION_CONTRACT.md:79-83` всё ещё утверждает обратное — вне зоны серии
+- [x] **versionCode bumped** — `yes` (119 / 5.1.4)
+
+Итог: все пункты закрыты, кроме кросс-репозиторного документа, который запрещено править в этой серии.
