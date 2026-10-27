@@ -125,3 +125,21 @@ internal fun scValue(info: CardInfo): String =
 (`qr session puts the signed token…`, `regression - token in session…`); после восстановления — 6/6 green, файл побайтово тот же (sha256 `11c67389…`).
 
 **Прогон:** `./gradlew :app:testDebugUnitTest --tests ru.sixthcup.evotor.data.CardSessionExtrasTest` → BUILD SUCCESSFUL, tests=6 failures=0.
+
+## STEP-A02 — `sc.op` и согласованность free/cb
+
+**Что уже было:** `reservationId` сохраняется в сессии (`CardSession.set/get`) и писался в `sc.op` при непустом резерве. Проверено: `LoyaltyApi.resolve` берёт `reservationId` из ответа, `DiscountCalc.reserved()` включает скидку только при живом резерве.
+
+**Что добавлено (инвариант):** `free`/`cb` пишутся только вместе с `op`. Без резерва backend применяет `min(0, …) = 0`, поэтому числовые `free=1`/`cb>0` в чеке были ложными (путали разбор и логи).
+
+```kotlin
+val reserved = info.reservationId != null
+if (reserved) o.put("op", info.reservationId)
+o.put("free", if (reserved && freeApplied) 1 else 0)
+    .put("cb", if (reserved) cashbackKopecks.coerceAtLeast(0L) else 0L)
+```
+
+**Тесты:** `reservation id is written as op and kept in both extras forms`, `benefits are only claimed together with the reservation id`.
+**Прогон:** 8/8 green.
+
+**JSON-ключи extras (итог):** `v`, `c`, `ts`, `kind`, `op` (только с резервом), `free`, `cb`; дублируются под `BuildConfig.APP_UUID` и плоско.

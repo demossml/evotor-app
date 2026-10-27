@@ -100,4 +100,28 @@ class CardSessionExtrasTest {
         assertEquals("payload.signature", sc.getString("c"))
         assertEquals(0, sc.getInt("free"))
     }
+
+    @Test
+    fun `benefits are only claimed together with the reservation id`() {
+        // Резерва нет -> op не пишем, а free/cb не могут выглядеть выданными.
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "", reservationId = null),
+            freeApplied = true,
+            cashbackKopecks = 700,
+        )
+        assertFalse(sc.has("op"))
+        assertEquals(0, sc.getInt("free"))
+        assertEquals(0L, sc.getLong("cb"))
+    }
+
+    @Test
+    fun `reservation id is written as op and kept in both extras forms`() {
+        val extras = CardSession.extras(card(reservationId = "R-abc123"), freeApplied = true, cashbackKopecks = 500)
+        val flat = extras.getJSONObject("sc")
+        val nested = extras.getJSONObject(BuildConfig.APP_UUID).getJSONObject("sc")
+        assertEquals("R-abc123", flat.getString("op"))
+        assertEquals("R-abc123", nested.getString("op"))
+        assertEquals(1, flat.getInt("free"))
+        assertEquals(500L, flat.getLong("cb"))
+    }
 }
