@@ -150,4 +150,38 @@ class CardSessionExtrasTest {
         val sc = CardSession.sc(card(seq = 0), freeApplied = false, cashbackKopecks = 0)
         assertFalse(sc.has("q"))
     }
+
+    @Test
+    fun `queue order id and number are written into sc`() {
+        val q = QueueNumber(orderId = "ord-123", publicNumber = "47")
+        val sc = CardSession.sc(card(), freeApplied = true, cashbackKopecks = 500, queue = q)
+        assertEquals("ord-123", sc.getString("ord"))
+        assertEquals("47", sc.getString("qn"))
+        // остальные поля не изменились
+        assertEquals("1234567890", sc.getString("c"))
+        assertEquals("res-1", sc.getString("op"))
+        assertEquals(1, sc.getInt("free"))
+    }
+
+    @Test
+    fun `no queue number means no ord or qn keys`() {
+        val sc = CardSession.sc(card(), freeApplied = false, cashbackKopecks = 0, queue = null)
+        assertFalse(sc.has("ord"))
+        assertFalse(sc.has("qn"))
+        // старый чек обрабатывается как раньше
+        assertEquals("1234567890", sc.getString("c"))
+        assertEquals(2, sc.getInt("v"))
+    }
+
+    @Test
+    fun `stale queue number is not written`() {
+        val old = QueueNumber(
+            orderId = "ord-old",
+            publicNumber = "9",
+            issuedAt = System.currentTimeMillis() - QueueNumber.MAX_AGE_MS - 1_000L,
+        )
+        val sc = CardSession.sc(card(), freeApplied = false, cashbackKopecks = 0, queue = old)
+        assertFalse(sc.has("ord"))
+        assertFalse(sc.has("qn"))
+    }
 }

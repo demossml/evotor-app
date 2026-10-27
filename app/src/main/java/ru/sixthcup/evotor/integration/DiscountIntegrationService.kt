@@ -15,6 +15,7 @@ import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.QueueNumberStore
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -67,7 +68,7 @@ class DiscountIntegrationService : IntegrationService() {
                     callback.onResult(
                         ReceiptDiscountEventResult(
                             total,
-                            SetExtra(CardSession.extras(info, freeApplied, cbKopecks)),
+                            SetExtra(CardSession.extras(info, freeApplied, cbKopecks, QueueNumberStore.peek(applicationContext))),
                             emptyList(),
                             null,
                         ),

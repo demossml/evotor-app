@@ -116,8 +116,13 @@ object CardSession {
      * код карты (см. [scValue]), `op` — reservationId (без него списание не применится),
      * `cb` — копейки, `ts` — unix ms.
      */
-    fun extras(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
-        val sc = sc(info, freeApplied, cashbackKopecks)
+    fun extras(
+        info: CardInfo,
+        freeApplied: Boolean,
+        cashbackKopecks: Long,
+        queue: QueueNumber? = null,
+    ): JSONObject {
+        val sc = sc(info, freeApplied, cashbackKopecks, queue)
         // Плоский ключ нужен текущему парсеру: если appId не совпал с EVOTOR_APP_ID на backend,
         // льгота не потеряется. Оба значения одинаковые — двойного списания нет.
         return JSONObject()
@@ -126,7 +131,13 @@ object CardSession {
     }
 
     /** extras.sc written into the receipt. The backend re-checks everything when it reads the SELL. */
-    fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+    fun sc(
+        info: CardInfo,
+        freeApplied: Boolean,
+        cashbackKopecks: Long,
+        /** Публичный номер заказа: связывает чек с записью queue_numbers (см. QueueNumber). */
+        queue: QueueNumber? = null,
+    ): JSONObject {
         val c = scValue(info)
         // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
         // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
@@ -141,6 +152,11 @@ object CardSession {
         info.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
         o.put("free", if (reserved && freeApplied) 1 else 0)
             .put("cb", if (reserved) cashbackKopecks.coerceAtLeast(0L) else 0L)
+        // ord — канонический ключ связи с queue_numbers; qn — только для логов.
+        // Пишем оба лишь когда номер реально получен от backend до открытия чека.
+        if (QueueNumber.isUsable(queue)) {
+            o.put("ord", queue!!.orderId).put("qn", queue.publicNumber)
+        }
         return o
     }
 
