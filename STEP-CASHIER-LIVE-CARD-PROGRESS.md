@@ -122,3 +122,23 @@ C01 прогресс и «подарок» для ручного кода · C02
 - Фискальный пайплайн не тронут: экран рисуется после того, как POS уже закрыл чек; в extras/чек ничего не добавляется.
 
 **Прогон:** 167 тестов, 0 падений.
+
+## STEP-C07 — Version, self-check, APK
+
+- `versionCode` 119 → **120**, `versionName` 5.1.4 → **5.1.5**.
+- Прогон: `:app:testDebugUnitTest` — **167 тестов, 0 падений**; `:app:lintDebug` — **0 errors, 111 warnings**; `assembleRelease` — BUILD SUCCESSFUL (подпись постоянным ключом `CN=6.7 Coffee`).
+- APK: `app/build/outputs/apk/release/app-release.apk`, 5 684 403 байт, `versionCode=120`, `versionName=5.1.5`.
+
+### Self-check
+
+- [x] **Fixture code+paidCups=5 → UI progress not 0** — `yes` (`CardProgressTest.manual code with five cups shows full progress and gift…`, 5/5)
+- [x] **code path redeem free disabled** — `yes` (`redeemEnabled = false` во всех тестах с `kind=code`)
+- [x] **token path redeem can enable when freeAvailable>0** — `yes` (`token with a live reservation can redeem`)
+- [x] **refresh after sale** — `yes` (C03: `refreshCardAsync()` сразу после `confirmPendingOrder`)
+- [x] **Обновить button** — `yes` (панель карты в корзине, `refreshCardAsync(notifyOnChange = true)`)
+- [x] **30s poll gated** — `yes` (`CardPoll.INTERVAL_MS = 30_000`, старт в `onResume`, стоп в `onPause`/без карты)
+- [x] **queue number on post-pay** — `yes` (`Screen.POSTPAY` → «Заказ № NN»)
+- [x] **L-00 sc.c token tests still green** — `yes` (`CardSessionExtrasTest` 11/11)
+- [x] **No backend repo changes** — `yes` (все коммиты в `evotor-app`)
+
+**Отклонение от плана:** шаги C05 и C06 вошли одним коммитом `d127089` — post-pay экран и номер заказа менялись в одном файле и не разделялись по смыслу без искусственного дробления.
