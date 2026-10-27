@@ -38,6 +38,7 @@ object CardSession {
     private const val PREF = "sixthcup_card"
     private const val KEY = "info"
     private const val KEY_AT = "at"
+    private const val KEY_STALE = "stale"
     /** A scan is only valid for one sale; stale scans must never leak into the next customer's receipt. */
     private const val TTL_MS = 10 * 60 * 1000L
 
@@ -75,6 +76,35 @@ object CardSession {
 
     fun clear(ctx: Context) {
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    /** Данные карты устарели (перезапрос не удался) — UI может это показать. */
+    fun isStale(ctx: Context): Boolean {
+        val p = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+        return p.getBoolean(KEY_STALE, false)
+    }
+
+    private fun markStale(ctx: Context, stale: Boolean) {
+        ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putBoolean(KEY_STALE, stale).apply()
+    }
+
+    /**
+     * Перезапросить карту тем же credential (токен для QR, код для ручного ввода).
+     *
+     * 404/отказ сервера → сессия очищается; сеть/5xx → прежние данные остаются с пометкой
+     * «устарели». `fetch` передаётся снаружи, чтобы логику можно было покрыть без сети.
+     */
+    fun refreshFromServer(ctx: Context, fetch: (String) -> CardInfo): RefreshResult {
+        val current = get(ctx) ?: return RefreshResult(RefreshOutcome.NO_CARD, null)
+        val credential = CardRefresh.credential(current) ?: return RefreshResult(RefreshOutcome.NO_CARD, null)
+        val result = CardRefresh.apply(current, fetch(credential))
+        when (result.outcome) {
+            RefreshOutcome.UPDATED -> { set(ctx, result.info!!); markStale(ctx, stale = false) }
+            RefreshOutcome.DROPPED -> clear(ctx)
+            RefreshOutcome.KEPT_STALE -> markStale(ctx, stale = true)
+            RefreshOutcome.NO_CARD -> Unit
+        }
+        return result
     }
 
     /**

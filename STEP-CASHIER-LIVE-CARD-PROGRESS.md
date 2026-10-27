@@ -78,3 +78,11 @@ C01 прогресс и «подарок» для ручного кода · C02
 **Прогон:** `:app:testDebugUnitTest` — **149 тестов, 0 падений**.
 
 **Ограничение (в отчёт):** при текущем backend ручной код не даёт ни `paidTotal`, ни `freeAvailable`, поэтому «5/5 + подарок» для него показывается только если сервер пришлёт `paidCups ≥ goal`/`paidTotal`. Реальные значения требуют 3-строчной правки в `reservations.ts` (info-only поля) — вне правил серии, зафиксировано в отчёте.
+
+## STEP-C02 — `CardSession.refreshFromServer`
+
+- `data/CardRefresh.kt` — чистая логика: `credential(info)` (токен для QR, иначе канонический код), `apply(current, fetched)` → `UPDATED | DROPPED | KEPT_STALE`, `isNotable(...)` для тоста.
+- `CardSession.refreshFromServer(ctx, fetch)` — запрос тем же credential, затем: `UPDATED` → заменить сессию и снять пометку «устарело»; `DROPPED` (сервер отказал) → `clear`; `KEPT_STALE` (сеть/5xx) → оставить данные и выставить флаг (`CardSession.isStale`).
+- `fetch` передаётся параметром — сеть не нужна для тестов.
+
+**Тесты:** `CardRefreshTest` 7/7 (токен/код как credential, успех, отказ, офлайн, «что считать изменением»).
