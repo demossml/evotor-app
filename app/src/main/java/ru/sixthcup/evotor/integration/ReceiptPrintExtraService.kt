@@ -8,6 +8,7 @@ import ru.evotor.framework.core.action.event.receipt.print_extra.PrintExtraRequi
 import ru.evotor.framework.core.action.event.receipt.print_extra.PrintExtraRequiredEventProcessor
 import ru.evotor.framework.core.action.event.receipt.print_extra.PrintExtraRequiredEventResult
 import ru.evotor.framework.core.action.processor.ActionProcessor
+import ru.evotor.devices.commons.printer.printable.IPrintable
 import ru.evotor.devices.commons.printer.printable.PrintableText
 import ru.evotor.framework.receipt.PrintGroup
 import ru.evotor.framework.receipt.Receipt
@@ -15,6 +16,8 @@ import ru.evotor.framework.receipt.ReceiptApi
 import ru.evotor.framework.receipt.print_extras.PrintExtraPlacePrintGroupTop
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
+import ru.sixthcup.evotor.data.ReceiptPrintText
+import ru.sixthcup.evotor.data.SalePrintStore
 
 /**
  * Печать публичного номера заказа на чеке продажи: «ЗАКАЗ № 47».
@@ -39,26 +42,43 @@ class ReceiptPrintExtraService : IntegrationService() {
                 event: PrintExtraRequiredEvent,
                 callback: ActionProcessor.Callback,
             ) {
+                // Ошибка внутри PrintExtra не должна влиять на печать фискального чека:
+                // в любом случае отдаём валидный результат (пустой — если печатать нечего).
                 val result = try {
                     buildResult()
                 } catch (t: Throwable) {
                     Log.e(TAG, "print_extra_failed", t)
-                    null
+                    PrintExtraRequiredEventResult(emptyList())
                 }
-                callback.onResult(result)
+                try {
+                    callback.onResult(result)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "print_extra_callback_failed", t)
+                }
             }
         },
     )
 
-    private fun buildResult(): PrintExtraRequiredEventResult? {
-        val number = QueueNumberStore.peek(this) ?: run {
-            Log.i(TAG, "print_extra_skip no_number")
-            return null
+    private fun buildResult(): PrintExtraRequiredEventResult {
+        val number = QueueNumberStore.peek(this)
+        val loyalty = SalePrintStore.peek(this)
+        val lines = ReceiptPrintText.lines(number, loyalty)
+        if (lines.isEmpty()) {
+            Log.i(TAG, "print_extra_skip nothing_to_print")
+            return PrintExtraRequiredEventResult(emptyList())
         }
+        Log.i(
+            TAG,
+            "print_extra order=${number?.orderId?.take(8) ?: "-"} number=${number?.publicNumber ?: "-"} " +
+                "loyaltyCard=${loyalty?.cardFound ?: false} reward=${loyalty?.rewardApplied ?: false} " +
+                "lines=${lines.size}",
+        )
+        // Данные одноразовые: печатаем ровно один раз и освобождаем под следующую продажу.
+        QueueNumberStore.clear(this)
+        SalePrintStore.clear(this)
         val place = PrintExtraPlacePrintGroupTop(printGroupId())
-        val text = QueueNumber.printTextFor(number.publicNumber)
-        Log.i(TAG, "print_extra order=${number.orderId.take(8)} number=${number.publicNumber}")
-        return PrintExtraRequiredEventResult(listOf(SetPrintExtra(place, arrayOf(PrintableText(text)))))
+        val printables = lines.map { PrintableText(it) as IPrintable }.toTypedArray()
+        return PrintExtraRequiredEventResult(listOf(SetPrintExtra(place, printables)))
     }
 
     /**

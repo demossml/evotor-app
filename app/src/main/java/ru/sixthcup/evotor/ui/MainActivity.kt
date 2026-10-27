@@ -49,6 +49,7 @@ import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.CardRefresh
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
+import ru.sixthcup.evotor.data.SalePrintStore
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.net.ShiftApi
 import ru.sixthcup.evotor.data.OrderQueueStore
@@ -243,6 +244,8 @@ class MainActivity : AppCompatActivity() {
     private var catalogLoadedAt = 0L
     /** Идёт фоновый перезапрос карты — второй параллельный не запускаем. */
     private var cardRefreshing = false
+    /** Сколько ждём номер очереди перед открытием чека (спека: 1.0–1.5 с). */
+    private val QUEUE_NUMBER_WAIT_MS = 1_500L
     /** Идёт фоновый опрос карты (C04). */
     private var cardPollActive = false
     /** Заказ, только что подтверждённый оплатой: показывается на post-pay экране. */
@@ -3039,9 +3042,9 @@ class MainActivity : AppCompatActivity() {
         sendingReceipt = true
         // Выгода комбо должна быть уже записана: её применяет DiscountIntegrationService.
         CheckoutChoice.saveCombo(this, comboDiscountRub())
-        // Номер очереди нужен ДО печати чека: PrintExtra читает его из хранилища.
-        // Сервер недоступен — чек печатается без номера, продажа не блокируется.
-        requestQueueNumber()
+        // Номер очереди обязан быть в хранилище ДО печати (PrintExtra срабатывает после оплаты).
+        // Запрос синхронный с коротким таймаутом; ошибка/таймаут — чек печатается без номера.
+        requestQueueNumberBlocking()
         SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks) { outcome ->
             sendingReceipt = false
             if (outcome.ok) {
@@ -3060,18 +3063,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Запросить публичный номер заказа у backend под текущую продажу.
-     * Блокирующий вызов уходит в фон; на экран ничего не влияет.
+     * Запросить публичный номер заказа у backend **до** открытия чека.
+     *
+     * Вызывается из фонового потока продажи: сеть не должна идти в UI-поток, но и «успеет
+     * в фоне» не годится — к моменту PrintExtra номер обязан лежать в хранилище. Ждём
+     * не дольше [QUEUE_NUMBER_WAIT_MS]; не дождались — печатаем чек без номера.
      */
-    private fun requestQueueNumber() {
+    private fun requestQueueNumberBlocking() {
         QueueNumberStore.clear(this)
+        SalePrintStore.clear(this)
+        val ready = java.util.concurrent.CountDownLatch(1)
+        val fetched = java.util.concurrent.atomic.AtomicReference<QueueNumber?>()
         thread(name = "queue-number") {
-            val number = try { QueueNumberApi.issue() } catch (t: Throwable) { Log.w(TAG, "queue_number", t); null }
-            if (number != null) {
-                QueueNumberStore.save(this, number)
-            } else {
-                Log.i(TAG, "queue_number_skipped offline_or_error")
-            }
+            fetched.set(try { QueueNumberApi.issue() } catch (t: Throwable) { Log.w(TAG, "queue_number", t); null })
+            ready.countDown()
+        }
+        val waited = ready.await(QUEUE_NUMBER_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        val number = fetched.get()
+        if (number != null) {
+            QueueNumberStore.save(this, number)
+            Log.i(TAG, "queue_number_ready number=${number.publicNumber}")
+        } else {
+            Log.i(TAG, "queue_number_skipped reason=${if (waited) "offline" else "timeout"}")
         }
     }
 
@@ -4434,7 +4447,6 @@ class MainActivity : AppCompatActivity() {
                 false -> {
                     // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
                     val done = confirmPendingOrder()
-                    QueueNumberStore.clear(this)
                     Cart.clear()
                     PendingPayment.clear(this)
                     // Номер и состояние карты показываем сразу после оплаты (post-pay).

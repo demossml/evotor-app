@@ -22,8 +22,8 @@ object QueueNumberApi {
         return try {
             val conn = (URL(BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/queue-number").openConnection() as HttpURLConnection)
             conn.requestMethod = "POST"
-            conn.connectTimeout = 3000
-            conn.readTimeout = 5000
+            conn.connectTimeout = 1200
+            conn.readTimeout = 1500
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             DeviceHeaders.apply(conn)
