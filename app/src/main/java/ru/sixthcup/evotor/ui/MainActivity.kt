@@ -157,7 +157,7 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var qrRunnable: Runnable? = null
 
-    private enum class Screen { CARD, ORDER, SHIFT, QUEUE }
+    private enum class Screen { CARD, ORDER, SHIFT, QUEUE, POSTPAY }
     private enum class Kind { ERROR, WARN, INFO, OK }
 
     private val scanReceiver = object : BroadcastReceiver() {
@@ -242,6 +242,8 @@ class MainActivity : AppCompatActivity() {
     private var cardRefreshing = false
     /** Идёт фоновый опрос карты (C04). */
     private var cardPollActive = false
+    /** Заказ, только что подтверждённый оплатой: показывается на post-pay экране. */
+    private var postPayOrder: QueueOrder? = null
     private val cardPollHandler = Handler(Looper.getMainLooper())
     private var catalogAttemptAt = 0L
     /** Плашка о происхождении каталога: кэш/пустой ответ сервера. null — данные свежие. */
@@ -402,6 +404,7 @@ class MainActivity : AppCompatActivity() {
             Screen.ORDER -> renderOrder()
             Screen.SHIFT -> renderShift()
             Screen.QUEUE -> renderQueue()
+            Screen.POSTPAY -> renderPostPay()
         }
         if (screen != Screen.QUEUE) stopQueueTicker()
         Fonts.apply(topBar); Fonts.apply(root); Fonts.apply(orderPane); Fonts.apply(bottomBar)
@@ -3072,12 +3075,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Оплата подтверждена (чек закрыт в POS): присвоить номер и поставить в очередь бариста. */
-    private fun confirmPendingOrder() {
-        try {
-            val id = OrderQueueStore.pendingId(this) ?: return
+    private fun confirmPendingOrder(): QueueOrder? {
+        return try {
+            val id = OrderQueueStore.pendingId(this) ?: return null
             OrderQueueStore.confirm(this, id, shiftInfo?.number)
         } catch (t: Throwable) {
             Log.e(TAG, "queue confirm", t)
+            null
         }
     }
 
@@ -4129,6 +4133,92 @@ class MainActivity : AppCompatActivity() {
         return box
     }
 
+    /**
+     * Post-pay: что бариста/гость видит сразу после закрытия чека — номер заказа и состояние карты.
+     * Фискальный пайплайн Эвотора не участвует: только наш экран.
+     */
+    private fun renderPostPay() {
+        topBar.removeAllViews()
+        topBar.setPadding(dp(12), dp(10), dp(12), dp(8))
+        val order = postPayOrder
+        root.addView(TextView(this).apply {
+            text = "ЧЕК ЗАКРЫТ"
+            textSize = 10f
+            letterSpacing = 0.16f
+            weight(Fonts.SEMIBOLD)
+            setTextColor(UiKit.MUTED)
+        })
+        root.addView(TextView(this).apply {
+            text = order?.let { "Заказ № ${it.label}" } ?: "Заказ принят"
+            textSize = 32f
+            weight(Fonts.STRONG)
+            letterSpacing = -0.02f
+            setTextColor(INK)
+            setPadding(0, dp(6), 0, 0)
+        })
+        if (order != null) {
+            root.addView(TextView(this).apply {
+                val items = order.items.joinToString(", ")
+                text = if (items.length > 90) items.take(90) + "…" else items
+                textSize = 11.5f
+                setTextColor(UiKit.INK_2)
+                setPadding(0, dp(6), 0, 0)
+            })
+            root.addView(TextView(this).apply {
+                text = rub(order.totalRub)
+                textSize = 10.5f
+                setTextColor(UiKit.MUTED)
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+
+        val card = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+        if (card != null) {
+            root.addView(buildCartLoyalty(card), LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+            val p = CardProgress.of(card)
+            if (p.giftAvailable || p.cashbackKopecks > 0) {
+                root.addView(TextView(this).apply {
+                    text = when {
+                        p.giftAvailable && p.kind == "code" -> "Подарок и бонусы останутся на карте: списание — по QR."
+                        p.giftAvailable -> "Подарок остался на карте — покажите QR на следующей покупке."
+                        else -> "Бонусы на карте: ${p.cashbackKopecks / 100} ₽."
+                    }
+                    textSize = 10.5f
+                    setTextColor(UiKit.MUTED)
+                    setPadding(0, dp(8), 0, 0)
+                })
+            }
+        } else {
+            root.addView(TextView(this).apply {
+                text = "Карта не привязана — чашки и бонусы не начислены."
+                textSize = 10.5f
+                setTextColor(UiKit.MUTED)
+                setPadding(0, dp(14), 0, 0)
+            })
+        }
+
+        root.addView(button("К баристе", primary = true, heightDp = 48) {
+            postPayOrder = null
+            screen = Screen.QUEUE
+            safeRender()
+        }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(18) })
+        root.addView(TextView(this).apply {
+            text = "Новый заказ"
+            textSize = 12f
+            weight(Fonts.SEMIBOLD)
+            gravity = Gravity.CENTER
+            setTextColor(INK)
+            isClickable = true
+            isFocusable = true
+            setPadding(0, dp(14), 0, dp(8))
+            setOnClickListener {
+                postPayOrder = null
+                screen = Screen.ORDER
+                safeRender()
+            }
+        }, LinearLayout.LayoutParams(MATCH, WRAP))
+    }
+
     private fun renderQueue() {
         startQueueTicker()
         topBar.setPadding(dp(12), dp(10), dp(12), dp(8))
@@ -4319,10 +4409,12 @@ class MainActivity : AppCompatActivity() {
             when (sellOpen) {
                 false -> {
                     // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
-                    confirmPendingOrder()
+                    val done = confirmPendingOrder()
                     Cart.clear()
                     PendingPayment.clear(this)
-                    screen = Screen.QUEUE
+                    // Номер и состояние карты показываем сразу после оплаты (post-pay).
+                    postPayOrder = done
+                    screen = if (done != null) Screen.POSTPAY else Screen.QUEUE
                     // Чашки появятся у гостя только после poll на backend — тянем свежие данные.
                     refreshCardAsync()
                     safeRender()
@@ -4359,6 +4451,7 @@ class MainActivity : AppCompatActivity() {
         when (screen) {
             Screen.ORDER -> { notice = null; screen = Screen.CARD; safeRender() }
             Screen.SHIFT -> { screen = Screen.ORDER; safeRender() }
+            Screen.POSTPAY -> { postPayOrder = null; screen = Screen.QUEUE; safeRender() }
             Screen.QUEUE -> { screen = Screen.ORDER; safeRender() }
             Screen.CARD -> super.onBackPressed()
         }

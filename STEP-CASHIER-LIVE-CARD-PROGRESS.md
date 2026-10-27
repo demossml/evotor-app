@@ -108,3 +108,17 @@ C01 прогресс и «подарок» для ручного кода · C02
 
 **Тесты:** `CardPollTest` 5/5 (первый тик, нет карты, экран скрыт, интервал, «не 2 секунды»).
 **Прогон:** 161 тест, 0 падений.
+
+## STEP-C05 — Номер очереди (суточный счётчик)
+
+Нумерация уже реализована в `OrderNumbers`/`QueueOps` и сохраняется в SharedPreferences (`OrderQueueStore`): номер выдаётся только при `CONFIRMED`, отмена `PENDING` номер не расходует, эпоха сброса — номер смены Эвотора, иначе календарные сутки. В этой серии поведение **не менялось**, добавлены явные тесты.
+
+**Тесты:** `OrderNumberDailyTest` 6/6 — `next order takes the next number of the day`, `new day starts from one again`, `new shift restarts numbering even within one day`, `confirming twice does not take a second number`, `cancelled pending does not consume the number`, `number is unique among active orders`.
+
+## STEP-C06 — Post-pay: номер + лояльность
+
+- `confirmPendingOrder()` теперь возвращает `QueueOrder?` (номер), а не Unit.
+- Новый `Screen.POSTPAY` + `renderPostPay()`: «ЧЕК ЗАКРЫТ», «Заказ № NN», состав и сумма, панель карты (`buildCartLoyalty`) и пояснение по остатку подарка/бонусов, кнопка «К баристе» → очередь и «Новый заказ» → каталог. Кнопка «назад» ведёт в очередь.
+- Фискальный пайплайн не тронут: экран рисуется после того, как POS уже закрыл чек; в extras/чек ничего не добавляется.
+
+**Прогон:** 167 тестов, 0 падений.
