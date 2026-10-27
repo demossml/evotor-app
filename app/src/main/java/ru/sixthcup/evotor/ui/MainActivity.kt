@@ -45,6 +45,7 @@ import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardProgress
+import ru.sixthcup.evotor.data.CardRefresh
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.net.ShiftApi
 import ru.sixthcup.evotor.data.OrderQueueStore
@@ -236,6 +237,10 @@ class MainActivity : AppCompatActivity() {
      * Сеть больше не блокирует первый показ каталога.
      */
     private var catalogLoadedAt = 0L
+    /** Идёт фоновый перезапрос карты — второй параллельный не запускаем. */
+    private var cardRefreshing = false
+    /** Последний успешный фоновый poll карты (C04). */
+    private var cardPollAt = 0L
     private var catalogAttemptAt = 0L
     /** Плашка о происхождении каталога: кэш/пустой ответ сервера. null — данные свежие. */
     private var catalogNote: String? = null
@@ -421,6 +426,8 @@ class MainActivity : AppCompatActivity() {
     /** Экран CARD = витрина под листом «Карта гостя» (`guest-sheet` в index). */
     private fun renderCard() {
         renderOrder()
+        // Открыли карту гостя — один раз подтягиваем свежее состояние с сервера.
+        if (CardSession.get(this)?.code?.isNotEmpty() == true) refreshCardAsync()
         val existing = guestDialog
         if (existing != null && existing.isShowing) { fillGuest(); return }
         openGuestSheet()
@@ -2201,6 +2208,17 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(0xB3F6F3EE.toInt())
             })
         }
+        top.addView(TextView(this).apply {
+            text = if (CardSession.isStale(this@MainActivity)) "Обновить ·" else "Обновить"
+            textSize = 10f
+            setOnest(true)
+            setTextColor(0x99F6F3EE.toInt())
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Обновить данные карты"
+            setPadding(dp(8), 0, 0, 0)
+            setOnClickListener { refreshCardAsync(notifyOnChange = true) }
+        })
         box.addView(top)
 
         box.addView(TextView(this).apply {
@@ -3058,6 +3076,47 @@ class MainActivity : AppCompatActivity() {
             OrderQueueStore.confirm(this, id, shiftInfo?.number)
         } catch (t: Throwable) {
             Log.e(TAG, "queue confirm", t)
+        }
+    }
+
+    /**
+     * Перезапросить карту в фоне. После продажи backend видит новые чашки только после poll,
+     * поэтому обновление идёт и сразу, и по таймеру (C04).
+     */
+    private fun refreshCardAsync(notifyOnChange: Boolean = false) {
+        val current = CardSession.get(this)?.takeIf { it.code.isNotEmpty() } ?: return
+        if (cardRefreshing) return
+        cardRefreshing = true
+        thread(name = "card-refresh") {
+            val result = try {
+                CardSession.refreshFromServer(this) { LoyaltyApi.resolve(it) }
+            } catch (t: Throwable) {
+                Log.w(TAG, "card_refresh_failed", t)
+                null
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                cardRefreshing = false
+                when {
+                    result == null -> Unit
+                    result.dropped -> {
+                        notice = "Карта больше недоступна. Привяжите карту заново."
+                        noticeKind = Kind.WARN
+                        safeRender()
+                    }
+                    result.updated && result.info != null -> {
+                        val fresh = result.info
+                        if (notifyOnChange && CardRefresh.isNotable(current, fresh)) {
+                            val p = CardProgress.of(fresh)
+                            notice = if (p.giftAvailable) "Карта обновлена: подарок доступен"
+                            else "Карта обновлена: ${p.cups} из ${p.goal} чашек"
+                            noticeKind = Kind.INFO
+                        }
+                        safeRender()
+                    }
+                    else -> Unit
+                }
+            }
         }
     }
 
@@ -4238,6 +4297,8 @@ class MainActivity : AppCompatActivity() {
                     Cart.clear()
                     PendingPayment.clear(this)
                     screen = Screen.QUEUE
+                    // Чашки появятся у гостя только после poll на backend — тянем свежие данные.
+                    refreshCardAsync()
                     safeRender()
                 }
                 true -> {
