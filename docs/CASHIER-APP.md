@@ -15,7 +15,8 @@
 6. `extras` чека: `{ "<APP_UUID>": { "sc": {v:2,c,op,free,cb,ts,kind} } }` + плоский `sc`;
    скидку и extras пишет `DiscountIntegrationService`. Чашки начисляет сервер по фискальному документу.
 7. Backend обрабатывает SELL по poll и начисляет бонусы. Loyalty-запросы идут через HTTPS-прокси Эвотора
-   (секретов в APK нет).
+   (секретов в APK нет). Подпись QR-токена проверяет **сервер**, не APK; состав `extras.sc` —
+   в [LOYALTY-EXTRAS-CONTRACT.md](./LOYALTY-EXTRAS-CONTRACT.md).
 
 Подробности и список изменений: `CHANGELOG-5.1.0-addons-contract.md` (добавки) и `CHANGELOG-5.0.0-evotor-receipt.md` (передача позиций в POS).
 
