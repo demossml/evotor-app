@@ -143,3 +143,14 @@ o.put("free", if (reserved && freeApplied) 1 else 0)
 **Прогон:** 8/8 green.
 
 **JSON-ключи extras (итог):** `v`, `c`, `ts`, `kind`, `op` (только с резервом), `free`, `cb`; дублируются под `BuildConfig.APP_UUID` и плоско.
+
+## STEP-A03 — `sc.q` optional (N-01 / L-04)
+
+`RESEARCH §11`: APK вообще не отправлял `sc.q`, backend `sequenceMatches` захардкожен `true`. Обе стороны менять не договаривались, поэтому:
+
+- `CardInfo.seq: Int?` — новое **необязательное** поле; читается из ответа resolve, только если сервер его пришлёт (`LoyaltyApi.kt`), и переживает рестарт (`CardSession.set/get`).
+- `sc.q` пишется, только если `seq > 0` (`CardSession.sc`). Нет seq — ключа нет, чек пробивается как раньше, никакой блокировки.
+- Backend на HEAD seq не отдаёт, поэтому фактический payload не изменился; шаг готовит совместимость.
+
+**Тесты:** `sc q is omitted when the server did not send a sequence`, `sc q is passed through when the sequence is known`, `zero sequence is treated as unknown`.
+**Прогон:** extras 11/11; полный `:app:testDebugUnitTest` — 132 теста, 0 падений.

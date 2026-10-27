@@ -19,6 +19,7 @@ class CardSessionExtrasTest {
         code: String = "1234567890",
         cardCode: String = "1234567890",
         reservationId: String? = "res-1",
+        seq: Int? = null,
     ) = CardInfo(
         code = code,
         cardCode = cardCode,
@@ -29,6 +30,7 @@ class CardSessionExtrasTest {
         reservationId = reservationId,
         reservationExpiresAt = 0L,
         freeStatus = "RESERVED",
+        seq = seq,
     )
 
     @Test
@@ -123,5 +125,29 @@ class CardSessionExtrasTest {
         assertEquals("R-abc123", nested.getString("op"))
         assertEquals(1, flat.getInt("free"))
         assertEquals(500L, flat.getLong("cb"))
+    }
+
+    @Test
+    fun `sc q is omitted when the server did not send a sequence`() {
+        val sc = CardSession.sc(card(seq = null), freeApplied = true, cashbackKopecks = 500)
+        assertFalse(sc.has("q"))
+        // Отсутствие q не мешает собрать полноценный чек.
+        assertEquals("1234567890", sc.getString("c"))
+        assertEquals(1, sc.getInt("free"))
+    }
+
+    @Test
+    fun `sc q is passed through when the sequence is known`() {
+        val sc = CardSession.sc(card(seq = 42), freeApplied = false, cashbackKopecks = 0)
+        assertEquals(42, sc.getInt("q"))
+        // Остальные поля на месте: q не заменяет и не ломает контракт.
+        assertEquals("1234567890", sc.getString("c"))
+        assertEquals("res-1", sc.getString("op"))
+    }
+
+    @Test
+    fun `zero sequence is treated as unknown`() {
+        val sc = CardSession.sc(card(seq = 0), freeApplied = false, cashbackKopecks = 0)
+        assertFalse(sc.has("q"))
     }
 }

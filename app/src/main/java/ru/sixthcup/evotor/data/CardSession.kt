@@ -23,6 +23,11 @@ data class CardInfo(
     val note: String? = null,
     /** Причина отказа backend: invalid_card | card_not_found | card_blocked (для журнала). */
     val errorCode: String? = null,
+    /**
+     * Sequence карты с сервера, если backend его отдаёт. Необязателен: без него чек пробивается
+     * как раньше, `sc.q` просто не пишется.
+     */
+    val seq: Int? = null,
 )
 
 object CardSession {
@@ -38,6 +43,7 @@ object CardSession {
             .put("cupsForFree", info.cupsForFree).put("freeAvailable", info.freeAvailable)
             .put("cb", info.cashbackKopecks).put("res", info.reservationId ?: JSONObject.NULL)
             .put("resExp", info.reservationExpiresAt).put("status", info.freeStatus).put("note", info.note ?: JSONObject.NULL)
+            .put("seq", info.seq ?: JSONObject.NULL)
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
             .putString(KEY, o.toString()).putLong(KEY_AT, System.currentTimeMillis()).apply()
     }
@@ -54,6 +60,7 @@ object CardSession {
                 cashbackKopecks = o.optLong("cb"), reservationId = if (o.isNull("res")) null else o.getString("res"),
                 reservationExpiresAt = o.optLong("resExp"), freeStatus = o.optString("status", "NONE"),
                 note = if (o.isNull("note")) null else o.getString("note"),
+                seq = if (o.isNull("seq")) null else o.optInt("seq").takeIf { it > 0 },
             )
         } catch (_: Throwable) { clear(ctx); null }
     }
@@ -92,6 +99,8 @@ object CardSession {
             .put("ts", System.currentTimeMillis())
             .put("kind", kindOf(c))
         if (reserved) o.put("op", info.reservationId)
+        // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
+        info.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
         o.put("free", if (reserved && freeApplied) 1 else 0)
             .put("cb", if (reserved) cashbackKopecks.coerceAtLeast(0L) else 0L)
         return o

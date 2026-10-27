@@ -38,6 +38,8 @@ object LoyaltyApi {
                     reservationId = if (o.isNull("reservationId")) null else o.optString("reservationId").ifBlank { null },
                     reservationExpiresAt = o.optLong("reservationExpiresAt"),
                     freeStatus = o.optString("freeStatus", "NONE"),
+                    // Сервер пока не присылает seq; поле читается на будущее и не влияет на чек.
+                    seq = if (o.has("seq") && !o.isNull("seq")) o.optInt("seq").takeIf { it > 0 } else null,
                 )
             } else {
                 // Серверная ошибка нашего API (не проблема карты) — отдельное событие в журнале.
