@@ -154,3 +154,23 @@ o.put("free", if (reserved && freeApplied) 1 else 0)
 
 **Тесты:** `sc q is omitted when the server did not send a sequence`, `sc q is passed through when the sequence is known`, `zero sequence is treated as unknown`.
 **Прогон:** extras 11/11; полный `:app:testDebugUnitTest` — 132 теста, 0 падений.
+
+## STEP-A04 — Понятные сообщения кассиру (L-21 + ALREADY_RESERVED)
+
+Backend отдаёт `{ "error": "<code>" }` (`app.ts:61`), коды: `invalid_card`, `card_not_found`, `card_blocked` (404), `proxy_not_configured` (503). Раньше APK схлопывал всё в «Карта не найдена…» / «Сервер временно недоступен».
+
+Добавлено (без редизайна UI):
+
+| Условие | Текст |
+|---|---|
+| `card_blocked` | «Карта заблокирована.» |
+| `card_not_found`, `invalid_card` | «Карта не найдена. Проверьте номер или отсканируйте QR.» |
+| `proxy_not_configured` | «Сервер лояльности не настроен. Обратитесь к администратору.» |
+| 400/404 без кода | прежний «Карта не найдена или недействительна…» |
+| 401/403 | без изменений |
+| ≥500 без кода | прежний «Сервер лояльности временно недоступен (N).» |
+| `freeStatus = ALREADY_RESERVED` | «Карта уже зарезервирована на другой кассе. Завершите там чек или подождите.» — баннером WARN на экране заказа (раньше не показывалось вовсе) |
+
+Логика маппинга вынесена в чистые `LoyaltyApi.resolveErrorText` / `resolveDrop`, чтобы покрыть тестом без сети. `drop` по-прежнему только 400/404: на 503 гость не должен терять начисление чашек.
+
+**Тесты:** новый `LoyaltyApiErrorTextTest` — 7/7. Полный прогон: 139 тестов, 0 падений.

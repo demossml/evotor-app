@@ -51,21 +51,30 @@ object LoyaltyApi {
                 }
                 val reason = o.optString("error").ifBlank { o.optString("code") }.ifBlank { null }
                 // Unknown/invalid card: do not attach it to the receipt at all.
-                when {
-                    status == 404 || status == 400 ->
-                        offline(code, isToken, "Карта не найдена или недействительна. Проверьте номер или QR.", drop = true, errorCode = reason ?: "card_not_found")
-                    status == 401 || status == 403 ->
-                        offline(code, isToken, "Нет доступа к серверу лояльности ($status). Сообщите администратору.", drop = false, errorCode = reason)
-                    status >= 500 ->
-                        offline(code, isToken, "Сервер лояльности временно недоступен ($status).", drop = false, errorCode = reason)
-                    else ->
-                        offline(code, isToken, "Неожиданный ответ сервера ($status).", drop = false, errorCode = reason)
-                }
+                offline(code, isToken, resolveErrorText(status, reason), drop = resolveDrop(status), errorCode = reason)
             }
         } catch (e: Throwable) {
             offline(code, isToken, if (e is java.net.SocketTimeoutException) "Сервер не ответил вовремя." else "Нет связи с сервером.", drop = false)
         }
     }
+
+    /**
+     * Текст для кассира по ответу resolve. Различаем только то, что сервер уже различает
+     * (`{ "error": "<code>" }`), иначе остаётся прежняя общая формулировка.
+     */
+    internal fun resolveErrorText(status: Int, code: String?): String = when {
+        code == "card_blocked" -> "Карта заблокирована."
+        code == "card_not_found" || code == "invalid_card" ->
+            "Карта не найдена. Проверьте номер или отсканируйте QR."
+        code == "proxy_not_configured" -> "Сервер лояльности не настроен. Обратитесь к администратору."
+        status == 400 || status == 404 -> "Карта не найдена или недействительна. Проверьте номер или QR."
+        status == 401 || status == 403 -> "Нет доступа к серверу лояльности ($status). Сообщите администратору."
+        status >= 500 -> "Сервер лояльности временно недоступен ($status)."
+        else -> "Неожиданный ответ сервера ($status)."
+    }
+
+    /** Карту не прикрепляем к чеку, только если сервер сказал, что она недействительна. */
+    internal fun resolveDrop(status: Int): Boolean = status == 400 || status == 404
 
     /**
      * Server unreachable: a signed QR still goes into the receipt so the cup can be credited after the sale

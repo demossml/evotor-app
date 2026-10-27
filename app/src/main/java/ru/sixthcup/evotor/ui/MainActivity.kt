@@ -632,7 +632,16 @@ class MainActivity : AppCompatActivity() {
                     lastCardCode = code; lastCardLabel = info.cardCode.ifBlank { null }
                     screen = Screen.ORDER
                     // Причина сбоя/ограничения остаётся видна на экране заказа.
-                    if (info.freeStatus == "OFFLINE" && info.note != null) { notice = info.note; noticeKind = Kind.WARN } else notice = null
+                    when {
+                        info.freeStatus == "OFFLINE" && info.note != null -> {
+                            notice = info.note; noticeKind = Kind.WARN
+                        }
+                        info.freeStatus == "ALREADY_RESERVED" -> {
+                            notice = "Карта уже зарезервирована на другой кассе. Завершите там чек или подождите."
+                            noticeKind = Kind.WARN
+                        }
+                        else -> notice = null
+                    }
                 } else {
                     CardSession.clear(this)
                     if (info.freeStatus == "ERROR") {
