@@ -44,6 +44,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
+import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.CardRefresh
 import ru.sixthcup.evotor.data.CardSession
@@ -239,8 +240,9 @@ class MainActivity : AppCompatActivity() {
     private var catalogLoadedAt = 0L
     /** Идёт фоновый перезапрос карты — второй параллельный не запускаем. */
     private var cardRefreshing = false
-    /** Последний успешный фоновый poll карты (C04). */
-    private var cardPollAt = 0L
+    /** Идёт фоновый опрос карты (C04). */
+    private var cardPollActive = false
+    private val cardPollHandler = Handler(Looper.getMainLooper())
     private var catalogAttemptAt = 0L
     /** Плашка о происхождении каталога: кэш/пустой ответ сервера. null — данные свежие. */
     private var catalogNote: String? = null
@@ -3120,6 +3122,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Фоновый опрос карты: пока экран виден и карта привязана, не чаще [CardPoll.INTERVAL_MS]. */
+    private val cardPollTick = object : Runnable {
+        override fun run() {
+            if (!cardPollActive) return
+            val attached = CardSession.get(this@MainActivity)?.code?.isNotEmpty() == true
+            if (!attached) { cardPollActive = false; return }
+            refreshCardAsync(notifyOnChange = true)
+            cardPollHandler.postDelayed(this, CardPoll.INTERVAL_MS)
+        }
+    }
+
+    private fun startCardPoll() {
+        if (cardPollActive) return
+        if (CardSession.get(this)?.code?.isNotEmpty() != true) return
+        cardPollActive = true
+        cardPollHandler.postDelayed(cardPollTick, CardPoll.INTERVAL_MS)
+    }
+
+    private fun stopCardPoll() {
+        cardPollActive = false
+        cardPollHandler.removeCallbacks(cardPollTick)
+    }
+
     /** Чек остался открытым: оплаты не было, PENDING удаляем — номер не израсходован. */
     private fun cancelPendingOrder() {
         try {
@@ -4281,6 +4306,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::root.isInitialized) loadShiftInfo()
+        startCardPoll()
         try { val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN); if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED) else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f) } catch (_: Throwable) {}
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
         if (::root.isInitialized && PendingPayment.active(this)) {
@@ -4322,6 +4348,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        // Экран не виден — сервер больше не опрашиваем (опрос возобновится в onResume).
+        stopCardPoll()
         try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}
         super.onPause()
     }

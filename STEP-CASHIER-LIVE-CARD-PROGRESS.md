@@ -100,3 +100,11 @@ C01 прогресс и «подарок» для ручного кода · C02
 **Важно:** сразу после продажи backend ещё не обработал SELL (poll раз в минуту), поэтому первое обновление может вернуть старые чашки — актуальные придут следующим poll (C04). Это ожидаемо, не баг.
 
 **Прогон:** `:app:testDebugUnitTest` — 156 тестов, 0 падений.
+
+## STEP-C04 — Poll 30 с, пока карта привязана и экран виден
+
+- `data/CardPoll.kt` — гейт `shouldRefresh(hasCard, visible, lastAtMs, nowMs)`, `INTERVAL_MS = 30_000`.
+- `MainActivity`: `cardPollTick` (Handler на main looper) запускается в `onResume`, останавливается в `onPause` и сам гаснет, если карта отвязана. Опрос идёт через тот же `refreshCardAsync(notifyOnChange = true)` — баннер только при заметном изменении (`CardRefresh.isNotable`).
+
+**Тесты:** `CardPollTest` 5/5 (первый тик, нет карты, экран скрыт, интервал, «не 2 секунды»).
+**Прогон:** 161 тест, 0 падений.
