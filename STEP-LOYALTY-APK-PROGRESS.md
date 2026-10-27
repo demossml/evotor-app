@@ -70,3 +70,58 @@
 - `sc.op` уже пишется при `reservationId != null` — A02 проверяет и закрепляет тестом.
 - `sc.q` не пишется и не приходит от сервера; A03 делает поддержку опциональной (ключ только при известном seq).
 - `freeStatus = ALREADY_RESERVED` сейчас **никак не показывается** кассиру (обрабатывается только `OFFLINE`/`ERROR`) — это A04.
+
+## STEP-A01 — P0: `sc.c` = signed token при QR (L-00)
+
+**Before** (`CardSession.kt`, было):
+
+```kotlin
+fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+    val card = info.cardCode.ifBlank { info.code }
+    val o = JSONObject()
+        .put("v", 2)
+        .put("c", card)
+        .put("ts", System.currentTimeMillis())
+        .put("kind", kindOf(info.code))
+    if (info.reservationId != null) o.put("op", info.reservationId)
+    o.put("free", if (freeApplied) 1 else 0).put("cb", cashbackKopecks)
+    return o
+}
+```
+
+**After** (`CardSession.kt:82-103`):
+
+```kotlin
+fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+    val c = scValue(info)
+    val o = JSONObject()
+        .put("v", 2)
+        .put("c", c)
+        .put("ts", System.currentTimeMillis())
+        .put("kind", kindOf(c))
+    if (info.reservationId != null) o.put("op", info.reservationId)
+    o.put("free", if (freeApplied) 1 else 0).put("cb", cashbackKopecks)
+    return o
+}
+
+/**
+ * QR: подписанный серверный токен ... Ручной ввод: канонический цифровой код из resolve.
+ */
+internal fun scValue(info: CardInfo): String =
+    if (kindOf(info.code) == "token") info.code.trim()
+    else info.cardCode.ifBlank { info.code }.trim()
+```
+
+Почему без нового поля: `CardInfo.code` уже хранит ровно «то, что показал гость» (для QR — подписанный токен), и переживает рестарт (`set`/`get`). Отдельное поле токена дублировало бы его.
+
+`kind` теперь вычисляется от значения, реально попавшего в `c`, а не от исходного скана — иначе метка «token» могла стоять при числовом `c` (это и было в баге).
+
+**Тесты** (`CardSessionExtrasTest`, 6 кейсов, переписаны — прежний файл закреплял баг):
+`qr session puts the signed token in sc c, not the card code`, `manual card code stays numeric and never pretends to be a token`,
+`regression - token in session is never replaced by card code`, `no op key without an active reservation`,
+`offline qr without resolve still sends the token`, `extras nested under app uuid and flat sc are identical`.
+
+**Доказательство, что тесты ловят баг:** временно вернул старую строку → `6 tests completed, 2 failed`
+(`qr session puts the signed token…`, `regression - token in session…`); после восстановления — 6/6 green, файл побайтово тот же (sha256 `11c67389…`).
+
+**Прогон:** `./gradlew :app:testDebugUnitTest --tests ru.sixthcup.evotor.data.CardSessionExtrasTest` → BUILD SUCCESSFUL, tests=6 failures=0.

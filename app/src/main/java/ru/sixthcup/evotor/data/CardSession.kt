@@ -67,8 +67,9 @@ object CardSession {
      * Плоский `sc` продублирован для текущего SellHandler; значения в обоих ключах идентичны,
      * поэтому backend читает любую из форм и не применит льготу дважды (документ один).
      *
-     * `v` — число ≥ 2 (иначе сервер игнорирует), `c` — cardCode из ответа resolve,
-     * `op` — reservationId (без него списание не применится), `cb` — копейки, `ts` — unix ms.
+     * `v` — число ≥ 2 (иначе сервер игнорирует), `c` — подписанный QR-токен либо цифровой
+     * код карты (см. [scValue]), `op` — reservationId (без него списание не применится),
+     * `cb` — копейки, `ts` — unix ms.
      */
     fun extras(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
         val sc = sc(info, freeApplied, cashbackKopecks)
@@ -81,16 +82,28 @@ object CardSession {
 
     /** extras.sc written into the receipt. The backend re-checks everything when it reads the SELL. */
     fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
-        val card = info.cardCode.ifBlank { info.code }
+        val c = scValue(info)
         val o = JSONObject()
             .put("v", 2)
-            .put("c", card)
+            .put("c", c)
             .put("ts", System.currentTimeMillis())
-            .put("kind", kindOf(info.code))
+            .put("kind", kindOf(c))
         if (info.reservationId != null) o.put("op", info.reservationId)
         o.put("free", if (freeApplied) 1 else 0).put("cb", cashbackKopecks)
         return o
     }
+
+    /**
+     * Что уходит в `extras.sc.c`.
+     *
+     * QR: подписанный серверный токен (то, что гость показал). Backend проверяет подпись и только
+     * по нему вызывает `consumeReservation`; подмена на числовой код отключает списание — скидка
+     * на кассе выдаётся, а `free_used`/`cashback_balance` не уменьшаются.
+     * Ручной ввод: канонический цифровой код карты из ответа resolve (без пробелов и ведущих нулей).
+     */
+    internal fun scValue(info: CardInfo): String =
+        if (kindOf(info.code) == "token") info.code.trim()
+        else info.cardCode.ifBlank { info.code }.trim()
 
     /** Подписанный QR содержит точку (`<payload>.<sig>`), короткий код карты — только цифры. */
     fun kindOf(code: String): String = if (code.contains('.')) "token" else "code"

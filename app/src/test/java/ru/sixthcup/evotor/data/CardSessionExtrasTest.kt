@@ -1,13 +1,18 @@
 package ru.sixthcup.evotor.data
 
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.sixthcup.evotor.BuildConfig
 
-/** Контракт extras.sc: v≥2, c, op, free, cb в копейках, ts в миллисекундах, kind, ключ appId. */
+/**
+ * Контракт extras.sc: v≥2, c, op, free, cb в копейках, ts в миллисекундах, kind, ключ appId.
+ *
+ * `c` — то, по чему backend определяет способ списания: подписанный QR-токен (тогда он может
+ * потреблять резерв) или цифровой код карты (тогда только начисление). Это и был дефект L-00:
+ * в `c` уходил cardCode, поэтому подарок и кэшбэк никогда не списывались.
+ */
 class CardSessionExtrasTest {
 
     private fun card(
@@ -35,24 +40,64 @@ class CardSessionExtrasTest {
     }
 
     @Test
-    fun `sc matches backend contract`() {
+    fun `qr session puts the signed token in sc c, not the card code`() {
         val before = System.currentTimeMillis()
-        val sc = CardSession.sc(card(cardCode = "0001234"), freeApplied = true, cashbackKopecks = 700)
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "0012"),
+            freeApplied = true,
+            cashbackKopecks = 700,
+        )
         assertTrue(sc.getInt("v") >= 2)
-        assertEquals("0001234", sc.getString("c"))
+        assertEquals("payload.signature", sc.getString("c"))
+        assertEquals("token", sc.getString("kind"))
         assertEquals("res-1", sc.getString("op"))
         assertEquals(1, sc.getInt("free"))
         assertEquals(700, sc.getInt("cb"))
-        assertEquals("code", sc.getString("kind"))
         assertTrue(sc.getLong("ts") >= before)
     }
 
     @Test
-    fun `signed qr is reported as token and code is used when cardCode is empty`() {
-        val sc = CardSession.sc(card(code = "payload.signature", cardCode = "", reservationId = null), freeApplied = false, cashbackKopecks = 0)
+    fun `manual card code stays numeric and never pretends to be a token`() {
+        // resolve отдал канонический код без ведущих нулей, гость ввёл с нулями и пробелом.
+        val sc = CardSession.sc(card(code = "000 12", cardCode = "12"), freeApplied = false, cashbackKopecks = 0)
+        assertEquals("12", sc.getString("c"))
+        assertEquals("code", sc.getString("kind"))
+        assertEquals(0, sc.getInt("free"))
+    }
+
+    @Test
+    fun `regression - token in session is never replaced by card code`() {
+        // Именно это ломал коммит 57a5c5f: cardCode.ifBlank { code } как единственная ветка.
+        val sc = CardSession.sc(
+            card(code = "eyJpZCI6ImFiYyJ9.c2ln", cardCode = "1234567890"),
+            freeApplied = false,
+            cashbackKopecks = 0,
+        )
+        assertEquals("eyJpZCI6ImFiYyJ9.c2ln", sc.getString("c"))
+        assertFalse(sc.getString("c").all { it.isDigit() })
+    }
+
+    @Test
+    fun `no op key without an active reservation`() {
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "", reservationId = null),
+            freeApplied = false,
+            cashbackKopecks = 0,
+        )
+        assertEquals("payload.signature", sc.getString("c"))
         assertEquals("token", sc.getString("kind"))
+        assertFalse(sc.has("op"))
+    }
+
+    @Test
+    fun `offline qr without resolve still sends the token`() {
+        // LoyaltyApi.offline(): cardCode пуст, code — токен, резерва нет, льгот нет.
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "", reservationId = null),
+            freeApplied = false,
+            cashbackKopecks = 0,
+        )
         assertEquals("payload.signature", sc.getString("c"))
         assertEquals(0, sc.getInt("free"))
-        assertFalse(sc.has("op"))
     }
 }
