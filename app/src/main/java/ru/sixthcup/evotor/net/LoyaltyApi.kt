@@ -31,16 +31,7 @@ object LoyaltyApi {
             conn.disconnect()
             val o = try { JSONObject(body) } catch (_: Throwable) { JSONObject() }
             if (status == 200 && o.optBoolean("ok")) {
-                CardInfo(
-                    code = code, cardCode = o.optString("cardCode"), paidCups = o.optInt("paidCups"),
-                    cupsForFree = o.optInt("cupsForFree", 5), freeAvailable = o.optInt("freeAvailable"),
-                    cashbackKopecks = o.optLong("cashback"),
-                    reservationId = if (o.isNull("reservationId")) null else o.optString("reservationId").ifBlank { null },
-                    reservationExpiresAt = o.optLong("reservationExpiresAt"),
-                    freeStatus = o.optString("freeStatus", "NONE"),
-                    // Сервер пока не присылает seq; поле читается на будущее и не влияет на чек.
-                    seq = if (o.has("seq") && !o.isNull("seq")) o.optInt("seq").takeIf { it > 0 } else null,
-                )
+                parseResolve(o, code)
             } else {
                 // Серверная ошибка нашего API (не проблема карты) — отдельное событие в журнале.
                 if (status >= 500 || status == 401 || status == 403) {
@@ -56,6 +47,46 @@ object LoyaltyApi {
         } catch (e: Throwable) {
             offline(code, isToken, if (e is java.net.SocketTimeoutException) "Сервер не ответил вовремя." else "Нет связи с сервером.", drop = false)
         }
+    }
+
+    /**
+     * Разбор успешного ответа `resolve`. Читаем все известные алиасы: backend уже переименовывал
+     * поля (`paid_total` → `paidCups`), а ручной код отдаёт остаток цикла — без `paidTotal`
+     * прогресс не восстановить.
+     */
+    internal fun parseResolve(o: JSONObject, code: String): CardInfo = CardInfo(
+        code = code,
+        cardCode = o.optString("cardCode"),
+        paidCups = intOf(o, "paidCups", "cups", "cupsTowardFree", "paid") ?: 0,
+        cupsForFree = intOf(o, "cupsForFree", "cups_for_free", "goal")?.takeIf { it > 0 } ?: 5,
+        freeAvailable = intOf(o, "freeAvailable", "free_available") ?: 0,
+        cashbackKopecks = longOf(o, "cashback", "cashbackKopecks", "cashback_kopecks") ?: 0L,
+        reservationId = if (!o.has("reservationId") || o.isNull("reservationId")) null
+        else o.optString("reservationId").ifBlank { null },
+        reservationExpiresAt = longOf(o, "reservationExpiresAt", "reservation_expires_at") ?: 0L,
+        freeStatus = o.optString("freeStatus", "NONE"),
+        // Сервер пока не присылает seq; поле читается на будущее и не влияет на чек.
+        seq = intOf(o, "seq")?.takeIf { it > 0 },
+        paidTotal = intOf(o, "paidTotal", "paid_total")?.takeIf { it >= 0 },
+        freeUsed = intOf(o, "freeUsed", "free_used")?.takeIf { it >= 0 },
+    )
+
+    private fun intOf(o: JSONObject, vararg keys: String): Int? {
+        for (k in keys) {
+            if (!o.has(k) || o.isNull(k)) continue
+            val v = o.optInt(k, Int.MIN_VALUE)
+            if (v != Int.MIN_VALUE) return v
+        }
+        return null
+    }
+
+    private fun longOf(o: JSONObject, vararg keys: String): Long? {
+        for (k in keys) {
+            if (!o.has(k) || o.isNull(k)) continue
+            val v = o.optLong(k, Long.MIN_VALUE)
+            if (v != Long.MIN_VALUE) return v
+        }
+        return null
     }
 
     /**

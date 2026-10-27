@@ -28,6 +28,10 @@ data class CardInfo(
      * как раньше, `sc.q` просто не пишется.
      */
     val seq: Int? = null,
+    /** Всего оплаченных чашек (`paidTotal`/`paid_total`), если сервер отдал. Точный прогресс. */
+    val paidTotal: Int? = null,
+    /** Сколько подарков уже использовано (`freeUsed`/`free_used`), если сервер отдал. */
+    val freeUsed: Int? = null,
 )
 
 object CardSession {
@@ -44,6 +48,8 @@ object CardSession {
             .put("cb", info.cashbackKopecks).put("res", info.reservationId ?: JSONObject.NULL)
             .put("resExp", info.reservationExpiresAt).put("status", info.freeStatus).put("note", info.note ?: JSONObject.NULL)
             .put("seq", info.seq ?: JSONObject.NULL)
+            .put("paidTotal", info.paidTotal ?: JSONObject.NULL)
+            .put("freeUsed", info.freeUsed ?: JSONObject.NULL)
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
             .putString(KEY, o.toString()).putLong(KEY_AT, System.currentTimeMillis()).apply()
     }
@@ -61,6 +67,8 @@ object CardSession {
                 reservationExpiresAt = o.optLong("resExp"), freeStatus = o.optString("status", "NONE"),
                 note = if (o.isNull("note")) null else o.getString("note"),
                 seq = if (o.isNull("seq")) null else o.optInt("seq").takeIf { it > 0 },
+                paidTotal = if (!o.has("paidTotal") || o.isNull("paidTotal")) null else o.optInt("paidTotal"),
+                freeUsed = if (!o.has("freeUsed") || o.isNull("freeUsed")) null else o.optInt("freeUsed"),
             )
         } catch (_: Throwable) { clear(ctx); null }
     }

@@ -44,6 +44,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
+import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.net.ShiftApi
 import ru.sixthcup.evotor.data.OrderQueueStore
@@ -484,19 +485,18 @@ class MainActivity : AppCompatActivity() {
                 c.addView(TextView(this).apply { text = value; textSize = 19f; weight(Fonts.STRONG); letterSpacing = -0.02f; setTextColor(WHITE); setPadding(0, dp(2), 0, 0) })
                 stats.addView(c, LinearLayout.LayoutParams(WRAP, WRAP).apply { if (!first) leftMargin = dp(22) })
             }
-            val goal = card.cupsForFree.coerceAtLeast(1)
-            val filled = card.paidCups.coerceIn(0, goal)
-            stat("ЧАШКИ", "$filled / $goal", true)
-            stat("БОНУСЫ", "${card.cashbackKopecks / 100}", false)
+            // Прогресс и «подарок» считает CardProgress: для ручного кода сервер скрывает льготы,
+            // поэтому показываем то, что известно, и не обещаем списание.
+            val progress = CardProgress.of(card)
+            stat("ЧАШКИ", "${progress.cups} / ${progress.goal}", true)
+            stat("БОНУСЫ", if (progress.cashbackKnown) "${progress.cashbackKopecks / 100}" else "—", false)
             col.addView(stats)
-            col.addView(UiKit.loyaltyDots(this, filled, goal, onColor = 0xFFF6F3EE.toInt()).apply {
+            col.addView(UiKit.loyaltyDots(this, progress.cups, progress.goal, onColor = 0xFFF6F3EE.toInt()).apply {
                 // .gc-progress .lc-dots i: высота 7
                 for (i in 0 until childCount) getChildAt(i).layoutParams.height = dp(7)
             }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
             col.addView(TextView(this).apply {
-                val left = (goal - filled).coerceAtLeast(0)
-                text = if (card.freeAvailable > 0) "Бесплатный напиток доступен в этом чеке"
-                else "Ещё $left ${plural(left, "чашка", "чашки", "чашек")} до бесплатного напитка"
+                text = cardProgressLine(progress, inReceipt = true)
                 textSize = 10f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(7), 0, 0)
             })
             val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(14), 0, 0) }
@@ -927,6 +927,18 @@ class MainActivity : AppCompatActivity() {
         val ad = adapter ?: return
         val rows = computeRows()
         if (toTop) ad.submitList(rows) { recycler?.scrollToPosition(0) } else ad.submitList(rows)
+    }
+
+    /**
+     * Подпись под прогрессом карты. Никогда не обещает списание, которого не будет:
+     * по ручному коду сервер скрывает льготы, поэтому там — «по QR-карте».
+     */
+    private fun cardProgressLine(progress: CardProgress, inReceipt: Boolean): String = when {
+        !progress.giftKnown && !progress.giftAvailable -> "Бонусы и подарок — по QR-карте"
+        progress.redeemEnabled && inReceipt -> "Бесплатный напиток доступен в этом чеке"
+        progress.giftAvailable && progress.kind == "code" -> "Подарок доступен · списание по QR-карте"
+        progress.giftAvailable -> "Подарок доступен"
+        else -> "Ещё ${progress.left} ${plural(progress.left, "чашка", "чашки", "чашек")} до бесплатного напитка"
     }
 
     private fun plural(n: Int, one: String, few: String, many: String): String {
@@ -1906,7 +1918,10 @@ class MainActivity : AppCompatActivity() {
             name = code
             cups = when {
                 card.freeStatus == "OFFLINE" -> "Нет связи · бонусы недоступны"
-                else -> "${card.paidCups} из ${card.cupsForFree} чашек"
+                else -> {
+                    val p = CardProgress.of(card)
+                    "${p.cups} из ${p.goal} чашек"
+                }
             }
         }
         val avatar = AvatarView(this).apply {
@@ -2157,9 +2172,9 @@ class MainActivity : AppCompatActivity() {
             return box
         }
 
-        val goal = card.cupsForFree.coerceAtLeast(1)
-        val cups = minOf(card.paidCups, goal)
-        val left = (goal - cups).coerceAtLeast(0)
+        val progress = CardProgress.of(card)
+        val cups = progress.cups
+        val goal = progress.goal
 
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2189,7 +2204,7 @@ class MainActivity : AppCompatActivity() {
         box.addView(top)
 
         box.addView(TextView(this).apply {
-            text = if (card.freeAvailable > 0) "Подарок доступен" else "$cups из $goal чашек"
+            text = if (progress.giftAvailable) "Подарок доступен" else "$cups из $goal чашек"
             textSize = 10.5f
             setOnest(true)
             setTextColor(0xFFF6F3EE.toInt())
@@ -2198,8 +2213,10 @@ class MainActivity : AppCompatActivity() {
         box.addView(TextView(this).apply {
             text = when {
                 card.freeStatus == "OFFLINE" -> "Нет связи · бонусы недоступны"
-                card.freeAvailable > 0 -> "1 бесплатный напиток"
-                else -> "$left до подарка"
+                progress.redeemEnabled -> "1 бесплатный напиток"
+                progress.giftAvailable && progress.kind == "code" -> "Списание — по QR-карте"
+                !progress.giftKnown -> "Бонусы и подарок — по QR-карте"
+                else -> "${progress.left} до подарка"
             }
             textSize = 10f
             setTextColor(0xB3F6F3EE.toInt())
