@@ -1,0 +1,72 @@
+# STEP-LOYALTY-APK-PROGRESS
+
+Серия: LOYALTY APK L-00 (`PROMPTS-LOYALTY-APK-L00-SEQUENTIAL.md`).
+Источник находки: `RESEARCH-LOYALTY-AUDIT-67-FINAL.md` §1, §11, §13 (L-00), backlog #0.
+
+## STEP-A00 — Baseline (2026-10-27)
+
+| Поле | Значение |
+|---|---|
+| Репозиторий | `evotor-app` (`~/Documents/evotor-app`) |
+| HEAD | `216bf88` — `docs(release): signing key info` |
+| Ветка | `main` |
+| `versionCode` (в файле) | **118** |
+| `versionName` (в файле) | **5.1.3** |
+| `applicationId` | `ru.sixthcup.evotor` |
+| Рабочее дерево | `M app/build.gradle.kts` (незакоммиченный подъём 117→118 из предыдущей задачи), `?? .vscode/` (не моё, не трогаю) |
+
+### Замечание по версии
+
+`117 / 5.1.2` — последняя версия в git. `118 / 5.1.3` существует только как незакоммиченная правка, но **APK с versionCode 118 уже собирался** (в предыдущей задаче, с кодом до исправления L-00). Чтобы «один versionCode = одно состояние кода», серия заканчивается на **119**, а не 118. Переход 117→119 в истории git объясняется этим.
+
+### Ключевые файлы (найдены, пути фактические)
+
+| Что | Файл |
+|---|---|
+| Модель сессии карты | `app/src/main/java/ru/sixthcup/evotor/data/CardSession.kt` |
+| Сборка extras/sc | `app/src/main/java/ru/sixthcup/evotor/data/CardSession.kt:73-93` |
+| Тест extras | `app/src/test/java/ru/sixthcup/evotor/data/CardSessionExtrasTest.kt` |
+| Расчёт скидки по резерву | `app/src/main/java/ru/sixthcup/evotor/data/DiscountCalc.kt:17-45` |
+| Запрос resolve + маппинг ошибок | `app/src/main/java/ru/sixthcup/evotor/net/LoyaltyApi.kt:17-75` |
+| Применение скидки и запись extras | `app/src/main/java/ru/sixthcup/evotor/integration/DiscountIntegrationService.kt:26-70` |
+| Экран карты, лист «Лояльность» | `app/src/main/java/ru/sixthcup/evotor/ui/MainActivity.kt:620-653, 2840-2847, 2934-2936` |
+
+### Текущее поведение (одна фраза)
+
+При успешном `resolve` по QR APK кладёт в `extras.sc.c` **числовой `cardCode`**, а не подписанный токен, поэтому backend идёт по «ручной код»-ветке, не вызывает `consumeReservation`, и `free/cb` не списываются при уже выданной на кассе скидке; ручной ввод кода даёт то же значение `c`, что и раньше.
+
+### Цитата текущего builder'а extras (CardSession.kt:73-93)
+
+```kotlin
+    fun extras(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+        val sc = sc(info, freeApplied, cashbackKopecks)
+        // Плоский ключ нужен текущему парсеру: если appId не совпал с EVOTOR_APP_ID на backend,
+        // льгота не потеряется. Оба значения одинаковые — двойного списания нет.
+        return JSONObject()
+            .put(BuildConfig.APP_UUID, JSONObject().put("sc", sc))
+            .put("sc", sc)
+    }
+
+    /** extras.sc written into the receipt. The backend re-checks everything when it reads the SELL. */
+    fun sc(info: CardInfo, freeApplied: Boolean, cashbackKopecks: Long): JSONObject {
+        val card = info.cardCode.ifBlank { info.code }
+        val o = JSONObject()
+            .put("v", 2)
+            .put("c", card)
+            .put("ts", System.currentTimeMillis())
+            .put("kind", kindOf(info.code))
+        if (info.reservationId != null) o.put("op", info.reservationId)
+        o.put("free", if (freeApplied) 1 else 0).put("cb", cashbackKopecks)
+        return o
+    }
+```
+
+Регрессия: коммит `57a5c5f` заменил `put("c", info.code)` (сырое значение; для QR — подписанный токен) на `cardCode.ifBlank { code }`.
+
+### Наблюдения для следующих шагов
+
+- `CardInfo.code` — ровно «то, что показал гость»: для QR это подписанный токен, для ручного ввода — цифры. Отдельного поля под токен нет, поэтому A01 восстанавливает `info.code` как источник `sc.c`, а не вводит новое поле.
+- `CardSessionExtrasTest` сейчас **закрепляет баг** («`c` == cardCode», «токен только если cardCode пуст») — в A01 тест переписывается; в отчёте фиксируется, что он был частью регрессии.
+- `sc.op` уже пишется при `reservationId != null` — A02 проверяет и закрепляет тестом.
+- `sc.q` не пишется и не приходит от сервера; A03 делает поддержку опциональной (ключ только при известном seq).
+- `freeStatus = ALREADY_RESERVED` сейчас **никак не показывается** кассиру (обрабатывается только `OFFLINE`/`ERROR`) — это A04.
