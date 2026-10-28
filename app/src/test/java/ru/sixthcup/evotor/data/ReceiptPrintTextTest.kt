@@ -5,8 +5,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Что печатается на фискальном чеке: номер заказа и краткий блок лояльности.
- * Тексты — только цифры и служебные слова, без персональных данных.
+ * Формат печати зафиксирован спецификацией §3.4. Проверяем ровно её примеры:
+ * 1) номер + QR + прогресс; 2) применена бесплатная чашка; 3) ручной код (прогресс скрыт);
+ * 4) номера нет, карта есть; 5) печатать нечего.
  */
 class ReceiptPrintTextTest {
 
@@ -16,83 +17,104 @@ class ReceiptPrintTextTest {
         issuedAt = System.currentTimeMillis() - ageMs,
     )
 
+    private fun loyalty(
+        cardFound: Boolean = true,
+        current: Int = 4,
+        target: Int = 5,
+        known: Boolean = true,
+        earned: Int = 0,
+        reward: Boolean = false,
+        title: String? = null,
+    ) = SalePrintLoyalty(cardFound, current, target, known, earned, reward, title)
+
     @Test
-    fun `sale without a card prints only the order number`() {
-        val lines = ReceiptPrintText.lines(queue(), SalePrintLoyalty(cardFound = false, progressCurrent = 0, progressTarget = 0, progressKnown = false))
-        assertEquals(listOf("ЗАКАЗ № 47"), lines)
+    fun `example 1 - number, qr and known progress`() {
+        assertEquals(
+            listOf("ЗАКАЗ № 47", "Лояльность: 4 из 5"),
+            ReceiptPrintText.lines(queue(), loyalty()),
+        )
     }
 
     @Test
-    fun `identified customer gets number and progress`() {
-        val lines = ReceiptPrintText.lines(
-            queue(),
-            SalePrintLoyalty(cardFound = true, progressCurrent = 4, progressTarget = 5, progressKnown = true),
+    fun `example 2 - free cup applied`() {
+        assertEquals(
+            listOf("ЗАКАЗ № 47", "Лояльность: 0 из 5", "Бесплатный кофе"),
+            ReceiptPrintText.lines(queue(), loyalty(current = 0, reward = true, title = "Бесплатный кофе")),
         )
-        assertEquals(listOf("ЗАКАЗ № 47", "Лояльность: 4 из 5"), lines)
     }
 
     @Test
-    fun `reward applied is printed explicitly`() {
-        val lines = ReceiptPrintText.lines(
-            queue(),
-            SalePrintLoyalty(
-                cardFound = true,
-                progressCurrent = 0,
-                progressTarget = 5,
-                progressKnown = true,
-                rewardApplied = true,
-                rewardTitle = "Бесплатный кофе",
-            ),
+    fun `example 3 - manual code hides progress`() {
+        assertEquals(
+            listOf("ЗАКАЗ № 47", "Лояльность: карта принята"),
+            ReceiptPrintText.lines(queue(), loyalty(current = 0, known = false)),
         )
-        assertEquals(listOf("ЗАКАЗ № 47", "Лояльность: 0 из 5", "Бесплатный кофе"), lines)
     }
 
     @Test
-    fun `earned cups line appears only when known`() {
-        val lines = ReceiptPrintText.lines(
-            queue(),
-            SalePrintLoyalty(cardFound = true, progressCurrent = 2, progressTarget = 5, progressKnown = true, cupsEarnedThisSale = 1),
+    fun `example 4 - no number but card present`() {
+        assertEquals(
+            listOf("Лояльность: 4 из 5"),
+            ReceiptPrintText.lines(null, loyalty()),
         )
-        assertEquals(listOf("ЗАКАЗ № 47", "Лояльность: 2 из 5", "Начислено: +1"), lines)
     }
 
     @Test
-    fun `manual code without trusted progress prints no fake zeros`() {
-        val lines = ReceiptPrintText.lines(
-            queue(),
-            SalePrintLoyalty(cardFound = true, progressCurrent = 0, progressTarget = 5, progressKnown = false),
+    fun `example 5 - nothing to print means empty list`() {
+        assertTrue(ReceiptPrintText.lines(null, loyalty(cardFound = false, current = 0, target = 0, known = false)).isEmpty())
+    }
+
+    @Test
+    fun `cashback line is printed for cashback only`() {
+        assertEquals(
+            listOf("ЗАКАЗ № 47", "Лояльность: 4 из 5", "Кэшбэк"),
+            ReceiptPrintText.lines(queue(), loyalty(reward = true, title = "Кэшбэк")),
         )
+    }
+
+    @Test
+    fun `earned cups line only when the number is really known`() {
+        assertEquals(
+            listOf("ЗАКАЗ № 47", "Лояльность: 4 из 5", "Начислено: +1"),
+            ReceiptPrintText.lines(queue(), loyalty(earned = 1)),
+        )
+    }
+
+    @Test
+    fun `no invented zero progress and no invented earned line`() {
+        val lines = ReceiptPrintText.lines(queue(), loyalty(current = 0, known = false, earned = 0))
         assertEquals(listOf("ЗАКАЗ № 47", "Лояльность: карта принята"), lines)
+        assertTrue(lines.none { it.contains("0 из 5") })
+        assertTrue(lines.none { it.contains("Начислено") })
     }
 
     @Test
-    fun `no number and no card means nothing to print`() {
-        assertTrue(
-            ReceiptPrintText.lines(
-                null,
-                SalePrintLoyalty(cardFound = false, progressCurrent = 0, progressTarget = 0, progressKnown = false),
-            ).isEmpty(),
+    fun `reward without a known title adds no invented wording`() {
+        assertEquals(
+            listOf("ЗАКАЗ № 47", "Лояльность: 4 из 5"),
+            ReceiptPrintText.lines(queue(), loyalty(reward = true, title = null)),
         )
     }
 
     @Test
     fun `stale number is not printed`() {
-        val lines = ReceiptPrintText.lines(
-            queue(ageMs = QueueNumber.MAX_AGE_MS + 1_000L),
-            SalePrintLoyalty(cardFound = false, progressCurrent = 0, progressTarget = 0, progressKnown = false),
+        assertTrue(
+            ReceiptPrintText.lines(
+                queue(ageMs = QueueNumber.MAX_AGE_MS + 1_000L),
+                loyalty(cardFound = false, current = 0, target = 0, known = false),
+            ).isEmpty(),
         )
-        assertTrue(lines.isEmpty())
     }
 
     @Test
-    fun `text contains no personal data`() {
-        val lines = ReceiptPrintText.lines(
+    fun `no personal data on the receipt`() {
+        val text = ReceiptPrintText.lines(
             queue(),
-            SalePrintLoyalty(cardFound = true, progressCurrent = 3, progressTarget = 5, progressKnown = true, rewardApplied = true),
+            loyalty(reward = true, title = "Бесплатный кофе"),
         ).joinToString(" ")
-        assertTrue(lines.contains("ЗАКАЗ №"))
-        // Номер карты, телефон и имя на чек не попадают.
-        assertTrue(!lines.contains("ord-1"))
-        assertTrue(lines.split(" ").none { w -> w.length > 4 && w.all { ch -> ch.isDigit() } })
+        assertTrue(text.contains("ЗАКАЗ № 47"))
+        // Полный orderId, телефон и номер карты не печатаются.
+        assertTrue(!text.contains("ord-1"))
+        assertTrue(text.split(" ").none { w -> w.length > 4 && w.all { it.isDigit() } })
     }
 }

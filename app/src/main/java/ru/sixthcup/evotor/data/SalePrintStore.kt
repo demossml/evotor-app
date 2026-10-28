@@ -20,16 +20,20 @@ data class SalePrintLoyalty(
     val rewardApplied: Boolean = false,
     val rewardTitle: String? = null,
 ) {
-    /** Строки для чека. Пусто — по лояльности печатать нечего. */
+    /**
+     * Строки для чека в зафиксированном порядке:
+     * `Лояльность: X из Y` → `Начислено: +N` → `Бесплатный кофе` / `Кэшбэк`.
+     *
+     * Ничего не выдумываем: нет карты — пусто; прогресс недостоверен — «карта принята»
+     * вместо «0 из 5»; число начисленных чашек неизвестно — строки нет.
+     */
     fun lines(): List<String> {
         if (!cardFound) return emptyList()
         val out = ArrayList<String>(3)
-        if (progressKnown && progressTarget > 0) {
-            out += "Лояльность: $progressCurrent из $progressTarget"
-        }
+        out += if (progressKnown && progressTarget > 0) "Лояльность: $progressCurrent из $progressTarget"
+        else "Лояльность: карта принята"
         if (cupsEarnedThisSale > 0) out += "Начислено: +$cupsEarnedThisSale"
-        if (rewardApplied) out += rewardTitle?.takeIf { it.isNotBlank() } ?: "Награда применена"
-        if (out.isEmpty()) out += "Лояльность: карта принята"
+        if (rewardApplied) rewardTitle?.takeIf { it.isNotBlank() }?.let { out += it }
         return out
     }
 }
