@@ -48,6 +48,7 @@ import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.BenefitPromptGuard
 import ru.sixthcup.evotor.data.Benefits
+import ru.sixthcup.evotor.data.CardReplaceRule
 import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.LoyaltyPreview
 import ru.sixthcup.evotor.data.ResolveVoucher
@@ -203,14 +204,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val active = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
-        if (screen == Screen.CARD || active == null) {
-            applyScan(trimmed)
-        } else {
-            AlertDialog.Builder(this).setTitle("Заменить карту?")
-                .setMessage("Сейчас выбрана карта ${active.cardCode.ifBlank { "по QR" }}. Отсканирована другая.")
-                .setPositiveButton("Заменить") { _, _ -> forgetCard(); applyScan(trimmed) }
-                .setNegativeButton("Оставить текущую", null).show()
+        // Тот же QR/код — это повторный скан той же карты: молча обновляем, без вопроса.
+        // Другой код — новая сессия: сбрасываем выбор льготы и открываем окно клиента.
+        if (CardReplaceRule.shouldReplaceCard(active, trimmed)) {
+            forgetCard()
+            CheckoutChoice.clear(this)
         }
+        applyScan(trimmed)
     }
 
     private fun applyScan(code: String) {
@@ -713,7 +713,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 safeRender()
                 // G02: сразу после привязки карты спрашиваем один раз, применить ли льготу.
-                if (info.code.isNotEmpty()) maybePromptBenefit(info)
+                if (info.code.isNotEmpty()) openClientScreen(info)
                 if (!pendingScan.isNullOrBlank() && !resolving) {
                     handleScannedCode(pendingScan)
                 }
@@ -2085,7 +2085,11 @@ class MainActivity : AppCompatActivity() {
             box.isClickable = true
             box.isFocusable = true
             box.contentDescription = "Карта гостя"
-            box.setOnClickListener { notice = null; screen = Screen.CARD; safeRender() }
+            box.setOnClickListener {
+                notice = null
+                val bound = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+                if (bound != null) openClientScreen(bound, force = true) else { screen = Screen.CARD; safeRender() }
+            }
         }
         return box
     }
@@ -3046,21 +3050,57 @@ class MainActivity : AppCompatActivity() {
         return cell
     }
 
+    /** Подзаголовок окна клиента: маска карты и прогресс. */
+    private fun clientScreenSubtitle(card: CardInfo): String {
+        val mask = card.cardCode.ifBlank { "QR" }
+        val progress = CardProgress.of(card)
+        val cups = if (progress.goal > 0) "${progress.cups} из ${progress.goal}" else null
+        return listOfNotNull("карта $mask", cups, "${card.cashbackKopecks / 100} ₽ кэшбэк").joinToString(" · ")
+    }
+
+    /** Строка состояния клиента внутри окна. */
+    private fun clientCardRow(card: CardInfo, progress: CardProgress): View {
+        val reserved = DiscountCalc.reserved(card, nowSec())
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(UiKit.SURFACE_2, 12, UiKit.LINE_STRONG)
+            addView(TextView(this@MainActivity).apply {
+                text = progressText(progress)
+                textSize = 12f
+                weight(Fonts.SEMIBOLD)
+                setTextColor(INK)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = when {
+                    !reserved -> "Льготы недоступны: нет активного резерва. Отсканируйте QR заново."
+                    card.freeAvailable > 0 -> "Доступен бесплатный напиток (6-й)"
+                    else -> "Бесплатный напиток ещё не накоплен"
+                }
+                textSize = 10.5f
+                setTextColor(UiKit.MUTED)
+                setPadding(0, dp(3), 0, 0)
+            })
+        }
+    }
+
+    private fun progressText(progress: CardProgress): String =
+        if (progress.goal > 0) "Чашки: ${progress.cups} из ${progress.goal}" else "Чашки: ${progress.cups}"
+
     /**
-     * G02. Сразу после успешного resolve: «применить подарок / ваучер / без льготы».
+     * Окно клиента: карта, прогресс, подарок, ваучеры, кэшбэк — всё в одном месте.
      * Показывается один раз на привязку и только когда backend реально дал резерв со льготой.
      * Ручной числовой код сюда не попадает — по нему списания нет.
      */
-    private fun maybePromptBenefit(card: CardInfo, force: Boolean = false, onDone: (() -> Unit)? = null) {
-        val offer = LoyaltyPreview.canOffer(card, nowSec())
-        // force — только явное действие кассира («Изменить льготу»).
-        if (!force && !benefitGuard.ask(card.code, offer)) return
-        if (!offer) return
+    private fun openClientScreen(card: CardInfo, force: Boolean = false, onDone: (() -> Unit)? = null) {
+        // force — явное действие кассира (тап по карте в шапке или «Изменить льготу» в корзине).
+        if (!force && !benefitGuard.ask(card.code, hasOffer = true)) return
 
         val now = nowSec()
         val eligible = Cart.giftEligibleLines().map { it.priceRub }
         val voucherList = card.vouchers
         val giftPossible = card.freeAvailable > 0 && DiscountCalc.reserved(card, now)
+        val cbPossible = DiscountCalc.reserved(card, now) && card.cashbackKopecks > 0
         val cheapest = DiscountCalc.cheapestEligible(eligible) ?: BigDecimal.ZERO
         val cheapestName = Cart.giftEligibleLines().minByOrNull { it.priceRub }?.name
 
@@ -3070,15 +3110,21 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
         }
-        sheetHead(root, "Льгота гостя", "Одна льгота на чек · можно пропустить") { dialog.dismiss() }
+        sheetHead(root, "Клиент", clientScreenSubtitle(card)) { dialog.dismiss() }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), dp(14))
         }
         sheetScroll(root, box)
 
-        var selectedVoucher: ResolveVoucher? = null
-        var useGift = false
+        // Шапка клиента: маска карты, прогресс чашек и остаток кэшбэка.
+        val progress = CardProgress.of(card)
+        box.addView(clientCardRow(card, progress), LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val persisted = currentChoice()
+        var selectedVoucher: ResolveVoucher? = persisted.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
+        var useGift = persisted.free && giftPossible
+        var useCashback = persisted.cashback && cbPossible
         val cells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         fun paint() {
@@ -3086,19 +3132,21 @@ class MainActivity : AppCompatActivity() {
             fun add(row: View) {
                 cells.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { if (cells.childCount > 0) topMargin = dp(6) })
             }
+            fun selectedNone() = !useGift && !useCashback && selectedVoucher == null
             add(
-                choiceCell("Без льготы", "Обычная продажа", !useGift && selectedVoucher == null) {
-                    useGift = false; selectedVoucher = null; paint()
+                choiceCell("Без льготы", "Обычная продажа", selectedNone()) {
+                    useGift = false; useCashback = false; selectedVoucher = null; paint()
                 },
             )
             if (giftPossible) {
                 add(
                     choiceCell(
-                        "Применить подарок",
-                        if (cheapest.signum() > 0) "«${cheapestName ?: ""}» −${rub(cheapest)}" else "бесплатный напиток",
+                        "Бесплатный напиток",
+                        if (cheapest.signum() > 0) "«${cheapestName ?: ""}» −${rub(cheapest)}" else "6-й напиток в подарок",
                         useGift,
                     ) {
-                        useGift = true; selectedVoucher = null; paint()
+                        // Одна льгота на чек: подарок снимает ваучер и кэшбэк.
+                        useGift = true; useCashback = false; selectedVoucher = null; paint()
                     },
                 )
             }
@@ -3109,7 +3157,18 @@ class MainActivity : AppCompatActivity() {
                         "−${VoucherCalc.amountLabel(v)}" + if (v.redemptionMode == "multi") " · многоразовый" else "",
                         selectedVoucher?.id == v.id,
                     ) {
-                        selectedVoucher = v; useGift = false; paint()
+                        selectedVoucher = v; useGift = false; useCashback = false; paint()
+                    },
+                )
+            }
+            if (cbPossible && voucherList.isEmpty()) {
+                add(
+                    choiceCell(
+                        "Списать кэшбэк",
+                        "до ${card.cashbackKopecks / 100} ₽",
+                        useCashback,
+                    ) {
+                        useCashback = true; useGift = false; selectedVoucher = null; paint()
                     },
                 )
             }
@@ -3117,20 +3176,30 @@ class MainActivity : AppCompatActivity() {
         }
         paint()
         box.addView(cells)
-        box.addView(
-            noteRow("Скидку посчитает касса, деньги принимает Эвотор. Подарок и ваучер вместе не применяются."),
-            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },
-        )
+        if (!giftPossible && voucherList.isEmpty() && !cbPossible) {
+            box.addView(
+                noteRow(
+                    if (CardSession.kindOf(card.code) != "token") "Списание подарка и купона — только по QR гостя."
+                    else "Сейчас у карты нет доступных льгот. Прогресс и кэшбэк сохраняются.",
+                ),
+                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },
+            )
+        } else {
+            box.addView(
+                noteRow("Подарок применится к напитку в чеке. Скидку считает касса, деньги принимает Эвотор."),
+                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },
+            )
+        }
 
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(10), dp(14), dp(11))
             background = topBorder(WHITE)
         }
-        foot.addView(btn("Готово", "primary") {
+        foot.addView(btn("К заказу", "primary") {
             dialog.dismiss()
-            // Модель сама снимет конфликтующие галочки: ваучер вытесняет подарок.
-            saveChoice(useGift, false, 0L, selectedVoucher?.id)
+            // Модель сама снимает конфликты: ваучер вытесняет подарок и кэшбэк.
+            saveChoice(useGift, useCashback, if (useCashback) card.cashbackKopecks else 0L, selectedVoucher?.id)
             notice = null
             // saveChoice сам обновляет бейджи и суммы; полная перерисовка сбросила бы скролл каталога.
             onDone?.invoke()
@@ -3156,12 +3225,8 @@ class MainActivity : AppCompatActivity() {
             safeRender()
             return
         }
-        // Перед оплатой окно выбора льготы само НЕ открывается: выбор сделан после привязки карты.
-        // Единственное исключение — карта пришла без окна (льгота нашлась позже): показываем один раз.
-        if (card != null && LoyaltyPreview.canOffer(card, nowSec()) && benefitGuard.ask(card.code, true)) {
-            maybePromptBenefit(card, onDone = { sendChosen() })
-            return
-        }
+        // Перед оплатой окно клиента НЕ открывается: выбор льготы сделан после привязки карты
+        // (или явной кнопкой «Изменить льготу»). Здесь только отправка позиций в чек.
         sendChosen()
     }
 
@@ -3175,293 +3240,11 @@ class MainActivity : AppCompatActivity() {
         sendReceipt(choice.free, choice.cashback && kopecks > 0, kopecks, choice.voucherId)
     }
 
-    /** Явное действие кассира: открыть лист льгот (подарок / ваучер / кэшбэк). */
+    /** Явное действие кассира: открыть окно клиента (подарок / ваучер / кэшбэк). */
     private fun openLoyaltyForEdit(card: CardInfo) {
-        val now = nowSec()
-        val reserved = DiscountCalc.reserved(card, now)
-        val giftPossible = reserved && card.freeAvailable > 0 && Cart.all().any { it.freeEligible }
-        val cbPossible = reserved && card.cashbackKopecks > 0
-        if (giftPossible || cbPossible || (reserved && card.vouchers.isNotEmpty())) {
-            dismissSheets()
-            showLoyaltySheet(card, giftPossible, cbPossible)
-        } else {
-            notice = "У карты нет доступных льгот по резерву."
-            noticeKind = Kind.WARN
-            safeRender()
-        }
+        openClientScreen(card, force = true)
     }
 
-    /** Компактный лист «Лояльность»: подарок и кэшбэк из резерва → «В чек». Никаких способов оплаты. */
-    private fun showLoyaltySheet(card: CardInfo, giftPossible: Boolean, cbPossible: Boolean) {
-        dismissSheets()
-        val dialog = BottomSheetDialog(this)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(WHITE)
-        }
-        sheetHead(root, "Лояльность", "Чек · ${orderType.lowercase()} · Эвотор") { dialog.dismiss() }
-
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, dp(16), dp(14))
-        }
-        sheetScroll(root, box)
-
-        val now = System.currentTimeMillis() / 1000
-        val eligibleLines = Cart.giftEligibleLines()
-        val cheapest = DiscountCalc.cheapestEligible(eligibleLines.map { it.priceRub }) ?: BigDecimal.ZERO
-        val cheapestName = eligibleLines.minByOrNull { it.priceRub }?.name
-
-        // .pay-order: только справочная информация о госте и составе, без сумм к оплате.
-        val order = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(11), dp(9), dp(11), dp(9))
-            background = rounded(UiKit.SURFACE_2, 11, UiKit.LINE_STRONG)
-        }
-        fun small(t: String, end: Boolean = false) = TextView(this).apply {
-            text = t; textSize = 10f; setTextColor(UiKit.MUTED); letterSpacing = 0.02f
-            if (end) gravity = Gravity.END
-        }
-        val oLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        oLeft.addView(small("Гость"))
-        oLeft.addView(TextView(this).apply {
-            text = card.cardCode.ifBlank { "по QR" }
-            textSize = 11.5f; weight(Fonts.SEMIBOLD); setTextColor(INK)
-        })
-        order.addView(oLeft, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val oRight = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
-        oRight.addView(small("Позиций", true))
-        oRight.addView(TextView(this).apply {
-            text = cartLineCount(Cart.all()).toString()
-            textSize = 11f; letterSpacing = 0.04f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2); gravity = Gravity.END
-        })
-        order.addView(oRight)
-        box.addView(order, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        val resExpiry = card.reservationExpiresAt
-        val resText = when {
-            card.reservationId == null -> "Резерв не создан: льгота не применится."
-            resExpiry == 0L -> null
-            resExpiry - now > 0 -> "Бонусы зарезервированы ещё ~${(resExpiry - now + 59) / 60} мин."
-            else -> "Резерв истёк: бонус применится, только если его не занял другой чек."
-        }
-        resText?.let {
-            box.addView(
-                banner(it, if (DiscountCalc.reserved(card, now)) Kind.INFO else Kind.WARN, 11f),
-                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) },
-            )
-        }
-
-        loyaltyHint(card, CardProgress.of(card))?.let {
-            box.addView(banner(it, Kind.INFO, 11f), LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
-        }
-
-        // Стартуем с того, что кассир уже выбрал в подсказке сразу после карты.
-        val persisted = currentChoice()
-        var useGift = persisted.free && giftPossible
-        // Одна денежная скидка на чек: ваучер ИЛИ кэшбэк. По умолчанию — без скидки:
-        // касса не применяет деньги гостя сама, выбор делает кассир.
-        var discount = MoneyDiscount.NONE
-        var selectedVoucher: ResolveVoucher? = persisted.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
-        if (selectedVoucher != null) discount = MoneyDiscount.VOUCHER
-        else if (persisted.cashback && cbPossible) discount = MoneyDiscount.CASHBACK
-        // Перерисовка секции «Скидка»: нужна, когда меняется выбор подарка (stackable-правило).
-        var repaintDiscount: () -> Unit = {}
-        // Итог под секцией пересобирается вместе с ней.
-        var refreshSummary: () -> Unit = {}
-        fun block(title: String, first: String, firstSub: String?, second: String, secondSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
-            val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            wrap.addView(TextView(this).apply {
-                text = title.uppercase(); textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
-                setPadding(0, dp(15), 0, dp(7))
-            })
-            val cells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            fun paint() {
-                cells.removeAllViews()
-                cells.addView(choiceCell(first, firstSub, firstOn()) { set(true); paint() }, LinearLayout.LayoutParams(MATCH, WRAP))
-                cells.addView(choiceCell(second, secondSub, !firstOn()) { set(false); paint() }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
-                Fonts.apply(cells)
-            }
-            paint()
-            wrap.addView(cells)
-            box.addView(wrap)
-        }
-        if (giftPossible) {
-            block("Подарок", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) {
-                useGift = it
-                // Одна льгота на чек: подарок снимает выбранный ваучер.
-                if (useGift && selectedVoucher != null) {
-                    selectedVoucher = null
-                    discount = MoneyDiscount.NONE
-                }
-                repaintDiscount()
-            }
-        }
-
-        // «Скидка»: ваучер и кэшбэк — взаимоисключающие. Две выгоды на чек касса не складывает.
-        val voucherList = card.vouchers
-        val voucherPossible = DiscountCalc.reserved(card, now) && voucherList.isNotEmpty()
-        if (cbPossible || voucherPossible) {
-            val section = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            fun paintDiscount() {
-                section.removeAllViews()
-                section.addView(TextView(this).apply {
-                    text = "СКИДКА"
-                    textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
-                    setPadding(0, dp(15), 0, dp(7))
-                })
-                val cells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                fun addCell(row: View) {
-                    cells.addView(
-                        row,
-                        LinearLayout.LayoutParams(MATCH, WRAP).apply { if (cells.childCount > 0) topMargin = dp(6) },
-                    )
-                }
-                addCell(
-                    choiceCell("Без скидки", null, discount == MoneyDiscount.NONE) {
-                        discount = MoneyDiscount.NONE; selectedVoucher = null; paintDiscount()
-                    },
-                )
-                if (cbPossible) {
-                    addCell(
-                        choiceCell(
-                            "Списать кэшбэк",
-                            "до ${card.cashbackKopecks / 100} ₽",
-                            discount == MoneyDiscount.CASHBACK,
-                        ) {
-                            discount = MoneyDiscount.CASHBACK; selectedVoucher = null; paintDiscount()
-                        },
-                    )
-                }
-                if (voucherPossible) {
-                    val single = voucherList.singleOrNull()
-                    if (single != null) {
-                        val blocked = !VoucherCalc.allowedTogether(single, useGift && giftPossible)
-                        addCell(
-                            choiceCell(
-                                VoucherCalc.label(single) + if (blocked) " · не суммируется с подарком" else "",
-                                null,
-                                !blocked && discount == MoneyDiscount.VOUCHER,
-                            ) {
-                                if (!blocked) {
-                                    discount = MoneyDiscount.VOUCHER; selectedVoucher = single
-                                    useGift = false; paintDiscount()
-                                }
-                            },
-                        )
-                    } else {
-                        addCell(
-                            choiceCell(
-                                "Применить ваучер",
-                                "выбрать из ${voucherList.size}",
-                                discount == MoneyDiscount.VOUCHER,
-                            ) {
-                                discount = MoneyDiscount.VOUCHER
-                                // Ваучер выбирает кассир: по умолчанию ничего не подставлено.
-                                selectedVoucher = null
-                                paintDiscount()
-                            },
-                        )
-                        if (discount == MoneyDiscount.VOUCHER) {
-                            for (v in voucherList) {
-                                val blocked = !VoucherCalc.allowedTogether(v, useGift && giftPossible)
-                                addCell(
-                                    choiceCell(
-                                        VoucherCalc.label(v) + if (blocked) " · не суммируется с подарком" else "",
-                                        null,
-                                        !blocked && selectedVoucher?.id == v.id,
-                                    ) {
-                                        if (!blocked) {
-                                            selectedVoucher = v; discount = MoneyDiscount.VOUCHER
-                                            useGift = false; paintDiscount()
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
-                section.addView(cells)
-                Fonts.apply(section)
-            }
-            repaintDiscount = { paintDiscount(); refreshSummary() }
-            paintDiscount()
-            box.addView(section)
-        }
-
-        if (card.vouchers.isEmpty() && CardSession.kindOf(card.code) != "token") {
-            box.addView(
-                noteRow("Скидка по ваучеру — только по QR гостя."),
-                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) },
-            )
-        }
-
-        // G05: что выбрано и сколько это в деньгах — до нажатия «В чек».
-        val summary = TextView(this).apply {
-            textSize = 11f
-            setTextColor(INK)
-            setPadding(0, dp(12), 0, 0)
-        }
-        fun paintSummary() {
-            val choice = Choice.normalize(
-                useGift && giftPossible,
-                discount == MoneyDiscount.CASHBACK && cbPossible,
-                if (discount == MoneyDiscount.CASHBACK) card.cashbackKopecks else 0L,
-                selectedVoucher?.takeIf { discount == MoneyDiscount.VOUCHER }?.id,
-            )
-            val b = LoyaltyPreview.of(
-                card, choice, Cart.gross(), Cart.giftEligibleLines().map { it.priceRub }, now,
-            )
-            summary.text = buildString {
-                append(
-                    when {
-                        choice.voucherId != null -> "Выбрано: ваучер"
-                        choice.free -> "Выбрано: подарок"
-                        choice.cashback -> "Выбрано: кэшбэк"
-                        else -> "Выбрано: без льготы"
-                    },
-                )
-                if (b.hasAny) append(" · скидка −${rub(b.total)} · к оплате ${rub(b.payable)}")
-            }
-        }
-        refreshSummary = { paintSummary() }
-        paintSummary()
-        box.addView(summary, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        box.addView(
-            noteRow("Льготу применит Эвотор по резерву. Способ оплаты, сумму и чек считает POS."),
-            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) },
-        )
-
-        val foot = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(11))
-            background = topBorder(WHITE)
-        }
-        foot.addView(btn("В чек", "primary") {
-            val free = useGift && giftPossible
-            val voucher = selectedVoucher?.takeIf {
-                discount == MoneyDiscount.VOUCHER && VoucherCalc.allowedTogether(it, free)
-            }
-            val spend = discount == MoneyDiscount.CASHBACK && cbPossible && voucher == null
-            dialog.dismiss()
-            // Ваучер и кэшбэк вместе не уходят: модель состояния не даст записать оба.
-            sendReceipt(free, spend, if (spend) card.cashbackKopecks else 0L, voucher?.id)
-        }, LinearLayout.LayoutParams(MATCH, dp(50)))
-        root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        Fonts.apply(root)
-        dialog.setContentView(root)
-        styleSheet(dialog)
-        dialog.setOnDismissListener { if (checkoutDialog === dialog) checkoutDialog = null }
-        checkoutDialog = dialog
-        dialog.show()
-        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
-        dialog.behavior.skipCollapsed = true
-        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
-        dialog.behavior.skipCollapsed = true
-    }
 
     /** Защита от двойного нажатия «В чек»: второй вызов, пока первый не завершился, игнорируется. */
     private var sendingReceipt = false
