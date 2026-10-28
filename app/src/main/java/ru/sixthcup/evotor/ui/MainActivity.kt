@@ -46,6 +46,7 @@ import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
+import ru.sixthcup.evotor.data.BenefitPromptGuard
 import ru.sixthcup.evotor.data.Benefits
 import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.LoyaltyPreview
@@ -163,8 +164,8 @@ class MainActivity : AppCompatActivity() {
     private var cartSidebarRows: LinearLayout? = null
     private var cartSidebarTotal: TextView? = null
 
-    /** Подсказку про льготу показываем один раз на привязку карты. */
-    private var benefitPrompted = false
+    /** Окно льготы — ровно один раз на привязку карты (см. [BenefitPromptGuard]). */
+    private val benefitGuard = BenefitPromptGuard()
     private var wideLayout: Boolean = false
     private var cartDockFill: (() -> Unit)? = null
     private var cartDialog: BottomSheetDialog? = null
@@ -207,7 +208,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             AlertDialog.Builder(this).setTitle("Заменить карту?")
                 .setMessage("Сейчас выбрана карта ${active.cardCode.ifBlank { "по QR" }}. Отсканирована другая.")
-                .setPositiveButton("Заменить") { _, _ -> CardSession.clear(this@MainActivity); applyScan(trimmed) }
+                .setPositiveButton("Заменить") { _, _ -> forgetCard(); applyScan(trimmed) }
                 .setNegativeButton("Оставить текущую", null).show()
         }
     }
@@ -559,7 +560,7 @@ class MainActivity : AppCompatActivity() {
             actions.addView(TextView(this).apply {
                 text = "Отвязать"; textSize = 10f; weight(Fonts.SEMIBOLD); gravity = Gravity.CENTER; setTextColor(WHITE)
                 setPadding(dp(12), 0, dp(12), 0); background = rounded(0x24FFFFFF.toInt(), 9, null); isClickable = true
-                setOnClickListener { CardSession.clear(this@MainActivity); notice = null; screen = Screen.ORDER; safeRender() }
+                setOnClickListener { forgetCard(); notice = null; screen = Screen.ORDER; safeRender() }
             }, LinearLayout.LayoutParams(WRAP, dp(36)))
             col.addView(actions)
             gc.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
@@ -639,7 +640,7 @@ class MainActivity : AppCompatActivity() {
         }
         body.addView(noteRow("Карта гостя одна для кассы и PWA: чашки, бонусы и подарки считаются одинаково."),
             LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
-        body.addView(btn("Продолжить без карты", "ghost") { CardSession.clear(this); notice = null; screen = Screen.ORDER; safeRender() },
+        body.addView(btn("Продолжить без карты", "ghost") { forgetCard(); notice = null; screen = Screen.ORDER; safeRender() },
             LinearLayout.LayoutParams(MATCH, dp(50)).apply { topMargin = dp(14) })
 
         field.setOnEditorActionListener { _, action, _ ->
@@ -671,7 +672,7 @@ class MainActivity : AppCompatActivity() {
         val code = raw.trim().removePrefix("6.7:").removePrefix("67coffee:").trim()
         if (code.isEmpty()) { input?.error = "Введите номер карты или отсканируйте QR"; return }
         if (resolving) return
-        resolving = true; notice = null; benefitPrompted = false; safeRender()
+        resolving = true; notice = null; safeRender()
         thread(name = "loyalty-lookup") {
             val info = LoyaltyApi.resolve(code)
             runOnUiThread {
@@ -696,7 +697,8 @@ class MainActivity : AppCompatActivity() {
                         else -> notice = null
                     }
                 } else {
-                    CardSession.clear(this)
+                    // Карта не подтвердилась: следующая привязка снова получит окно льготы.
+                    forgetCard()
                     if (info.freeStatus == "ERROR") {
                         Log.e(TAG, "resolve_failed kind=${CardSession.kindOf(code)} code=${info.errorCode ?: "unknown"} reason=${info.note}")
                     } else {
@@ -710,7 +712,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 safeRender()
-                // G02: сразу после привязки карты спрашиваем, применить ли льготу.
+                // G02: сразу после привязки карты спрашиваем один раз, применить ли льготу.
                 if (info.code.isNotEmpty()) maybePromptBenefit(info)
                 if (!pendingScan.isNullOrBlank() && !resolving) {
                     handleScannedCode(pendingScan)
@@ -1767,6 +1769,12 @@ class MainActivity : AppCompatActivity() {
         Cart.giftEligibleLines().map { it.priceRub }, nowSec(),
     )
 
+    /** Отвязка карты: следующая привязка снова получит окно льготы. */
+    private fun forgetCard() {
+        CardSession.clear(this)
+        benefitGuard.onCardCleared()
+    }
+
     private fun saveChoice(free: Boolean, cashback: Boolean, kopecks: Long, voucherId: Int?) {
         CheckoutChoice.save(this, free, cashback, kopecks, voucherId)
         adapter?.notifyDataSetChanged()
@@ -2109,7 +2117,7 @@ class MainActivity : AppCompatActivity() {
             when (item.itemId) {
                 1 -> loadProducts()
                 2 -> { notice = null; screen = Screen.CARD; safeRender() }
-                3 -> confirm("Сбросить клиента?", "Карта будет отвязана от заказа, корзина останется.", "Сбросить") { CardSession.clear(this); notice = null; safeRender() }
+                3 -> confirm("Сбросить клиента?", "Карта будет отвязана от заказа, корзина останется.", "Сбросить") { forgetCard() }
                 4 -> confirm("Очистить корзину?", "Все ${Cart.count()} поз. будут удалены.", "Очистить") { Cart.clear(); onCartChanged() }
             }
             true
@@ -2717,6 +2725,21 @@ class MainActivity : AppCompatActivity() {
                 topMargin = dp(14)
             })
 
+            // Явное действие кассира: перед оплатой окно льготы само больше не всплывает.
+            val guestCard = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+            if (guestCard != null) {
+                body.addView(TextView(this).apply {
+                    text = "Изменить льготу"
+                    textSize = 10.5f
+                    weight(Fonts.SEMIBOLD)
+                    setTextColor(BRAND)
+                    setPadding(0, dp(8), 0, 0)
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { close(); openLoyaltyForEdit(guestCard) }
+                }, LinearLayout.LayoutParams(WRAP, WRAP))
+            }
+
             // G04: строки льгот — ровно те суммы, что уйдут в DiscountIntegrationService.
             val benefits = currentBenefits()
             if (benefits.hasAny) {
@@ -2740,6 +2763,7 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(UiKit.MUTED)
                     setPadding(0, dp(3), 0, 0)
                 })
+
                 body.addView(block, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
             }
 
@@ -3027,10 +3051,11 @@ class MainActivity : AppCompatActivity() {
      * Показывается один раз на привязку и только когда backend реально дал резерв со льготой.
      * Ручной числовой код сюда не попадает — по нему списания нет.
      */
-    private fun maybePromptBenefit(card: CardInfo) {
-        if (benefitPrompted) return
-        benefitPrompted = true
-        if (!LoyaltyPreview.canOffer(card, nowSec())) return
+    private fun maybePromptBenefit(card: CardInfo, force: Boolean = false, onDone: (() -> Unit)? = null) {
+        val offer = LoyaltyPreview.canOffer(card, nowSec())
+        // force — только явное действие кассира («Изменить льготу»).
+        if (!force && !benefitGuard.ask(card.code, offer)) return
+        if (!offer) return
 
         val now = nowSec()
         val eligible = Cart.giftEligibleLines().map { it.priceRub }
@@ -3108,6 +3133,7 @@ class MainActivity : AppCompatActivity() {
             saveChoice(useGift, false, 0L, selectedVoucher?.id)
             notice = null
             // saveChoice сам обновляет бейджи и суммы; полная перерисовка сбросила бы скролл каталога.
+            onDone?.invoke()
         }, LinearLayout.LayoutParams(MATCH, dp(50)))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -3130,16 +3156,39 @@ class MainActivity : AppCompatActivity() {
             safeRender()
             return
         }
-        val now = System.currentTimeMillis() / 1000
-        val reserved = card != null && DiscountCalc.reserved(card, now)
-        val giftPossible = reserved && card != null && card.freeAvailable > 0 && Cart.all().any { it.freeEligible }
-        val cbPossible = reserved && card != null && card.cashbackKopecks > 0
-        val voucherPossible = reserved && card != null && card.vouchers.isNotEmpty()
-        if (card == null || (!giftPossible && !cbPossible && !voucherPossible)) {
-            sendReceipt(false, false, 0L)
+        // Перед оплатой окно выбора льготы само НЕ открывается: выбор сделан после привязки карты.
+        // Единственное исключение — карта пришла без окна (льгота нашлась позже): показываем один раз.
+        if (card != null && LoyaltyPreview.canOffer(card, nowSec()) && benefitGuard.ask(card.code, true)) {
+            maybePromptBenefit(card, onDone = { sendChosen() })
             return
         }
-        showLoyaltySheet(card, giftPossible, cbPossible)
+        sendChosen()
+    }
+
+    /** Отправка в чек того выбора льготы, который кассир уже сделал. */
+    private fun sendChosen() {
+        val card = CardSession.get(this)
+        val choice = currentChoice()
+        val kopecks = if (choice.cashback) {
+            choice.cashbackKopecks.takeIf { it > 0 } ?: card?.cashbackKopecks ?: 0L
+        } else 0L
+        sendReceipt(choice.free, choice.cashback && kopecks > 0, kopecks, choice.voucherId)
+    }
+
+    /** Явное действие кассира: открыть лист льгот (подарок / ваучер / кэшбэк). */
+    private fun openLoyaltyForEdit(card: CardInfo) {
+        val now = nowSec()
+        val reserved = DiscountCalc.reserved(card, now)
+        val giftPossible = reserved && card.freeAvailable > 0 && Cart.all().any { it.freeEligible }
+        val cbPossible = reserved && card.cashbackKopecks > 0
+        if (giftPossible || cbPossible || (reserved && card.vouchers.isNotEmpty())) {
+            dismissSheets()
+            showLoyaltySheet(card, giftPossible, cbPossible)
+        } else {
+            notice = "У карты нет доступных льгот по резерву."
+            noticeKind = Kind.WARN
+            safeRender()
+        }
     }
 
     /** Компактный лист «Лояльность»: подарок и кэшбэк из резерва → «В чек». Никаких способов оплаты. */
@@ -3379,23 +3428,6 @@ class MainActivity : AppCompatActivity() {
         refreshSummary = { paintSummary() }
         paintSummary()
         box.addView(summary, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        // G05: «Изменить льготу» открывает тот же лист, что и сразу после привязки карты.
-        val change = TextView(this).apply {
-            text = "Изменить льготу"
-            textSize = 10.5f
-            weight(Fonts.SEMIBOLD)
-            setTextColor(BRAND)
-            setPadding(0, dp(4), 0, 0)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                dialog.dismiss()
-                benefitPrompted = false
-                maybePromptBenefit(card)
-            }
-        }
-        box.addView(change, LinearLayout.LayoutParams(WRAP, WRAP))
 
         box.addView(
             noteRow("Льготу применит Эвотор по резерву. Способ оплаты, сумму и чек считает POS."),
