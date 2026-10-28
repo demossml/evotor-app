@@ -2947,7 +2947,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val now = System.currentTimeMillis() / 1000
-        val eligibleLines = Cart.all().filter { it.freeEligible }
+        val eligibleLines = Cart.giftEligibleLines()
         val cheapest = DiscountCalc.cheapestEligible(eligibleLines.map { it.priceRub }) ?: BigDecimal.ZERO
         val cheapestName = eligibleLines.minByOrNull { it.priceRub }?.name
 
@@ -3000,6 +3000,8 @@ class MainActivity : AppCompatActivity() {
         var useCb = false
         // Один ваучер — предвыбран (кассир может снять), несколько — выбирает кассир.
         var selectedVoucher: ResolveVoucher? = card.vouchers.singleOrNull()
+        // Перерисовка списка ваучеров: нужна, когда меняется выбор подарка (stackable-правило).
+        var repaintVouchers: () -> Unit = {}
         fun block(title: String, first: String, firstSub: String?, second: String, secondSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
             val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             wrap.addView(TextView(this).apply {
@@ -3018,7 +3020,10 @@ class MainActivity : AppCompatActivity() {
             box.addView(wrap)
         }
         if (giftPossible) {
-            block("Подарок", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) { useGift = it }
+            block("Подарок", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) {
+                useGift = it
+                repaintVouchers()
+            }
         }
         if (cbPossible) {
             block("Кэшбэк", "Копить кэшбэк", null, "Списать кэшбэк", "до ${card.cashbackKopecks / 100} ₽", { !useCb }) { useCb = !it }
@@ -3052,6 +3057,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 Fonts.apply(vCells)
             }
+            repaintVouchers = { paintVouchers() }
             paintVouchers()
             vWrap.addView(vCells)
             box.addView(vWrap)

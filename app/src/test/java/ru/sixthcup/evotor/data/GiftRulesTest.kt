@@ -157,4 +157,18 @@ class GiftRulesTest {
         assertEquals(0, sc.getInt("free"))
         assertEquals("R-1", sc.getString("op"))
     }
+
+    @Test
+    fun `toppings never become the gift even if flagged eligible`() {
+        // Позиция-добавка (optionId != null) исключается из подарка при любом флаге.
+        val drink = CartLine("u-drink", "Капучино", BigDecimal("200"), freeEligible = true)
+        val topping = CartLine(
+            "mod:1", "Сироп", BigDecimal("40"), freeEligible = true, cartKey = "mod:1", optionId = 1,
+        )
+        val lines = listOf(drink, topping)
+        val eligible = lines.filter { it.freeEligible && it.optionId == null }
+        assertEquals(listOf("u-drink"), eligible.map { it.productUuid })
+        // И скидка считается по цене напитка, а не добавки.
+        assertEquals(BigDecimal("200"), DiscountCalc.cheapestEligible(eligible.map { it.priceRub }))
+    }
 }

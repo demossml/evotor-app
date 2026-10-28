@@ -185,6 +185,12 @@ object Cart {
         save()
     }
 
+    /**
+     * Позиции, которые могут стать подарком: напиток с флагом и не добавка
+     * (у добавки есть optionId — её в подарок не отдаём никогда).
+     */
+    fun giftEligibleLines(): List<CartLine> = all().filter { it.freeEligible && it.optionId == null }
+
     /** Позиции одной комбо-группы. */
     fun comboLines(groupId: String): List<CartLine> = lines.values.filter { it.comboGroupId == groupId }
 

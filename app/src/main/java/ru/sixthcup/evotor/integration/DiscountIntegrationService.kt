@@ -37,6 +37,7 @@ class DiscountIntegrationService : IntegrationService() {
                 try {
                     val info = CardSession.get(applicationContext)
                     if (info == null || info.code.isEmpty()) {
+                        Log.i("DiscountIntegration", "loyalty_discount_skip reason=no_card")
                         // Без карты гостя остаётся только выгода комбо — она не требует резерва.
                         val comboOnly = CheckoutChoice.comboRub(applicationContext)
                         if (comboOnly.signum() > 0) {
@@ -56,7 +57,7 @@ class DiscountIntegrationService : IntegrationService() {
                     val prices = receiptUnitPrices()
                     val gross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                     // Free cup: the cheapest single unit on the receipt (the backend still re-checks it).
-                    val eligibleUnitPrices = Cart.all().filter { it.freeEligible }.map { it.priceRub }
+                    val eligibleUnitPrices = Cart.giftEligibleLines().map { it.priceRub }
                     val requestedCb = if (CheckoutChoice.cashback(applicationContext)) CheckoutChoice.cashbackKopecks(applicationContext) else 0L
                     val freeChosen = CheckoutChoice.free(applicationContext)
                     val calc = DiscountCalc.compute(gross, eligibleUnitPrices, reserved, freeChosen, info.freeAvailable, requestedCb, info.cashbackKopecks)

@@ -100,7 +100,7 @@ object SellLauncher {
             var extrasVoucher = 0
             val setExtra = if (card != null && card.code.isNotEmpty()) {
                 val calc = DiscountCalc.compute(
-                    Cart.gross(), Cart.all().filter { it.freeEligible }.map { it.priceRub },
+                    Cart.gross(), Cart.giftEligibleLines().map { it.priceRub },
                     DiscountCalc.reserved(card, System.currentTimeMillis() / 1000), freeApplied, card.freeAvailable,
                     if (spendCashback) cashbackKopecks else 0L, card.cashbackKopecks,
                 )
