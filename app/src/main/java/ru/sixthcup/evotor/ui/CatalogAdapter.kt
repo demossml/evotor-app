@@ -65,6 +65,11 @@ class CatalogCallbacks(
     val onDec: (CatalogProduct) -> Unit = {},
     /** Количество на плитке (сумма по размерам); по умолчанию — по uuid плитки. */
     val qtyOf: (CatalogProduct) -> Int = { Cart.qty(it.uuid) },
+    /**
+     * Бейдж льготы для плитки: «ПОДАРОК», если позиция попадает под выбранную льготу.
+     * Каталог при этом не фильтруется — помечаем, но не скрываем.
+     */
+    val benefitBadge: (CatalogProduct) -> String? = { null },
 )
 
 private const val QTY = "qty"
@@ -411,7 +416,10 @@ private class ProductVH(ctx: Context, private val cb: CatalogCallbacks) : Recycl
         meta.text = metaText
         meta.visibility = if (metaText.isEmpty()) View.GONE else View.VISIBLE
         price.text = priceText(p)
+        // Бейдж льготы важнее маркетингового: он объясняет, почему позиция станет дешевле.
+        val benefit = cb.benefitBadge(p)
         when {
+            benefit != null -> { flag.text = benefit; flag.visibility = View.VISIBLE }
             p.isCombo -> { flag.text = "КОМБО"; flag.visibility = View.VISIBLE }
             p.featured -> { flag.text = "ХИТ"; flag.visibility = View.VISIBLE }
             else -> flag.visibility = View.GONE

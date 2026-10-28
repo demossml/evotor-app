@@ -35,6 +35,25 @@ class CheckoutChoiceTest {
     }
 
     @Test
+    fun `voucher replaces the gift - one benefit per receipt`() {
+        val c = Choice.normalize(free = true, cashback = true, cashbackKopecks = 5000L, voucherId = 12)
+        assertEquals(12, c.voucherId)
+        assertEquals(false, c.free)
+        assertEquals(false, c.cashback)
+        assertEquals(0L, c.cashbackKopecks)
+    }
+
+    @Test
+    fun `gift then voucher leaves the gift unselected`() {
+        // 1) кассир выбрал подарок, 2) затем ваучер — подарок снимается моделью.
+        val giftOnly = Choice.normalize(free = true, cashback = false, cashbackKopecks = 0L, voucherId = null)
+        assertEquals(true, giftOnly.free)
+        val giftThenVoucher = Choice.normalize(giftOnly.free, giftOnly.cashback, giftOnly.cashbackKopecks, 3)
+        assertEquals(false, giftThenVoucher.free)
+        assertEquals(3, giftThenVoucher.voucherId)
+    }
+
+    @Test
     fun `gift does not touch the money choice`() {
         val c = Choice.normalize(free = true, cashback = true, cashbackKopecks = 3000L, voucherId = null)
         assertTrue(c.free)
