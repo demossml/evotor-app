@@ -11,7 +11,7 @@ import java.math.BigDecimal
 class VoucherTest {
 
     private val percent = ResolveVoucher(id = 1, title = "Скидка 10%", kind = "percent", value = 10)
-    private val fixed = ResolveVoucher(id = 2, title = "Скидка 50 ₽", kind = "fixed", value = 50)
+    private val fixed = ResolveVoucher(id = 2, title = "Скидка 50 ₽", kind = "fixed", value = 5000)
     private val noStack = ResolveVoucher(id = 3, title = "Не с подарком", kind = "percent", value = 20, stackableWithFreeCup = false)
 
     @Test
@@ -35,7 +35,7 @@ class VoucherTest {
         val arr = JSONArray("""[ { "id": 0, "title": "x", "kind": "percent", "value": 10 },
                                   { "id": 7, "title": "", "kind": "percent", "value": 10 },
                                   { "id": 8, "title": "ok", "kind": "unknown", "value": 10 },
-                                  { "id": 9, "title": "fixed", "kind": "fixed", "value": 50 } ]""")
+                                  { "id": 9, "title": "fixed", "kind": "fixed", "value": 5000 } ]""")
         val list = VoucherJson.parse(arr)
         assertEquals(1, list.size)
         assertEquals(9, list.single().id)
@@ -48,7 +48,7 @@ class VoucherTest {
     }
 
     @Test
-    fun `fixed is capped by the remainder`() {
+    fun `fixed kopecks are capped by the remainder`() {
         assertEquals(BigDecimal("50.00"), VoucherCalc.discount(BigDecimal("300.00"), fixed))
         assertEquals(BigDecimal("20.00"), VoucherCalc.discount(BigDecimal("20.00"), fixed))
         assertEquals(0, VoucherCalc.discount(BigDecimal.ZERO, fixed).compareTo(BigDecimal.ZERO))
@@ -65,7 +65,7 @@ class VoucherTest {
 
     @Test
     fun `discount never exceeds the check`() {
-        val total = VoucherCalc.discount(BigDecimal("100.00"), ResolveVoucher(1, "x", "fixed", 500))
+        val total = VoucherCalc.discount(BigDecimal("100.00"), ResolveVoucher(1, "x", "fixed", 50000))
         assertEquals(BigDecimal("100.00"), total)
     }
 
@@ -92,6 +92,23 @@ class VoucherTest {
         // остальные поля не пострадали
         assertEquals("12", manual.getString("c"))
         assertEquals(2, manual.getInt("v"))
+    }
+
+    @Test
+    fun `labels show percent as percent and fixed as rubles from kopecks`() {
+        assertEquals("10%", VoucherCalc.amountLabel(percent))
+        assertEquals("50 ₽", VoucherCalc.amountLabel(fixed))
+        assertEquals("Скидка 50 ₽ −50 ₽", VoucherCalc.label(fixed))
+        assertEquals("300 ₽", VoucherCalc.amountLabel(ResolveVoucher(3, "t", "fixed", 30000)))
+    }
+
+    @Test
+    fun `image url is parsed but ignored by the logic`() {
+        val v = VoucherJson.parse(
+            JSONArray("""[ { "id": 4, "title": "t", "kind": "percent", "value": 5, "imageUrl": "https://x/y.png", "unknown": 1 } ]"""),
+        ).single()
+        assertEquals("https://x/y.png", v.imageUrl)
+        assertEquals(BigDecimal("5.00"), VoucherCalc.discount(BigDecimal("100"), v))
     }
 
     @Test

@@ -88,6 +88,9 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import kotlin.concurrent.thread
 
+/** Одна денежная скидка на чек: гость получает либо ваучер, либо кэшбэк, но не оба. */
+private enum class MoneyDiscount { NONE, CASHBACK, VOUCHER }
+
 /**
  * Кассовый UI 6.7 Coffee (редизайн 4.2.0, см. CHANGELOG-CASHIER-UX.md).
  * Экран = верхняя полоса (карта) + прокручиваемый контент + нижняя полоса (счётчик, сумма чека, «В чек»).
@@ -2923,7 +2926,8 @@ class MainActivity : AppCompatActivity() {
         val reserved = card != null && DiscountCalc.reserved(card, now)
         val giftPossible = reserved && card != null && card.freeAvailable > 0 && Cart.all().any { it.freeEligible }
         val cbPossible = reserved && card != null && card.cashbackKopecks > 0
-        if (card == null || (!giftPossible && !cbPossible)) {
+        val voucherPossible = reserved && card != null && card.vouchers.isNotEmpty()
+        if (card == null || (!giftPossible && !cbPossible && !voucherPossible)) {
             sendReceipt(false, false, 0L)
             return
         }
@@ -2997,11 +3001,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         var useGift = giftPossible
-        var useCb = false
-        // Один ваучер — предвыбран (кассир может снять), несколько — выбирает кассир.
-        var selectedVoucher: ResolveVoucher? = card.vouchers.singleOrNull()
-        // Перерисовка списка ваучеров: нужна, когда меняется выбор подарка (stackable-правило).
-        var repaintVouchers: () -> Unit = {}
+        // Одна денежная скидка на чек: ваучер ИЛИ кэшбэк. По умолчанию — без скидки:
+        // касса не применяет деньги гостя сама, выбор делает кассир.
+        var discount = MoneyDiscount.NONE
+        var selectedVoucher: ResolveVoucher? = null
+        // Перерисовка секции «Скидка»: нужна, когда меняется выбор подарка (stackable-правило).
+        var repaintDiscount: () -> Unit = {}
         fun block(title: String, first: String, firstSub: String?, second: String, secondSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
             val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             wrap.addView(TextView(this).apply {
@@ -3022,45 +3027,109 @@ class MainActivity : AppCompatActivity() {
         if (giftPossible) {
             block("Подарок", "Применить подарок", "«${cheapestName ?: ""}» −${rub(cheapest)}", "Без подарка", null, { useGift }) {
                 useGift = it
-                repaintVouchers()
+                // Подарок включает/снимает запрет на несуммируемый ваучер — перерисовываем выбор.
+                if (!VoucherCalc.allowedTogether(selectedVoucher, useGift && giftPossible)) {
+                    selectedVoucher = null
+                    discount = MoneyDiscount.NONE
+                }
+                repaintDiscount()
             }
-        }
-        if (cbPossible) {
-            block("Кэшбэк", "Копить кэшбэк", null, "Списать кэшбэк", "до ${card.cashbackKopecks / 100} ₽", { !useCb }) { useCb = !it }
         }
 
-        if (card.vouchers.isNotEmpty()) {
-            val vWrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            vWrap.addView(TextView(this).apply {
-                text = "ВАУЧЕР"
-                textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
-                setPadding(0, dp(15), 0, dp(7))
-            })
-            val vCells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            fun paintVouchers() {
-                vCells.removeAllViews()
-                vCells.addView(
-                    choiceCell("Без ваучера", null, selectedVoucher == null) { selectedVoucher = null; paintVouchers() },
-                    LinearLayout.LayoutParams(MATCH, WRAP),
-                )
-                for (v in card.vouchers) {
-                    val label = if (v.isPercent) "${v.title} (−${v.value}%)" else "${v.title} (−${v.value} ₽)"
-                    val blocked = !VoucherCalc.allowedTogether(v, useGift && giftPossible)
-                    vCells.addView(
-                        choiceCell(
-                            if (blocked) "$label · не суммируется с подарком" else label,
-                            null,
-                            !blocked && selectedVoucher?.id == v.id,
-                        ) { if (!blocked) { selectedVoucher = v; paintVouchers() } },
-                        LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) },
+        // «Скидка»: ваучер и кэшбэк — взаимоисключающие. Две выгоды на чек касса не складывает.
+        val voucherList = card.vouchers
+        val voucherPossible = DiscountCalc.reserved(card, now) && voucherList.isNotEmpty()
+        if (cbPossible || voucherPossible) {
+            val section = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            fun paintDiscount() {
+                section.removeAllViews()
+                section.addView(TextView(this).apply {
+                    text = "СКИДКА"
+                    textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
+                    setPadding(0, dp(15), 0, dp(7))
+                })
+                val cells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                fun addCell(row: View) {
+                    cells.addView(
+                        row,
+                        LinearLayout.LayoutParams(MATCH, WRAP).apply { if (cells.childCount > 0) topMargin = dp(6) },
                     )
                 }
-                Fonts.apply(vCells)
+                addCell(
+                    choiceCell("Без скидки", null, discount == MoneyDiscount.NONE) {
+                        discount = MoneyDiscount.NONE; selectedVoucher = null; paintDiscount()
+                    },
+                )
+                if (cbPossible) {
+                    addCell(
+                        choiceCell(
+                            "Списать кэшбэк",
+                            "до ${card.cashbackKopecks / 100} ₽",
+                            discount == MoneyDiscount.CASHBACK,
+                        ) {
+                            discount = MoneyDiscount.CASHBACK; selectedVoucher = null; paintDiscount()
+                        },
+                    )
+                }
+                if (voucherPossible) {
+                    val single = voucherList.singleOrNull()
+                    if (single != null) {
+                        val blocked = !VoucherCalc.allowedTogether(single, useGift && giftPossible)
+                        addCell(
+                            choiceCell(
+                                VoucherCalc.label(single) + if (blocked) " · не суммируется с подарком" else "",
+                                null,
+                                !blocked && discount == MoneyDiscount.VOUCHER,
+                            ) {
+                                if (!blocked) {
+                                    discount = MoneyDiscount.VOUCHER; selectedVoucher = single; paintDiscount()
+                                }
+                            },
+                        )
+                    } else {
+                        addCell(
+                            choiceCell(
+                                "Применить ваучер",
+                                "выбрать из ${voucherList.size}",
+                                discount == MoneyDiscount.VOUCHER,
+                            ) {
+                                discount = MoneyDiscount.VOUCHER
+                                // Ваучер выбирает кассир: по умолчанию ничего не подставлено.
+                                selectedVoucher = null
+                                paintDiscount()
+                            },
+                        )
+                        if (discount == MoneyDiscount.VOUCHER) {
+                            for (v in voucherList) {
+                                val blocked = !VoucherCalc.allowedTogether(v, useGift && giftPossible)
+                                addCell(
+                                    choiceCell(
+                                        VoucherCalc.label(v) + if (blocked) " · не суммируется с подарком" else "",
+                                        null,
+                                        !blocked && selectedVoucher?.id == v.id,
+                                    ) {
+                                        if (!blocked) {
+                                            selectedVoucher = v; discount = MoneyDiscount.VOUCHER; paintDiscount()
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                section.addView(cells)
+                Fonts.apply(section)
             }
-            repaintVouchers = { paintVouchers() }
-            paintVouchers()
-            vWrap.addView(vCells)
-            box.addView(vWrap)
+            repaintDiscount = { paintDiscount() }
+            paintDiscount()
+            box.addView(section)
+        }
+
+        if (card.vouchers.isEmpty() && CardSession.kindOf(card.code) != "token") {
+            box.addView(
+                noteRow("Скидка по ваучеру — только по QR гостя."),
+                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) },
+            )
         }
 
         box.addView(
@@ -3075,10 +3144,13 @@ class MainActivity : AppCompatActivity() {
         }
         foot.addView(btn("В чек", "primary") {
             val free = useGift && giftPossible
-            val spend = useCb && cbPossible
-            val voucher = selectedVoucher?.takeIf { VoucherCalc.allowedTogether(it, free) }
+            val voucher = selectedVoucher?.takeIf {
+                discount == MoneyDiscount.VOUCHER && VoucherCalc.allowedTogether(it, free)
+            }
+            val spend = discount == MoneyDiscount.CASHBACK && cbPossible && voucher == null
             dialog.dismiss()
-            sendReceipt(free, spend, if (spend) card.cashbackKopecks else 0L, voucher?.id ?: 0)
+            // Ваучер и кэшбэк вместе не уходят: модель состояния не даст записать оба.
+            sendReceipt(free, spend, if (spend) card.cashbackKopecks else 0L, voucher?.id)
         }, LinearLayout.LayoutParams(MATCH, dp(50)))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -3099,7 +3171,7 @@ class MainActivity : AppCompatActivity() {
      * Финальная проверка корзины по последнему каталогу и передача позиций Эвотору.
      * Платная добавка без evotorUuid / удалённый товар / изменившаяся схема — чек не открываем.
      */
-    private fun sendReceipt(free: Boolean, spend: Boolean, cashbackKopecks: Long, voucherId: Int = 0) {
+    private fun sendReceipt(free: Boolean, spend: Boolean, cashbackKopecks: Long, voucherId: Int? = null) {
         if (sendingReceipt) return
         if (Cart.isEmpty()) {
             notice = "Корзина пуста — добавьте позиции."

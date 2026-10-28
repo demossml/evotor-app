@@ -149,13 +149,15 @@ object CardSession {
         // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
         // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
         val reserved = info.reservationId != null
+        // Ваучер гасит backend только по QR-токену с резервом; по числовому коду ключа быть не должно.
+        val voucherOk = reserved && kindOf(c) == "token"
         val o = JSONObject()
             .put("v", 2)
             .put("c", c)
             .put("ts", System.currentTimeMillis())
             .put("kind", kindOf(c))
         if (reserved) o.put("op", info.reservationId)
-        if (reserved && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
+        if (voucherOk && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
         // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
         info.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
         o.put("free", if (reserved && freeApplied) 1 else 0)

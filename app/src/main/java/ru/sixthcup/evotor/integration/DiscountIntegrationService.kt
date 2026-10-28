@@ -60,20 +60,24 @@ class DiscountIntegrationService : IntegrationService() {
                     val eligibleUnitPrices = Cart.giftEligibleLines().map { it.priceRub }
                     val requestedCb = if (CheckoutChoice.cashback(applicationContext)) CheckoutChoice.cashbackKopecks(applicationContext) else 0L
                     val freeChosen = CheckoutChoice.free(applicationContext)
-                    val calc = DiscountCalc.compute(gross, eligibleUnitPrices, reserved, freeChosen, info.freeAvailable, requestedCb, info.cashbackKopecks)
+                    // Ваучер: только с резервом и, если не stackable, без подарка.
+                    val chosenVoucher = info.vouchers.firstOrNull { it.id == CheckoutChoice.voucherId(applicationContext) }
+                    val voucherAllowed = VoucherCalc.allowedTogether(
+                        chosenVoucher,
+                        DiscountCalc.freeApplies(reserved, freeChosen, info.freeAvailable, eligibleUnitPrices),
+                    )
+                    val calc = DiscountCalc.compute(
+                        gross, eligibleUnitPrices, reserved, freeChosen, info.freeAvailable, requestedCb, info.cashbackKopecks,
+                        voucher = chosenVoucher, voucherAllowed = voucherAllowed,
+                    )
                     val freeDiscount = calc.free
                     val cbRub = calc.cashback
                     val freeApplied = freeDiscount.signum() > 0
                     // Скидка комбо — фиксированная выгода набора (позиции в чеке реальные, цена полная).
-                    // Ваучер: применяется только с резервом и, если не stackable, без подарка.
-                    val chosenVoucher = info.vouchers.firstOrNull { it.id == CheckoutChoice.voucherId(applicationContext) }
-                    val voucherAllowed = reserved && VoucherCalc.allowedTogether(chosenVoucher, freeChosen && freeApplied)
-                    val voucherDiscount = if (voucherAllowed) {
-                        VoucherCalc.discount(gross.subtract(calc.free), chosenVoucher)
-                    } else BigDecimal.ZERO
                     val comboRub = CheckoutChoice.comboRub(applicationContext)
-                    val total = calc.total.add(voucherDiscount).add(comboRub).min(gross)
-                    val cbKopecks = cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong()
+                    val total = calc.total.add(comboRub).min(gross)
+                    val cbKopecks = DiscountCalc.kopecks(cbRub)
+                    val voucherApplied = calc.voucher.signum() > 0
                     logDiscount(
                         reserved = reserved,
                         freeChosen = freeChosen,
@@ -88,7 +92,8 @@ class DiscountIntegrationService : IntegrationService() {
                     Log.i(
                         "DiscountIntegration",
                         "extras_written v=2 hasOp=${info.reservationId != null} free=${if (freeApplied) 1 else 0} " +
-                            "cb=$cbKopecks voucher=${if (voucherAllowed) chosenVoucher?.id ?: 0 else 0}",
+                            "cb=$cbKopecks voucher=${if (voucherApplied) chosenVoucher?.id else 0} " +
+                            "voucherRub=${calc.voucher.toPlainString()}",
                     )
                     callback.onResult(
                         ReceiptDiscountEventResult(
@@ -99,7 +104,7 @@ class DiscountIntegrationService : IntegrationService() {
                                 freeApplied,
                                 cbKopecks,
                                 QueueNumberStore.peek(applicationContext),
-                                voucherId = if (voucherAllowed) chosenVoucher?.id else null,
+                                voucherId = if (voucherApplied) chosenVoucher?.id else null,
                             ),
                         ),
                             emptyList(),

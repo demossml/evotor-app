@@ -16,6 +16,7 @@ import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.VoucherCalc
 import java.util.UUID
 
 /**
@@ -41,7 +42,7 @@ object SellLauncher {
         freeApplied: Boolean,
         spendCashback: Boolean,
         cashbackKopecks: Long,
-        voucherId: Int = 0,
+        voucherId: Int? = null,
         onDone: (Outcome) -> Unit,
     ) {
         val lines = Cart.all()
@@ -92,6 +93,7 @@ object SellLauncher {
                 return
             }
             val card = CardSession.get(activity)
+            // Решение кассира фиксируем до открытия чека: модель сама снимает «ваучер + кэшбэк».
             CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks, voucherId)
             // Единый контракт extras: { appId: { sc: {v:2,c,op,free,cb,ts,kind} } } + плоский sc.
             var extrasFree = 0
@@ -99,18 +101,28 @@ object SellLauncher {
             var extrasHasOp = false
             var extrasVoucher = 0
             val setExtra = if (card != null && card.code.isNotEmpty()) {
+                val reserved = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
+                val eligible = Cart.giftEligibleLines().map { it.priceRub }
+                val voucher = card.vouchers.firstOrNull { it.id == voucherId }
                 val calc = DiscountCalc.compute(
-                    Cart.gross(), Cart.giftEligibleLines().map { it.priceRub },
-                    DiscountCalc.reserved(card, System.currentTimeMillis() / 1000), freeApplied, card.freeAvailable,
+                    Cart.gross(), eligible, reserved, freeApplied, card.freeAvailable,
                     if (spendCashback) cashbackKopecks else 0L, card.cashbackKopecks,
+                    voucher = voucher,
+                    voucherAllowed = VoucherCalc.allowedTogether(
+                        voucher,
+                        DiscountCalc.freeApplies(reserved, freeApplied, card.freeAvailable, eligible),
+                    ),
                 )
                 extrasFree = if (calc.free.signum() > 0) 1 else 0
                 extrasCb = DiscountCalc.kopecks(calc.cashback)
                 extrasHasOp = card.reservationId != null
-                // Ваучер пишется только при резерве и совместимости с подарком.
-                val voucher = card.vouchers.firstOrNull { it.id == voucherId }
-                val voucherOk = calc.free.signum() <= 0 || voucher?.stackableWithFreeCup != false
-                extrasVoucher = if (card.reservationId != null && voucher != null && voucherOk) voucher.id else 0
+                // Ваучер уходит только если он реально даёт скидку (резерв есть, stackable соблюдён).
+                extrasVoucher = if (calc.voucher.signum() > 0) voucher?.id ?: 0 else 0
+                Log.i(
+                    "SellLauncher",
+                    "receipt_discount free=${extrasFree} cb=$extrasCb voucher=$extrasVoucher " +
+                        "voucherRub=${calc.voucher.toPlainString()} total=${calc.total.toPlainString()}",
+                )
                 SetExtra(CardSession.extras(card, extrasFree > 0, extrasCb, voucherId = extrasVoucher.takeIf { it > 0 }))
             } else null
 

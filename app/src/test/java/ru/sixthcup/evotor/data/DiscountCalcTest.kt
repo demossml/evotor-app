@@ -30,4 +30,68 @@ class DiscountCalcTest {
     }
 
     @Test fun kopecksHelper() { assertEquals(3050L, DiscountCalc.kopecks(d("30.50"))) }
+
+    // ── Ваучер: percent от остатка, fixed в копейках, и «ваучер ИЛИ кэшбэк» ──────────────────
+
+    private val percent15 = ResolveVoucher(id = 12, title = "Скидка 15%", kind = "percent", value = 15)
+    private val fixed300Rub = ResolveVoucher(id = 13, title = "Скидка 300 ₽", kind = "fixed", value = 30000)
+
+    @Test fun voucherPercentFromGrossWhenNoGift() {
+        val r = DiscountCalc.compute(d("400"), emptyList(), true, false, 0, 0L, 0L, voucher = percent15)
+        assertEquals(d("60.00"), r.voucher)
+        // total — сумма скидки, а не сумма к оплате: так его читает ReceiptDiscountEventResult.
+        assertEquals(d("60.00"), r.total)
+    }
+
+    @Test fun voucherPercentFromRemainderAfterGift() {
+        val r = DiscountCalc.compute(d("400"), listOf(d("200")), true, true, 1, 0L, 0L, voucher = percent15)
+        assertEquals(d("200.00"), r.free)
+        assertEquals(d("30.00"), r.voucher)
+        assertEquals(d("230.00"), r.total)
+    }
+
+    @Test fun voucherFixedInKopecksCoversWholeReceipt() {
+        val r = DiscountCalc.compute(d("300"), emptyList(), true, false, 0, 0L, 0L, voucher = fixed300Rub)
+        assertEquals(d("300.00"), r.voucher)
+        assertEquals(d("300.00"), r.total)
+    }
+
+    @Test fun voucherFixedCappedByRemainder() {
+        val r = DiscountCalc.compute(d("120"), emptyList(), true, false, 0, 0L, 0L, voucher = fixed300Rub)
+        assertEquals(d("120.00"), r.voucher)
+        assertEquals(d("120.00"), r.total)
+        assertEquals(true, r.total.signum() >= 0)
+    }
+
+    @Test fun voucherAndCashbackNeverAddUp() {
+        val r = DiscountCalc.compute(d("400"), emptyList(), true, false, 0, 9999L, 9999L, voucher = percent15)
+        assertEquals(d("60.00"), r.voucher)
+        assertEquals(0, r.cashback.signum())
+        assertEquals(d("60.00"), r.total)
+        assertEquals(true, r.total <= d("400"))
+    }
+
+    @Test fun nonStackableVoucherBlockedByGift() {
+        val strict = ResolveVoucher(id = 14, title = "Строгий", kind = "percent", value = 15, stackableWithFreeCup = false)
+        val r = DiscountCalc.compute(
+            d("400"), listOf(d("200")), true, true, 1, 0L, 0L,
+            voucher = strict, voucherAllowed = VoucherCalc.allowedTogether(strict, true),
+        )
+        assertEquals(0, r.voucher.signum())
+        assertEquals(d("200.00"), r.free)
+        assertEquals(d("200.00"), r.total)
+    }
+
+    @Test fun voucherNeedsReservation() {
+        val r = DiscountCalc.compute(d("400"), emptyList(), false, false, 0, 0L, 0L, voucher = percent15)
+        assertEquals(0, r.voucher.signum())
+        assertEquals(0, r.total.signum())
+    }
+
+    @Test fun totalNeverExceedsGrossOrGoesNegative() {
+        val big = ResolveVoucher(id = 15, title = "Гигант", kind = "fixed", value = 999999)
+        val r = DiscountCalc.compute(d("100"), listOf(d("100")), true, true, 1, 9999L, 9999L, voucher = big)
+        assertEquals(0, r.total.compareTo(d("100")))
+        assertEquals(true, r.total.signum() >= 0)
+    }
 }

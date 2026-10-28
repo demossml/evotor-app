@@ -184,4 +184,64 @@ class CardSessionExtrasTest {
         assertFalse(sc.has("ord"))
         assertFalse(sc.has("qn"))
     }
+
+    // ── voucherId: аддитивное поле, только QR + резерв ──────────────────────────────────────
+
+    @Test
+    fun `voucher id goes into sc only with a live qr reservation`() {
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "0012", reservationId = "R-1"),
+            freeApplied = false, cashbackKopecks = 0, voucherId = 12,
+        )
+        assertEquals(12, sc.getInt("voucherId"))
+        assertEquals("R-1", sc.getString("op"))
+    }
+
+    @Test
+    fun `voucher id is dropped without a reservation`() {
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "", reservationId = null),
+            freeApplied = false, cashbackKopecks = 0, voucherId = 12,
+        )
+        assertFalse(sc.has("voucherId"))
+    }
+
+    @Test
+    fun `voucher id is never sent with a manual numeric code`() {
+        val sc = CardSession.sc(card(code = "000 12", cardCode = "12"), freeApplied = false, cashbackKopecks = 0, voucherId = 12)
+        assertEquals("code", sc.getString("kind"))
+        assertFalse(sc.has("voucherId"))
+        assertEquals(0, sc.getInt("free"))
+        assertEquals(0L, sc.getLong("cb"))
+    }
+
+    @Test
+    fun `no voucher id key when no voucher was chosen`() {
+        val sc = CardSession.sc(card(), freeApplied = true, cashbackKopecks = 500)
+        assertFalse(sc.has("voucherId"))
+    }
+
+    @Test
+    fun `voucher and cashback never travel together in sc`() {
+        // Модель состояния уже не даёт выбрать оба: ваучер обнуляет кэшбэк.
+        val choice = Choice.normalize(free = false, cashback = true, cashbackKopecks = 5000L, voucherId = 12)
+        val sc = CardSession.sc(
+            card(code = "payload.signature", cardCode = "0012", reservationId = "R-1"), freeApplied = false,
+            cashbackKopecks = choice.cashbackKopecks, voucherId = choice.voucherId,
+        )
+        assertEquals(12, sc.getInt("voucherId"))
+        assertEquals(0L, sc.getLong("cb"))
+    }
+
+    @Test
+    fun `voucher id is identical in flat and nested sc`() {
+        val extras = CardSession.extras(
+            card(code = "payload.signature", cardCode = "0012", reservationId = "R-1"),
+            freeApplied = false, cashbackKopecks = 0, voucherId = 7,
+        )
+        val flat = extras.getJSONObject("sc")
+        val nested = extras.getJSONObject(BuildConfig.APP_UUID).getJSONObject("sc")
+        assertEquals(7, flat.getInt("voucherId"))
+        assertEquals(flat.toString(), nested.toString())
+    }
 }
