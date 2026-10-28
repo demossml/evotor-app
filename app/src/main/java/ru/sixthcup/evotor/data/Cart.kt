@@ -143,6 +143,23 @@ object Cart {
         save()
     }
 
+    /**
+     * Обновить «можно в подарок» по свежему каталогу: флаг мог измениться в админке,
+     * а в строке корзины он замер на момент добавления.
+     */
+    fun applyEligibility(byProductUuid: Map<String, Boolean>) {
+        if (byProductUuid.isEmpty()) return
+        var changed = false
+        for ((key, line) in lines.entries.toList()) {
+            val actual = byProductUuid[line.productUuid] ?: continue
+            if (line.freeEligible != actual) {
+                lines[key] = line.copy(freeEligible = actual)
+                changed = true
+            }
+        }
+        if (changed) save()
+    }
+
     /** Remove a specific cart line. Legacy callers may still pass a product UUID. */
     fun remove(cartKeyOrProductUuid: String) {
         if (lines.remove(cartKeyOrProductUuid) == null) {

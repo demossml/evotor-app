@@ -41,6 +41,7 @@ object SellLauncher {
         freeApplied: Boolean,
         spendCashback: Boolean,
         cashbackKopecks: Long,
+        voucherId: Int = 0,
         onDone: (Outcome) -> Unit,
     ) {
         val lines = Cart.all()
@@ -91,11 +92,12 @@ object SellLauncher {
                 return
             }
             val card = CardSession.get(activity)
-            CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks)
+            CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks, voucherId)
             // Единый контракт extras: { appId: { sc: {v:2,c,op,free,cb,ts,kind} } } + плоский sc.
             var extrasFree = 0
             var extrasCb = 0L
             var extrasHasOp = false
+            var extrasVoucher = 0
             val setExtra = if (card != null && card.code.isNotEmpty()) {
                 val calc = DiscountCalc.compute(
                     Cart.gross(), Cart.all().filter { it.freeEligible }.map { it.priceRub },
@@ -105,7 +107,11 @@ object SellLauncher {
                 extrasFree = if (calc.free.signum() > 0) 1 else 0
                 extrasCb = DiscountCalc.kopecks(calc.cashback)
                 extrasHasOp = card.reservationId != null
-                SetExtra(CardSession.extras(card, extrasFree > 0, extrasCb))
+                // Ваучер пишется только при резерве и совместимости с подарком.
+                val voucher = card.vouchers.firstOrNull { it.id == voucherId }
+                val voucherOk = calc.free.signum() <= 0 || voucher?.stackableWithFreeCup != false
+                extrasVoucher = if (card.reservationId != null && voucher != null && voucherOk) voucher.id else 0
+                SetExtra(CardSession.extras(card, extrasFree > 0, extrasCb, voucherId = extrasVoucher.takeIf { it > 0 }))
             } else null
 
             val positionsTotal = Cart.all().sumOf { line -> line.lineTotal() }
@@ -132,7 +138,7 @@ object SellLauncher {
                             if (setExtra != null) {
                                 Log.i(
                                     "SellLauncher",
-                                    "extras_written v=2 hasOp=$extrasHasOp free=$extrasFree cb=$extrasCb",
+                                    "extras_written v=2 hasOp=$extrasHasOp free=$extrasFree cb=$extrasCb voucher=$extrasVoucher",
                                 )
                             }
                             onDone(Outcome(true, "Чек открыт", missing > 0))

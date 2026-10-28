@@ -20,6 +20,7 @@ import ru.sixthcup.evotor.data.SalePrintLoyalty
 import ru.sixthcup.evotor.data.SalePrintStore
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardProgress
+import ru.sixthcup.evotor.data.VoucherCalc
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -57,39 +58,101 @@ class DiscountIntegrationService : IntegrationService() {
                     // Free cup: the cheapest single unit on the receipt (the backend still re-checks it).
                     val eligibleUnitPrices = Cart.all().filter { it.freeEligible }.map { it.priceRub }
                     val requestedCb = if (CheckoutChoice.cashback(applicationContext)) CheckoutChoice.cashbackKopecks(applicationContext) else 0L
-                    val calc = DiscountCalc.compute(gross, eligibleUnitPrices, reserved, CheckoutChoice.free(applicationContext), info.freeAvailable, requestedCb, info.cashbackKopecks)
+                    val freeChosen = CheckoutChoice.free(applicationContext)
+                    val calc = DiscountCalc.compute(gross, eligibleUnitPrices, reserved, freeChosen, info.freeAvailable, requestedCb, info.cashbackKopecks)
                     val freeDiscount = calc.free
                     val cbRub = calc.cashback
-                    // Скидка комбо — фиксированная выгода набора (позиции в чеке реальные, цена полная).
-                    val comboRub = CheckoutChoice.comboRub(applicationContext)
-                    val total = calc.total.add(comboRub).min(gross)
-                    val cbKopecks = cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong()
                     val freeApplied = freeDiscount.signum() > 0
+                    // Скидка комбо — фиксированная выгода набора (позиции в чеке реальные, цена полная).
+                    // Ваучер: применяется только с резервом и, если не stackable, без подарка.
+                    val chosenVoucher = info.vouchers.firstOrNull { it.id == CheckoutChoice.voucherId(applicationContext) }
+                    val voucherAllowed = reserved && VoucherCalc.allowedTogether(chosenVoucher, freeChosen && freeApplied)
+                    val voucherDiscount = if (voucherAllowed) {
+                        VoucherCalc.discount(gross.subtract(calc.free), chosenVoucher)
+                    } else BigDecimal.ZERO
+                    val comboRub = CheckoutChoice.comboRub(applicationContext)
+                    val total = calc.total.add(voucherDiscount).add(comboRub).min(gross)
+                    val cbKopecks = cbRub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong()
+                    logDiscount(
+                        reserved = reserved,
+                        freeChosen = freeChosen,
+                        freeAvail = info.freeAvailable,
+                        eligibleCount = eligibleUnitPrices.size,
+                        freeRub = freeDiscount,
+                        cbRub = cbRub,
+                        hasOp = info.reservationId != null,
+                    )
                     // Снимок для печати: PrintExtra сработает после оплаты, спросить сервер будет нельзя.
                     savePrintSnapshot(info, freeApplied, cbKopecks)
                     Log.i(
                         "DiscountIntegration",
-                        "extras_written v=2 hasOp=${info.reservationId != null} free=${if (freeApplied) 1 else 0} cb=$cbKopecks",
+                        "extras_written v=2 hasOp=${info.reservationId != null} free=${if (freeApplied) 1 else 0} " +
+                            "cb=$cbKopecks voucher=${if (voucherAllowed) chosenVoucher?.id ?: 0 else 0}",
                     )
                     callback.onResult(
                         ReceiptDiscountEventResult(
                             total,
-                            SetExtra(CardSession.extras(info, freeApplied, cbKopecks, QueueNumberStore.peek(applicationContext))),
+                            SetExtra(
+                            CardSession.extras(
+                                info,
+                                freeApplied,
+                                cbKopecks,
+                                QueueNumberStore.peek(applicationContext),
+                                voucherId = if (voucherAllowed) chosenVoucher?.id else null,
+                            ),
+                        ),
                             emptyList(),
                             null,
                         ),
                     )
                 } catch (_: Throwable) {
                     try { callback.skip() } catch (_: Exception) {}
-                } finally {
-                    CheckoutChoice.clear(applicationContext)
                 }
+                // ВАЖНО: CheckoutChoice здесь НЕ чистим. Эвотор может пересчитать чек несколько раз
+                // (добавили позицию, сменили оплату) — очистка здесь отнимала уже применённый подарок.
+                // Выбор живёт до конца чека: чистится при подтверждении оплаты или отмене.
             }
         }
         return map
     }
 
     /** (unit price, line total) for every position of the open sell receipt. */
+    /**
+     * Диагностика: почему скидка применена или не применена. По этим строкам на терминале
+     * видно причину без разбора кода.
+     */
+    private fun logDiscount(
+        reserved: Boolean,
+        freeChosen: Boolean,
+        freeAvail: Int,
+        eligibleCount: Int,
+        freeRub: BigDecimal,
+        cbRub: BigDecimal,
+        hasOp: Boolean,
+    ) {
+        if (freeRub.signum() > 0 || cbRub.signum() > 0) {
+            Log.i(
+                "DiscountIntegration",
+                "loyalty_discount reserved=$reserved freeChosen=$freeChosen freeAvail=$freeAvail " +
+                    "eligibleCount=$eligibleCount freeRub=${freeRub.toPlainString()} cbRub=${cbRub.toPlainString()} " +
+                    "op=${if (hasOp) "yes" else "no"}",
+            )
+            return
+        }
+        val reason = when {
+            !reserved -> "no_reservation"
+            freeChosen && eligibleCount == 0 -> "no_eligible"
+            freeChosen && freeAvail <= 0 -> "no_free_available"
+            !freeChosen -> "not_chosen"
+            else -> "no_benefit"
+        }
+        Log.i(
+            "DiscountIntegration",
+            "loyalty_discount_skip reason=$reason reserved=$reserved freeChosen=$freeChosen " +
+                "freeAvail=$freeAvail eligibleCount=$eligibleCount op=${if (hasOp) "yes" else "no"}",
+        )
+    }
+
     /** Что напечатать про лояльность на этом чеке. Персональных данных нет. */
     private fun savePrintSnapshot(info: CardInfo?, freeApplied: Boolean, cbKopecks: Long) {
         try {

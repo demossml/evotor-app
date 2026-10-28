@@ -280,7 +280,14 @@ object CatalogApi {
                 toppings = tops,
                 upsell = e?.upsell?.ifEmpty { p.upsell } ?: p.upsell,
                 countsAsCupServer = e?.countsAsCup,
-                freeEligible = e?.freeEligible ?: p.freeEligible,
+                // Приоритет серверу: freeEligible — прямой флаг «можно в подарок».
+                // Если сервер прислал только countsAsCup, берём его (напиток, не еда).
+                // Эвристика FreeCupRules остаётся только когда сервер молчит.
+                freeEligible = when {
+                    e?.freeEligible != null -> e.freeEligible
+                    e?.countsAsCup != null && e.isFood != true -> e.countsAsCup
+                    else -> p.freeEligible
+                },
                 // Если в Эвотор товар без parent-группы — подставляем категорию 6.7.
                 groupName = p.groupName?.takeIf { it.isNotBlank() } ?: e?.categoryName,
                 isFood = if (e != null) FoodRules.isFood(p.name, p.groupName, e.categoryName, e.description ?: p.description, e.isFood) else p.isFood,

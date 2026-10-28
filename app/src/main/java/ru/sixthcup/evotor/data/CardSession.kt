@@ -32,6 +32,8 @@ data class CardInfo(
     val paidTotal: Int? = null,
     /** Сколько подарков уже использовано (`freeUsed`/`free_used`), если сервер отдал. */
     val freeUsed: Int? = null,
+    /** Ваучеры гостя из resolve. Пусто — backend ещё не отдаёт поле, касса работает как раньше. */
+    val vouchers: List<ResolveVoucher> = emptyList(),
 )
 
 object CardSession {
@@ -51,6 +53,7 @@ object CardSession {
             .put("seq", info.seq ?: JSONObject.NULL)
             .put("paidTotal", info.paidTotal ?: JSONObject.NULL)
             .put("freeUsed", info.freeUsed ?: JSONObject.NULL)
+            .put("vouchers", VoucherJson.toJson(info.vouchers))
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
             .putString(KEY, o.toString()).putLong(KEY_AT, System.currentTimeMillis()).apply()
     }
@@ -70,6 +73,7 @@ object CardSession {
                 seq = if (o.isNull("seq")) null else o.optInt("seq").takeIf { it > 0 },
                 paidTotal = if (!o.has("paidTotal") || o.isNull("paidTotal")) null else o.optInt("paidTotal"),
                 freeUsed = if (!o.has("freeUsed") || o.isNull("freeUsed")) null else o.optInt("freeUsed"),
+                vouchers = VoucherJson.parse(o.optJSONArray("vouchers")),
             )
         } catch (_: Throwable) { clear(ctx); null }
     }
@@ -121,8 +125,9 @@ object CardSession {
         freeApplied: Boolean,
         cashbackKopecks: Long,
         queue: QueueNumber? = null,
+        voucherId: Int? = null,
     ): JSONObject {
-        val sc = sc(info, freeApplied, cashbackKopecks, queue)
+        val sc = sc(info, freeApplied, cashbackKopecks, queue, voucherId)
         // Плоский ключ нужен текущему парсеру: если appId не совпал с EVOTOR_APP_ID на backend,
         // льгота не потеряется. Оба значения одинаковые — двойного списания нет.
         return JSONObject()
@@ -137,6 +142,8 @@ object CardSession {
         cashbackKopecks: Long,
         /** Публичный номер заказа: связывает чек с записью queue_numbers (см. QueueNumber). */
         queue: QueueNumber? = null,
+        /** Выбранный ваучер; пишется только при живом резерве — как и остальные льготы. */
+        voucherId: Int? = null,
     ): JSONObject {
         val c = scValue(info)
         // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
@@ -148,6 +155,7 @@ object CardSession {
             .put("ts", System.currentTimeMillis())
             .put("kind", kindOf(c))
         if (reserved) o.put("op", info.reservationId)
+        if (reserved && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
         // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
         info.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
         o.put("free", if (reserved && freeApplied) 1 else 0)

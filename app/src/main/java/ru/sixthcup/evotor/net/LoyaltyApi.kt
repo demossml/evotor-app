@@ -4,6 +4,7 @@ import android.util.Log
 import org.json.JSONObject
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.CardInfo
+import ru.sixthcup.evotor.data.VoucherJson
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -69,6 +70,8 @@ object LoyaltyApi {
         seq = intOf(o, "seq")?.takeIf { it > 0 },
         paidTotal = intOf(o, "paidTotal", "paid_total")?.takeIf { it >= 0 },
         freeUsed = intOf(o, "freeUsed", "free_used")?.takeIf { it >= 0 },
+        // Отсутствие поля — не ошибка: старый backend просто не присылает ваучеры.
+        vouchers = VoucherJson.parse(o.optJSONArray("vouchers")),
     )
 
     private fun intOf(o: JSONObject, vararg keys: String): Int? {

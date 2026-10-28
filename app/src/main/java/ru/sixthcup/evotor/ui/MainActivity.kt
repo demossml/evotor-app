@@ -46,6 +46,8 @@ import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
+import ru.sixthcup.evotor.data.ResolveVoucher
+import ru.sixthcup.evotor.data.VoucherCalc
 import ru.sixthcup.evotor.data.CardRefresh
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
@@ -258,6 +260,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun setProducts(list: List<CatalogProduct>) {
         products = list
+        // Флаг «можно в подарок» мог измениться в админке — обновляем строки корзины.
+        Cart.applyEligibility(list.associate { it.uuid to it.freeEligible })
         variantModel = DrinkVariants.build(list)
         combos = Combos.from(list)
         // Диагностика витрины: сколько плиток, сколько строк присоединено к карточкам
@@ -945,6 +949,30 @@ class MainActivity : AppCompatActivity() {
         val ad = adapter ?: return
         val rows = computeRows()
         if (toTop) ad.submitList(rows) { recycler?.scrollToPosition(0) } else ad.submitList(rows)
+    }
+
+    /**
+     * Одна короткая фраза, объясняющая кассиру состояние льгот (блок C).
+     * Возвращает null, если объяснять нечего.
+     */
+    private fun loyaltyHint(card: CardInfo, progress: CardProgress): String? {
+        val reserved = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
+        val eligible = Cart.all().any { it.freeEligible }
+        return when {
+            card.freeStatus == "ALREADY_RESERVED" ->
+                "Подарок уже зарезервирован на другой кассе. Завершите там чек или подождите."
+            card.freeStatus == "OFFLINE" ->
+                "Нет связи: подарок и кэшбэк недоступны, чашки начислятся после чека."
+            progress.giftAvailable && !reserved && progress.kind == "code" ->
+                "Для списания подарка нужен QR клиента: по номеру карты подарок не списывается."
+            progress.giftAvailable && reserved && !eligible ->
+                "Нет подходящего напитка в чеке для подарка."
+            progress.giftAvailable && reserved && eligible ->
+                "Подарок доступен — примените в листе «Лояльность»."
+            progress.cashbackKnown && progress.cashbackKopecks > 0L && !reserved ->
+                "Кэшбэк спишется только по QR клиента."
+            else -> null
+        }
     }
 
     /**
@@ -2240,10 +2268,9 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(9), 0, 0)
         })
         box.addView(TextView(this).apply {
-            text = when {
+            text = loyaltyHint(card, progress) ?: when {
                 card.freeStatus == "OFFLINE" -> "Нет связи · бонусы недоступны"
                 progress.redeemEnabled -> "1 бесплатный напиток"
-                progress.giftAvailable && progress.kind == "code" -> "Списание — по QR-карте"
                 !progress.giftKnown -> "Бонусы и подарок — по QR-карте"
                 else -> "${progress.left} до подарка"
             }
@@ -2965,8 +2992,14 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        loyaltyHint(card, CardProgress.of(card))?.let {
+            box.addView(banner(it, Kind.INFO, 11f), LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
+        }
+
         var useGift = giftPossible
         var useCb = false
+        // Один ваучер — предвыбран (кассир может снять), несколько — выбирает кассир.
+        var selectedVoucher: ResolveVoucher? = card.vouchers.singleOrNull()
         fun block(title: String, first: String, firstSub: String?, second: String, secondSub: String?, firstOn: () -> Boolean, set: (Boolean) -> Unit) {
             val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             wrap.addView(TextView(this).apply {
@@ -2991,6 +3024,39 @@ class MainActivity : AppCompatActivity() {
             block("Кэшбэк", "Копить кэшбэк", null, "Списать кэшбэк", "до ${card.cashbackKopecks / 100} ₽", { !useCb }) { useCb = !it }
         }
 
+        if (card.vouchers.isNotEmpty()) {
+            val vWrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            vWrap.addView(TextView(this).apply {
+                text = "ВАУЧЕР"
+                textSize = 10f; letterSpacing = 0.11f; weight(Fonts.STRONG); setTextColor(UiKit.INK_2)
+                setPadding(0, dp(15), 0, dp(7))
+            })
+            val vCells = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            fun paintVouchers() {
+                vCells.removeAllViews()
+                vCells.addView(
+                    choiceCell("Без ваучера", null, selectedVoucher == null) { selectedVoucher = null; paintVouchers() },
+                    LinearLayout.LayoutParams(MATCH, WRAP),
+                )
+                for (v in card.vouchers) {
+                    val label = if (v.isPercent) "${v.title} (−${v.value}%)" else "${v.title} (−${v.value} ₽)"
+                    val blocked = !VoucherCalc.allowedTogether(v, useGift && giftPossible)
+                    vCells.addView(
+                        choiceCell(
+                            if (blocked) "$label · не суммируется с подарком" else label,
+                            null,
+                            !blocked && selectedVoucher?.id == v.id,
+                        ) { if (!blocked) { selectedVoucher = v; paintVouchers() } },
+                        LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) },
+                    )
+                }
+                Fonts.apply(vCells)
+            }
+            paintVouchers()
+            vWrap.addView(vCells)
+            box.addView(vWrap)
+        }
+
         box.addView(
             noteRow("Льготу применит Эвотор по резерву. Способ оплаты, сумму и чек считает POS."),
             LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },
@@ -3004,8 +3070,9 @@ class MainActivity : AppCompatActivity() {
         foot.addView(btn("В чек", "primary") {
             val free = useGift && giftPossible
             val spend = useCb && cbPossible
+            val voucher = selectedVoucher?.takeIf { VoucherCalc.allowedTogether(it, free) }
             dialog.dismiss()
-            sendReceipt(free, spend, if (spend) card.cashbackKopecks else 0L)
+            sendReceipt(free, spend, if (spend) card.cashbackKopecks else 0L, voucher?.id ?: 0)
         }, LinearLayout.LayoutParams(MATCH, dp(50)))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -3026,7 +3093,7 @@ class MainActivity : AppCompatActivity() {
      * Финальная проверка корзины по последнему каталогу и передача позиций Эвотору.
      * Платная добавка без evotorUuid / удалённый товар / изменившаяся схема — чек не открываем.
      */
-    private fun sendReceipt(free: Boolean, spend: Boolean, cashbackKopecks: Long) {
+    private fun sendReceipt(free: Boolean, spend: Boolean, cashbackKopecks: Long, voucherId: Int = 0) {
         if (sendingReceipt) return
         if (Cart.isEmpty()) {
             notice = "Корзина пуста — добавьте позиции."
@@ -3045,7 +3112,7 @@ class MainActivity : AppCompatActivity() {
         // Номер очереди обязан быть в хранилище ДО печати (PrintExtra срабатывает после оплаты).
         // Запрос синхронный с коротким таймаутом; ошибка/таймаут — чек печатается без номера.
         requestQueueNumberBlocking()
-        SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks) { outcome ->
+        SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks, voucherId) { outcome ->
             sendingReceipt = false
             if (outcome.ok) {
                 // Чек открыт, но оплата не подтверждена: заказ ждёт (PENDING), номер не тратится.
@@ -4448,6 +4515,8 @@ class MainActivity : AppCompatActivity() {
                     // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
                     val done = confirmPendingOrder()
                     Cart.clear()
+                    // Чек закрыт: выбор льгот больше не нужен (чистим здесь, а не в сервисе скидки).
+                    CheckoutChoice.clear(this)
                     PendingPayment.clear(this)
                     // Номер и состояние карты показываем сразу после оплаты (post-pay).
                     postPayOrder = done
@@ -4459,6 +4528,7 @@ class MainActivity : AppCompatActivity() {
                 true -> {
                     // Чек продажи ещё открыт — оплата отменена/не завершена, корзину оставляем.
                     cancelPendingOrder()
+                    CheckoutChoice.clear(this)
                     PendingPayment.clear(this)
                     screen = Screen.ORDER
                     safeRender()
