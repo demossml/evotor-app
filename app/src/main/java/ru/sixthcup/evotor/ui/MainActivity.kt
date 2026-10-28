@@ -3363,6 +3363,23 @@ class MainActivity : AppCompatActivity() {
         paintSummary()
         box.addView(summary, LinearLayout.LayoutParams(MATCH, WRAP))
 
+        // G05: «Изменить льготу» открывает тот же лист, что и сразу после привязки карты.
+        val change = TextView(this).apply {
+            text = "Изменить льготу"
+            textSize = 10.5f
+            weight(Fonts.SEMIBOLD)
+            setTextColor(BRAND)
+            setPadding(0, dp(4), 0, 0)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                dialog.dismiss()
+                benefitPrompted = false
+                maybePromptBenefit(card)
+            }
+        }
+        box.addView(change, LinearLayout.LayoutParams(WRAP, WRAP))
+
         box.addView(
             noteRow("Льготу применит Эвотор по резерву. Способ оплаты, сумму и чек считает POS."),
             LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) },
