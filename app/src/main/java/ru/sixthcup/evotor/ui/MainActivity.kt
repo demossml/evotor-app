@@ -2925,6 +2925,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Общая «шапка» листа: ручка 34×4, заголовок + подпись, ✕. */
+    /**
+     * Контент листа кладём в собственный скролл с весом 1: длинный список ваучеров
+     * и блоки льгот не выдавливают кнопку действия за пределы экрана.
+     */
+    private fun sheetScroll(host: LinearLayout, content: View): NestedScrollView =
+        NestedScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(content, ViewGroup.LayoutParams(MATCH, WRAP))
+            host.addView(this, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        }
+
     private fun sheetHead(root: LinearLayout, title: String, sub: String, onClose: () -> Unit): TextView {
         root.addView(View(this).apply {
             background = rounded(UiKit.LINE_STRONG, 2, null)
@@ -3035,7 +3047,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), dp(14))
         }
-        root.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
+        sheetScroll(root, box)
 
         var selectedVoucher: ResolveVoucher? = null
         var useGift = false
@@ -3092,7 +3104,7 @@ class MainActivity : AppCompatActivity() {
             // Модель сама снимет конфликтующие галочки: ваучер вытесняет подарок.
             saveChoice(useGift, false, 0L, selectedVoucher?.id)
             notice = null
-            safeRender()
+            // saveChoice сам обновляет бейджи и суммы; полная перерисовка сбросила бы скролл каталога.
         }, LinearLayout.LayoutParams(MATCH, dp(50)))
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -3100,6 +3112,8 @@ class MainActivity : AppCompatActivity() {
         dialog.setContentView(root)
         styleSheet(dialog)
         dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
     }
 
     /**
@@ -3139,7 +3153,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), dp(14))
         }
-        root.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
+        sheetScroll(root, box)
 
         val now = System.currentTimeMillis() / 1000
         val eligibleLines = Cart.giftEligibleLines()
@@ -3408,6 +3422,8 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnDismissListener { if (checkoutDialog === dialog) checkoutDialog = null }
         checkoutDialog = dialog
         dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
     }
