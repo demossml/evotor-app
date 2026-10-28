@@ -80,6 +80,7 @@ import ru.sixthcup.evotor.net.CatalogApi
 import ru.sixthcup.evotor.net.StoreUuidResolver
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
+import ru.sixthcup.evotor.scanner.ScannerHub
 import ru.sixthcup.evotor.scanner.ScannerReceiver
 import ru.sixthcup.evotor.sell.SellLauncher
 import ru.evotor.framework.receipt.Receipt
@@ -171,18 +172,37 @@ class MainActivity : AppCompatActivity() {
 
     private val scanReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val code = intent.getStringExtra(ScannerReceiver.EXTRA_CODE).orEmpty().trim()
-            if (code.isEmpty() || resolving) return
-            val active = CardSession.get(this@MainActivity)?.takeIf { it.code.isNotEmpty() }
-            if (screen == Screen.CARD || active == null) {
-                applyScan(code)
-            } else {
-                // Карта уже привязана: не заменяем молча и не показываем исчезающий Toast.
-                AlertDialog.Builder(this@MainActivity).setTitle("Заменить карту?")
-                    .setMessage("Сейчас выбрана карта ${active.cardCode.ifBlank { "по QR" }}. Отсканирована другая.")
-                    .setPositiveButton("Заменить") { _, _ -> CardSession.clear(this@MainActivity); applyScan(code) }
-                    .setNegativeButton("Оставить текущую", null).show()
+            // Accept both official ScannedCode and our internal forward.
+            val code = when (intent.action) {
+                ScannerReceiver.ACTION_SCANNED -> ScannerReceiver.extractCode(intent).orEmpty().trim()
+                else -> intent.getStringExtra(ScannerReceiver.EXTRA_CODE).orEmpty().trim()
+                    .ifEmpty { ScannerReceiver.extractCode(intent).orEmpty().trim() }
             }
+            if (code.isEmpty()) return
+            handleScannedCode(code)
+        }
+    }
+
+    /** Single entry for hardware scan: fill field + resolve (or queue if busy). */
+    private fun handleScannedCode(code: String) {
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) return
+        if (resolving) {
+            // Do not drop silently — apply when resolve finishes.
+            ScannerHub.offer(trimmed)
+            notice = "Скан сохранён, применяем после проверки карты…"
+            noticeKind = Kind.INFO
+            safeRender()
+            return
+        }
+        val active = CardSession.get(this)?.takeIf { it.code.isNotEmpty() }
+        if (screen == Screen.CARD || active == null) {
+            applyScan(trimmed)
+        } else {
+            AlertDialog.Builder(this).setTitle("Заменить карту?")
+                .setMessage("Сейчас выбрана карта ${active.cardCode.ifBlank { "по QR" }}. Отсканирована другая.")
+                .setPositiveButton("Заменить") { _, _ -> CardSession.clear(this@MainActivity); applyScan(trimmed) }
+                .setNegativeButton("Оставить текущую", null).show()
         }
     }
 
@@ -651,6 +671,8 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 resolving = false
+                // Apply barcode that arrived while resolve was in flight.
+                val pendingScan = ScannerHub.poll()
                 if (info.code.isNotEmpty()) {
                     CardSession.set(this, info)
                     Log.i(TAG, "card_resolved kind=${CardSession.kindOf(code)} free=${info.freeAvailable} cb=${info.cashbackKopecks} reserved=${info.reservationId != null}")
@@ -682,6 +704,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 safeRender()
+                if (!pendingScan.isNullOrBlank() && !resolving) {
+                    handleScannedCode(pendingScan)
+                }
             }
         }
     }
@@ -4579,7 +4604,16 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         if (::root.isInitialized) loadShiftInfo()
         startCardPoll()
-        try { val f = IntentFilter(ScannerReceiver.ACTION_INTERNAL_SCAN); if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED) else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f) } catch (_: Throwable) {}
+        try {
+            val f = IntentFilter().apply {
+                addAction(ScannerReceiver.ACTION_INTERNAL_SCAN)
+                addAction(ScannerReceiver.ACTION_SCANNED) // official Evotor barcode broadcast
+            }
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED)
+            else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f)
+        } catch (_: Throwable) {}
+        // Drain scan that arrived while we were paused / before register.
+        ScannerHub.poll()?.let { code -> handler.post { if (!isFinishing && !isDestroyed) handleScannedCode(code) } }
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
         if (::root.isInitialized && PendingPayment.active(this)) {
             // Вернулись с экрана оплаты Эвотор.
