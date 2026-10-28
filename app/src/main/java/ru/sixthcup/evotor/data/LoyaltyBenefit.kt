@@ -80,12 +80,18 @@ object LoyaltyPreview {
                 DiscountCalc.freeApplies(reserved, choice.free, card.freeAvailable, eligible),
             ),
         )
-        // Итог берём из breakdown: там же фискальный пол 1 ₽, который увидит ККТ.
-        val bd = DiscountCalc.breakdown(gross, eligible, card, choice, nowSec)
-        val total = BigDecimal(bd.discountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
-        val payable = BigDecimal(bd.netKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
+        // Итог — из того же расклада, что уходит в позиции и в скидку на чек: цифры не разойдутся.
+        val bd = FiscalCalc.split(gross, eligible, card, choice, nowSec)
+        val total = BigDecimal(bd.totalDiscountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
+        val payable = BigDecimal(DiscountCalc.kopecks(gross) - bd.totalDiscountKopecks)
+            .coerceAtLeast(BigDecimal.ZERO)
+            .divide(BigDecimal(100), 2, RoundingMode.DOWN)
+        // Подарок реально даёт скидку «цена − 1 ₽»: единица остаётся в чеке за рубль.
+        val giftRub = if (calc.free.signum() > 0) {
+            calc.free.subtract(FiscalCalc.GIFT_FISCAL_MIN).max(BigDecimal.ZERO).setScale(2, RoundingMode.DOWN)
+        } else BigDecimal.ZERO
         return Benefits(
-            free = calc.free,
+            free = giftRub,
             voucher = calc.voucher,
             cashback = calc.cashback,
             total = total,

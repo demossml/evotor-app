@@ -14,6 +14,7 @@ import ru.evotor.framework.receipt.ReceiptApi
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.Choice
+import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.QueueNumberStore
@@ -89,7 +90,6 @@ class DiscountIntegrationService : IntegrationService() {
                             DiscountCalc.freeApplies(reserved, choice.free, info.freeAvailable, eligibleUnitPrices),
                         ),
                     )
-                    val breakdown = DiscountCalc.breakdown(gross, eligibleUnitPrices, info, choice, now)
                     val freeDiscount = calc.free
                     val cbRub = calc.cashback
                     val freeApplied = freeDiscount.signum() > 0
@@ -98,11 +98,11 @@ class DiscountIntegrationService : IntegrationService() {
                     val comboRub = CheckoutChoice.comboRub(applicationContext)
                     val grossKopecks = DiscountCalc.kopecks(gross)
                     val comboKopecks = DiscountCalc.kopecks(comboRub)
-                    var discountKopecks = (breakdown.discountKopecks + comboKopecks).coerceAtMost(grossKopecks)
-                    val floorNeeded = (breakdown.giftApplied || breakdown.voucherId != null) &&
-                        grossKopecks >= DiscountCalc.GIFT_FISCAL_MIN_KOPECKS &&
-                        grossKopecks - discountKopecks < DiscountCalc.GIFT_FISCAL_MIN_KOPECKS
-                    if (floorNeeded) discountKopecks = grossKopecks - DiscountCalc.GIFT_FISCAL_MIN_KOPECKS
+                    // Подарок и ваучер уже сидят в ценах позиций (SellLauncher.setPriceWithDiscountPosition).
+                    // На чек оставляем только кэшбэк и комбо: иначе скидка удвоится.
+                    val split = FiscalCalc.split(gross, eligibleUnitPrices, info, choice, now)
+                    var discountKopecks = (split.receiptDiscountKopecks + comboKopecks).coerceAtMost(grossKopecks)
+                    val floorNeeded = false
                     val total = BigDecimal(discountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
                     val cbKopecks = DiscountCalc.kopecks(cbRub)
                     val voucherApplied = calc.voucher.signum() > 0
@@ -123,8 +123,9 @@ class DiscountIntegrationService : IntegrationService() {
                     Log.i(
                         "DiscountIntegration",
                         "fiscal_discount gross=$grossKopecks discount=$discountKopecks " +
-                            "net=${grossKopecks - discountKopecks} gift=$freeApplied voucher=${breakdown.voucherId ?: 0} " +
-                            "floor=$floorNeeded receiptPositions=${prices.size}",
+                            "net=${grossKopecks - discountKopecks} gift=$freeApplied voucher=${split.voucherId ?: 0} " +
+                            "on_positions=${split.positionDiscountKopecks} receiptPositions=${prices.size} " +
+                            "reason=already_on_positions",
                     )
                     Log.i(
                         "DiscountIntegration",

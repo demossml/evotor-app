@@ -15,7 +15,11 @@ import ru.evotor.framework.receipt.Position
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CheckoutChoice
+import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.FiscalCalc
+import ru.sixthcup.evotor.data.FiscalLines
+import java.math.BigDecimal
 import ru.sixthcup.evotor.data.VoucherCalc
 import java.util.UUID
 
@@ -51,10 +55,24 @@ object SellLauncher {
             return
         }
         try {
-            val positionAdds = ArrayList<PositionAdd>(lines.size)
+            val positionAdds = ArrayList<PositionAdd>(lines.size + 2)
             var skippedSynthetic = 0
             var missing = 0
-            for (line in lines) {
+            // Льгота уходит в чек ценами позиций: receiptDiscount срабатывает не на всех прошивках.
+            val split = FiscalCalc.split(
+                Cart.gross(), Cart.giftEligibleLines().map { it.priceRub },
+                CardSession.get(activity), Choice.normalize(freeApplied, spendCashback, cashbackKopecks, voucherId),
+                System.currentTimeMillis() / 1000,
+            )
+            val fiscalLines = FiscalLines.build(lines, split)
+            if (split.positionDiscountKopecks > 0) {
+                Log.i(
+                    "SellLauncher",
+                    "fiscal_positions discount=${split.positionDiscountKopecks} gift=${split.giftApplied} " +
+                        "voucher=${split.voucherId ?: 0} floor=${split.floorApplied} lines=${fiscalLines.size}",
+                )
+            }
+            for (line in fiscalLines) {
                 // Синтетические uuid добавок (mod:…) и пустой uuid не существуют в номенклатуре Эвотор —
                 // не кладём «ручную» позицию без НДС/типа (фискальный риск).
                 if (!Cart.isSellable(line.productUuid) || line.productUuid.isBlank()) {
@@ -69,17 +87,28 @@ object SellLauncher {
                 }
                 // Цена в чеке — цена терминала. Расхождение с каталогом только логируем (п.4 контракта).
                 val terminalPrice = item?.price
-                if (terminalPrice != null && terminalPrice.compareTo(line.priceRub) != 0) {
+                if (terminalPrice != null && terminalPrice.compareTo(line.unitPrice) != 0) {
                     Log.w(
                         "SellLauncher",
-                        "price_mismatch product=${line.productUuid} catalog=${line.priceRub.toPlainString()} terminal=${terminalPrice.toPlainString()}",
+                        "price_mismatch product=${line.productUuid} catalog=${line.unitPrice.toPlainString()} terminal=${terminalPrice.toPlainString()}",
                     )
                 }
-                val price = terminalPrice ?: line.priceRub
+                val price = terminalPrice ?: line.unitPrice
                 val builder = if (item != null) {
                     Position.Builder.newInstance(item, line.quantity).setPrice(price)
                 } else {
                     Position.Builder.newInstance(UUID.randomUUID().toString(), line.productUuid, line.name, Measure("шт", 0, 0), price, line.quantity)
+                }
+                // Цена со скидкой — только когда она реально ниже; 0 ₽ не бывает (пол 1 ₽ в FiscalCalc).
+                line.unitPriceWithDiscount?.let { discounted ->
+                    if (discounted > BigDecimal.ZERO && discounted < price) {
+                        builder.setPriceWithDiscountPosition(discounted)
+                        Log.i(
+                            "SellLauncher",
+                            "fiscal_pos product=${line.productUuid} price=${price.toPlainString()} " +
+                                "withDiscount=${discounted.toPlainString()} qty=${line.quantity.toPlainString()}",
+                        )
+                    }
                 }
                 positionAdds.add(PositionAdd(builder.build()))
             }

@@ -42,11 +42,13 @@ class LoyaltyBenefitTest {
 
     @Test
     fun `gift preview equals the discount integration`() {
+        // Подарок: единица уходит в чек за 1 ₽, значит скидка = 180 − 1 = 179.
         val b = LoyaltyPreview.of(card(), choice(free = true), d("400"), listOf(d("180")), now)
-        assertEquals(d("180.00"), b.free)
-        assertEquals(d("180.00"), b.total)
-        assertEquals(d("220.00"), b.payable)
+        assertEquals(d("179.00"), b.free)
+        assertEquals(d("179.00"), b.total)
+        assertEquals(d("221.00"), b.payable)
         assertTrue(b.hasGift)
+        assertTrue(b.floorApplied)
     }
 
     @Test
@@ -110,7 +112,7 @@ class LoyaltyBenefitTest {
     fun `short label lists every applied benefit`() {
         val b = LoyaltyPreview.of(card(), choice(free = true, cashback = true, kopecks = 5000L), d("400"), listOf(d("180")), now)
         val label = b.shortLabel() ?: ""
-        assertTrue(label.contains("подарок −180"))
+        assertTrue(label.contains("подарок −179"))
         assertTrue(label.contains("кэшбэк"))
     }
 
