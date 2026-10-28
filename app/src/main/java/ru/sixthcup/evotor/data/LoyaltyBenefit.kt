@@ -13,9 +13,12 @@ data class Benefits(
     val free: BigDecimal,
     val voucher: BigDecimal,
     val cashback: BigDecimal,
+    /** Скидка, которая уйдёт в фискальный чек (совпадает с `PayBreakdown.discountKopecks`). */
     val total: BigDecimal,
     val payable: BigDecimal,
     val voucherTitle: String?,
+    /** Сработал фискальный пол 1 ₽: чек не может стать нулевым. */
+    val floorApplied: Boolean = false,
 ) {
     val hasAny: Boolean get() = total.signum() > 0
     val hasGift: Boolean get() = free.signum() > 0
@@ -34,7 +37,7 @@ data class Benefits(
     /** Строки для блока льгот в корзине и в листе перед оплатой. */
     fun lines(): List<String> {
         val out = ArrayList<String>(3)
-        if (hasGift) out.add("Подарок −${money(free)}")
+        if (hasGift) out.add("Подарок −${money(free)}" + if (floorApplied) " (в чеке 1 ₽)" else "")
         if (hasVoucher) out.add((voucherTitle?.let { "Ваучер «$it»" } ?: "Ваучер") + " −${money(voucher)}")
         if (hasCashback) out.add("Кэшбэк −${money(cashback)}")
         return out
@@ -77,14 +80,18 @@ object LoyaltyPreview {
                 DiscountCalc.freeApplies(reserved, choice.free, card.freeAvailable, eligible),
             ),
         )
-        val payable = gross.subtract(calc.total).max(BigDecimal.ZERO).setScale(2, RoundingMode.DOWN)
+        // Итог берём из breakdown: там же фискальный пол 1 ₽, который увидит ККТ.
+        val bd = DiscountCalc.breakdown(gross, eligible, card, choice, nowSec)
+        val total = BigDecimal(bd.discountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
+        val payable = BigDecimal(bd.netKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
         return Benefits(
             free = calc.free,
             voucher = calc.voucher,
             cashback = calc.cashback,
-            total = calc.total,
+            total = total,
             payable = payable,
             voucherTitle = if (calc.voucher.signum() > 0) voucher?.title else null,
+            floorApplied = bd.floorApplied,
         )
     }
 

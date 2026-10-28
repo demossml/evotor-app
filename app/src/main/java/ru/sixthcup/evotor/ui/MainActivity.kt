@@ -1746,9 +1746,12 @@ class MainActivity : AppCompatActivity() {
     private fun comboDiscountRub(): BigDecimal = Combos.discountFor(Cart.all(), combos)
 
     /** Итог к оплате: сумма реальных позиций минус выгода комбо. */
-    /** К оплате: чек минус комбо минус льгота гостя. Цифра справочная — деньги принимает POS. */
+    /**
+     * К оплате: остаток после льготы (с фискальным полом 1 ₽) минус комбо.
+     * Цифра справочная — деньги принимает POS, но она совпадает с тем, что уйдёт в ККТ.
+     */
     private fun cartTotalRub(): BigDecimal =
-        Cart.gross().subtract(comboDiscountRub()).subtract(currentBenefits().total).max(BigDecimal.ZERO)
+        currentBenefits().payable.subtract(comboDiscountRub()).max(BigDecimal.ZERO)
 
     private fun nowSec(): Long = System.currentTimeMillis() / 1000
 

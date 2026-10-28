@@ -88,6 +88,77 @@ class DiscountCalcTest {
         assertEquals(0, r.total.signum())
     }
 
+    // ── PayBreakdown: фискальный пол 1 ₽ ────────────────────────────────────────────────────
+
+    private fun card(freeAvailable: Int = 1, vouchers: List<ResolveVoucher> = emptyList(), reservationId: String? = "R-1") =
+        CardInfo(
+            code = "payload.sig", cardCode = "0012", paidCups = 3, cupsForFree = 5,
+            freeAvailable = freeAvailable, cashbackKopecks = 0,
+            reservationId = reservationId, reservationExpiresAt = 0L, freeStatus = "RESERVED",
+            vouchers = vouchers,
+        )
+
+    @Test fun giftNeverMakesTheReceiptZeroKopecks() {
+        // Кофе 250 ₽ подарком: скидка 249 ₽, к оплате 1 ₽ (в ККТ нельзя 0).
+        val b = DiscountCalc.breakdown(d("250"), listOf(d("250")), card(), Choice.normalize(true, false, 0L, null), 0L)
+        assertEquals(25000L, b.grossKopecks)
+        assertEquals(24900L, b.discountKopecks)
+        assertEquals(100L, b.netKopecks)
+        assertEquals(true, b.giftApplied)
+        assertEquals(true, b.floorApplied)
+    }
+
+    @Test fun noBenefitMeansNoDiscount() {
+        val b = DiscountCalc.breakdown(d("250"), listOf(d("250")), card(), Choice.normalize(false, false, 0L, null), 0L)
+        assertEquals(0L, b.discountKopecks)
+        assertEquals(25000L, b.netKopecks)
+        assertEquals(false, b.floorApplied)
+    }
+
+    @Test fun giftInMixedCartKeepsFullPriceForOtherItems() {
+        // Подарок 180 ₽ + платный 120 ₽: скидка 180, к оплате 120 (пол не нужен).
+        val b = DiscountCalc.breakdown(d("300"), listOf(d("180")), card(), Choice.normalize(true, false, 0L, null), 0L)
+        assertEquals(18000L, b.discountKopecks)
+        assertEquals(12000L, b.netKopecks)
+        assertEquals(false, b.floorApplied)
+    }
+
+    @Test fun voucherPercentKeepsNetAboveFloor() {
+        val v = ResolveVoucher(id = 12, title = "15%", kind = "percent", value = 15)
+        val b = DiscountCalc.breakdown(
+            d("400"), emptyList(), card(freeAvailable = 0, vouchers = listOf(v)),
+            Choice.normalize(false, false, 0L, 12), 0L,
+        )
+        assertEquals(6000L, b.discountKopecks)
+        assertEquals(34000L, b.netKopecks)
+        assertEquals(false, b.floorApplied)
+        assertEquals(12, b.voucherId)
+    }
+
+    @Test fun voucherCoveringWholeReceiptIsFlooredToOneRouble() {
+        val v = ResolveVoucher(id = 13, title = "100%", kind = "percent", value = 100)
+        val b = DiscountCalc.breakdown(
+            d("300"), emptyList(), card(freeAvailable = 0, vouchers = listOf(v)),
+            Choice.normalize(false, false, 0L, 13), 0L,
+        )
+        assertEquals(29900L, b.discountKopecks)
+        assertEquals(100L, b.netKopecks)
+        assertEquals(true, b.floorApplied)
+    }
+
+    @Test fun tinyReceiptIsNotInflated() {
+        // Чек дешевле 1 ₽ не раздуваем: net = gross, скидки нет.
+        val b = DiscountCalc.breakdown(d("0.50"), listOf(d("0.50")), card(), Choice.normalize(true, false, 0L, null), 0L)
+        assertEquals(50L, b.netKopecks)
+        assertEquals(0L, b.discountKopecks)
+    }
+
+    @Test fun breakdownWithoutCardChargesFullSum() {
+        val b = DiscountCalc.breakdown(d("250"), listOf(d("250")), null, Choice.normalize(true, false, 0L, null), 0L)
+        assertEquals(0L, b.discountKopecks)
+        assertEquals(25000L, b.netKopecks)
+    }
+
     @Test fun totalNeverExceedsGrossOrGoesNegative() {
         val big = ResolveVoucher(id = 15, title = "Гигант", kind = "fixed", value = 999999)
         val r = DiscountCalc.compute(d("100"), listOf(d("100")), true, true, 1, 9999L, 9999L, voucher = big)

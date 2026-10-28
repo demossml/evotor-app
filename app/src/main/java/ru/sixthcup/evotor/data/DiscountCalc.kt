@@ -14,6 +14,13 @@ object DiscountCalc {
     /** Запас для медленного баристы: backend засчитает истёкший резерв, только если бонус никто не занял. */
     const val GRACE_SEC = 300L
 
+    /**
+     * Минимальная фискальная сумма, когда применён подарок или ваучер.
+     * Пробивать 0 ₽ нельзя: чек с нулевой позицией бессмысленен для 54-ФЗ, поэтому
+     * гость платит 1 ₽, а скидка уменьшается на эту сумму.
+     */
+    const val GIFT_FISCAL_MIN_KOPECKS = 100L
+
     data class Result(
         val free: BigDecimal,
         val voucher: BigDecimal,
@@ -84,4 +91,64 @@ object DiscountCalc {
         val total = free.add(voucherRub).add(cb).min(gross).setScale(2, RoundingMode.DOWN)
         return Result(free, voucherRub, cb, total)
     }
+
+    /**
+     * Итог для кассы: сколько скидки уйдёт в фискальный чек и сколько останется к оплате.
+     * Один источник для UI и `DiscountIntegrationService`, чтобы цифры не расходились.
+     */
+    fun breakdown(
+        gross: BigDecimal,
+        eligibleUnitPrices: List<BigDecimal>,
+        card: CardInfo?,
+        choice: Choice,
+        nowSec: Long,
+    ): PayBreakdown {
+        val grossKopecks = kopecks(gross).coerceAtLeast(0L)
+        if (card == null || card.code.isEmpty()) {
+            return PayBreakdown(grossKopecks, 0L, grossKopecks, giftApplied = false, voucherId = null, floorApplied = false)
+        }
+        val reserved = reserved(card, nowSec)
+        val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
+        val allowed = VoucherCalc.allowedTogether(
+            voucher,
+            freeApplies(reserved, choice.free, card.freeAvailable, eligibleUnitPrices),
+        )
+        val result = compute(
+            gross, eligibleUnitPrices, reserved, choice.free, card.freeAvailable,
+            choice.cashbackKopecks, card.cashbackKopecks, voucher, allowed,
+        )
+        val giftApplied = result.free.signum() > 0
+        val voucherApplied = result.voucher.signum() > 0
+        var discount = kopecks(result.total).coerceIn(0L, grossKopecks)
+        var net = (grossKopecks - discount).coerceAtLeast(0L)
+        val needsFloor = giftApplied || voucherApplied
+        val floor = needsFloor && net < GIFT_FISCAL_MIN_KOPECKS && grossKopecks >= GIFT_FISCAL_MIN_KOPECKS
+        if (floor) {
+            net = GIFT_FISCAL_MIN_KOPECKS
+            discount = grossKopecks - net
+        } else if (needsFloor && grossKopecks < GIFT_FISCAL_MIN_KOPECKS) {
+            // Чек дешевле рубля не раздуваем и не обнуляем: скидки нет, платим фактическую сумму.
+            discount = 0L
+            net = grossKopecks
+        }
+        return PayBreakdown(
+            grossKopecks = grossKopecks,
+            discountKopecks = discount,
+            netKopecks = net,
+            giftApplied = giftApplied,
+            voucherId = if (voucherApplied) voucher?.id else null,
+            floorApplied = floor,
+        )
+    }
 }
+
+/** Разбивка чека в копейках: что уйдёт скидкой и что останется к оплате. */
+data class PayBreakdown(
+    val grossKopecks: Long,
+    val discountKopecks: Long,
+    val netKopecks: Long,
+    val giftApplied: Boolean,
+    val voucherId: Int?,
+    /** Сработал ли фискальный пол 1 ₽ (скидка урезана, чтобы чек не стал нулевым). */
+    val floorApplied: Boolean,
+)

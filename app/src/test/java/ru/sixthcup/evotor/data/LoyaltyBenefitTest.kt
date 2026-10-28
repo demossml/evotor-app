@@ -115,9 +115,11 @@ class LoyaltyBenefitTest {
     }
 
     @Test
-    fun `payable never goes below zero`() {
+    fun `payable never drops below the fiscal floor of one rouble`() {
+        // Ваучер больше чека: в ККТ нельзя 0, поэтому к оплате остаётся 1 ₽.
         val big = ResolveVoucher(id = 20, title = "Гигант", kind = "fixed", value = 999999)
         val b = LoyaltyPreview.of(card(vouchers = listOf(big)), choice(voucher = 20), d("100"), emptyList(), now)
-        assertEquals(0, b.payable.signum())
+        assertEquals(d("1.00"), b.payable)
+        assertEquals(true, b.floorApplied)
     }
 }

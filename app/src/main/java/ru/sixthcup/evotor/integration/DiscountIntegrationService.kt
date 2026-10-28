@@ -13,6 +13,7 @@ import ru.evotor.framework.receipt.Receipt
 import ru.evotor.framework.receipt.ReceiptApi
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.CheckoutChoice
+import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.QueueNumberStore
@@ -55,27 +56,54 @@ class DiscountIntegrationService : IntegrationService() {
                     val now = System.currentTimeMillis() / 1000
                     val reserved = DiscountCalc.reserved(info, now)
                     val prices = receiptUnitPrices()
-                    val gross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
+                    val receiptGross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
+                    // Если позиции открытого чека прочитать не удалось, берём корзину APK:
+                    // иначе gross = 0 и любая скидка обнулялась min(gross) — чек уходил полной суммой.
+                    val cartGross = Cart.gross()
+                    val gross = if (receiptGross.signum() > 0) receiptGross else cartGross
                     // Free cup: the cheapest single unit on the receipt (the backend still re-checks it).
-                    val eligibleUnitPrices = Cart.giftEligibleLines().map { it.priceRub }
+                    val cartEligible = Cart.giftEligibleLines().map { it.priceRub }
+                    // Корзина APK недоступна, а чек уже открыт: без подходящих единиц подарок обнулился бы.
+                    // Резерв выдан именно под подарок, поэтому берём самую дешёвую позицию чека.
+                    val eligibleUnitPrices = if (cartEligible.isNotEmpty() || prices.isEmpty()) cartEligible
+                    else prices.map { it.first }.sorted().take(1)
+                    if (cartEligible.isEmpty() && eligibleUnitPrices.isNotEmpty()) {
+                        Log.w("DiscountIntegration", "gift_eligible_fallback cart_empty=true receiptPositions=${prices.size}")
+                    }
                     val requestedCb = if (CheckoutChoice.cashback(applicationContext)) CheckoutChoice.cashbackKopecks(applicationContext) else 0L
                     val freeChosen = CheckoutChoice.free(applicationContext)
                     // Ваучер: только с резервом и, если не stackable, без подарка.
                     val chosenVoucher = info.vouchers.firstOrNull { it.id == CheckoutChoice.voucherId(applicationContext) }
-                    val voucherAllowed = VoucherCalc.allowedTogether(
-                        chosenVoucher,
-                        DiscountCalc.freeApplies(reserved, freeChosen, info.freeAvailable, eligibleUnitPrices),
+                    val choice = Choice.normalize(
+                        freeChosen,
+                        CheckoutChoice.cashback(applicationContext),
+                        requestedCb,
+                        CheckoutChoice.voucherId(applicationContext),
                     )
+                    // Единый расчёт: та же функция, что рисует «к оплате» на экране кассы.
                     val calc = DiscountCalc.compute(
-                        gross, eligibleUnitPrices, reserved, freeChosen, info.freeAvailable, requestedCb, info.cashbackKopecks,
-                        voucher = chosenVoucher, voucherAllowed = voucherAllowed,
+                        gross, eligibleUnitPrices, reserved, choice.free, info.freeAvailable, requestedCb, info.cashbackKopecks,
+                        voucher = chosenVoucher,
+                        voucherAllowed = VoucherCalc.allowedTogether(
+                            chosenVoucher,
+                            DiscountCalc.freeApplies(reserved, choice.free, info.freeAvailable, eligibleUnitPrices),
+                        ),
                     )
+                    val breakdown = DiscountCalc.breakdown(gross, eligibleUnitPrices, info, choice, now)
                     val freeDiscount = calc.free
                     val cbRub = calc.cashback
                     val freeApplied = freeDiscount.signum() > 0
                     // Скидка комбо — фиксированная выгода набора (позиции в чеке реальные, цена полная).
+                    // Её складываем с льготой и снова держим пол 1 ₽ на итоге чека.
                     val comboRub = CheckoutChoice.comboRub(applicationContext)
-                    val total = calc.total.add(comboRub).min(gross)
+                    val grossKopecks = DiscountCalc.kopecks(gross)
+                    val comboKopecks = DiscountCalc.kopecks(comboRub)
+                    var discountKopecks = (breakdown.discountKopecks + comboKopecks).coerceAtMost(grossKopecks)
+                    val floorNeeded = (breakdown.giftApplied || breakdown.voucherId != null) &&
+                        grossKopecks >= DiscountCalc.GIFT_FISCAL_MIN_KOPECKS &&
+                        grossKopecks - discountKopecks < DiscountCalc.GIFT_FISCAL_MIN_KOPECKS
+                    if (floorNeeded) discountKopecks = grossKopecks - DiscountCalc.GIFT_FISCAL_MIN_KOPECKS
+                    val total = BigDecimal(discountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
                     val cbKopecks = DiscountCalc.kopecks(cbRub)
                     val voucherApplied = calc.voucher.signum() > 0
                     logDiscount(
@@ -89,6 +117,15 @@ class DiscountIntegrationService : IntegrationService() {
                     )
                     // Снимок для печати: PrintExtra сработает после оплаты, спросить сервер будет нельзя.
                     savePrintSnapshot(info, freeApplied, cbKopecks)
+                    if (receiptGross.signum() <= 0) {
+                        Log.w("DiscountIntegration", "receipt_positions_unavailable fallback=cart grossKopecks=$grossKopecks")
+                    }
+                    Log.i(
+                        "DiscountIntegration",
+                        "fiscal_discount gross=$grossKopecks discount=$discountKopecks " +
+                            "net=${grossKopecks - discountKopecks} gift=$freeApplied voucher=${breakdown.voucherId ?: 0} " +
+                            "floor=$floorNeeded receiptPositions=${prices.size}",
+                    )
                     Log.i(
                         "DiscountIntegration",
                         "extras_written v=2 hasOp=${info.reservationId != null} free=${if (freeApplied) 1 else 0} " +
