@@ -49,6 +49,7 @@ import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.BenefitPromptGuard
 import ru.sixthcup.evotor.data.Benefits
 import ru.sixthcup.evotor.data.CardReplaceRule
+import ru.sixthcup.evotor.data.ClientOffers
 import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.LoyaltyPreview
 import ru.sixthcup.evotor.data.ResolveVoucher
@@ -3098,9 +3099,10 @@ class MainActivity : AppCompatActivity() {
 
         val now = nowSec()
         val eligible = Cart.giftEligibleLines().map { it.priceRub }
-        val voucherList = card.vouchers
-        val giftPossible = card.freeAvailable > 0 && DiscountCalc.reserved(card, now)
-        val cbPossible = DiscountCalc.reserved(card, now) && card.cashbackKopecks > 0
+        val offers = ClientOffers.of(card, now)
+        val voucherList = offers.vouchers
+        val giftPossible = offers.gift
+        val cbPossible = offers.cashback
         val cheapest = DiscountCalc.cheapestEligible(eligible) ?: BigDecimal.ZERO
         val cheapestName = Cart.giftEligibleLines().minByOrNull { it.priceRub }?.name
 
@@ -3161,7 +3163,7 @@ class MainActivity : AppCompatActivity() {
                     },
                 )
             }
-            if (cbPossible && voucherList.isEmpty()) {
+            if (cbPossible) {
                 add(
                     choiceCell(
                         "Списать кэшбэк",
@@ -3176,7 +3178,7 @@ class MainActivity : AppCompatActivity() {
         }
         paint()
         box.addView(cells)
-        if (!giftPossible && voucherList.isEmpty() && !cbPossible) {
+        if (!offers.any) {
             box.addView(
                 noteRow(
                     if (CardSession.kindOf(card.code) != "token") "Списание подарка и купона — только по QR гостя."

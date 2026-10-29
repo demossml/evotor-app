@@ -36,3 +36,24 @@ DEFAULT-AD-HOC: нет
 Тесты: `ClientOffersTest` — 8 passed; охранный набор `:app:testDebugUnitTest` — **277 passed, 0 failed**; `:app:lintDebug` — 0 errors
 Изменённые тесты: нет
 DEFAULT-AD-HOC: нет
+
+## STEP-A02 — Окно клиента использует `ClientOffers`: кэшбэк виден при ваучерах
+
+Статус: DONE
+Коммит: `fix(cashier): cashback stays available next to vouchers`
+Что сделано: в `openClientScreen` три условия заменены на модель; `if (cbPossible && voucherList.isEmpty())`
+стало `if (cbPossible)`; пустое состояние — `if (!offers.any)`.
+Тесты: `CheckoutChoiceTest` — оба требуемых сценария **уже есть** (`voucher drops cashback`, `cashback drops voucher`), не дублировал; охранный набор — 277 passed, 0 failed; `:app:lintDebug` — 0 errors
+Изменённые тесты: нет
+DEFAULT-AD-HOC: нет
+
+Проверка по пункту 4 промпта: `grep -n "voucherList.isEmpty" MainActivity.kt` → совпадений нет.
+Взаимоисключение в трёх лямбдах (строки 3151/3162/3173):
+
+```kotlin
+3151: useGift = true; useCashback = false; selectedVoucher = null; paint()   // подарок
+3162: selectedVoucher = v; useGift = false; useCashback = false; paint()      // ваучер
+3173: useCashback = true; useGift = false; selectedVoucher = null; paint()    // кэшбэк
+```
+
+Diff по `MainActivity.kt`: 7 добавлений / 5 удалений — только перечисленные строки.
