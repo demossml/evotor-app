@@ -57,3 +57,19 @@ DEFAULT-AD-HOC: нет
 ```
 
 Diff по `MainActivity.kt`: 7 добавлений / 5 удалений — только перечисленные строки.
+
+## STEP-A03 — Версия и сборка
+
+Статус: DONE
+Коммит: `chore(cashier): bump version to 5.2.10-cashback-with-vouchers`
+Что сделано: `versionCode = 135`, `versionName = "5.2.10-cashback-with-vouchers"`, больше в `build.gradle.kts` ничего не менялось.
+Тесты: `:app:testDebugUnitTest` — 277 passed, 0 failed; `:app:lintDebug` — 0 errors; `:app:assembleRelease` — BUILD SUCCESSFUL
+Изменённые тесты: нет
+DEFAULT-AD-HOC: нет
+
+| Артефакт | Значение |
+|---|---|
+| APK | `app/build/outputs/apk/release/app-release.apk` |
+| Размер | 5 713 919 байт |
+| versionCode / versionName | 135 / `5.2.10-cashback-with-vouchers` (aapt badging) |
+| Подпись | `CN=6.7 Coffee, OU=POS, O=6.7 Coffee, L=Yekaterinburg, C=RU` (apksigner) |
