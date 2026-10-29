@@ -44,6 +44,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
+import ru.sixthcup.evotor.data.SheetToppings
 import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.BenefitPromptGuard
@@ -1161,8 +1162,8 @@ class MainActivity : AppCompatActivity() {
         val variants = variantModel.variantsOf(p)
         val hasTops = variants.any { it.toppings.isNotEmpty() } || p.toppings.isNotEmpty()
         val opts = if (p.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(
-            // Prefer variant that already carries toppings from backend merge.
-            variants.firstOrNull { it.toppings.isNotEmpty() } ?: p
+            // Свои добавки размера; если их нет — добавки другого размера этой же карточки.
+            SheetToppings.effective(p, variants)
         ) else OptionPicker.Opts()
         Log.i("SC_TOP", "sheet base=${p.name} variants=${variants.size} topsPerVariant=${variants.map { it.toppings.size }} opts(milk=${opts.milk.size},syrup=${opts.syrup.size},extra=${opts.extra.size})")
 
@@ -1265,9 +1266,11 @@ class MainActivity : AppCompatActivity() {
         // Смена объёма: пересчитать opts для выбранного варианта (rebind), не оставлять
         // opts от первого variant на весь sheet.
         picker.onVariantChanged = { selected ->
-            Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${selected.toppings.size}")
-            val newOpts = if (selected.supportsMods || selected.toppings.isNotEmpty() || !variantModel.options.isEmpty)
-                optionsFor(selected) else OptionPicker.Opts()
+            // Донор: у выбранного размера добавок может не быть, у соседнего той же карточки они есть.
+            val effective = SheetToppings.effective(selected, variants)
+            Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${effective.toppings.size} own=${selected.toppings.size}")
+            val newOpts = if (effective.supportsMods || effective.toppings.isNotEmpty() || !variantModel.options.isEmpty)
+                optionsFor(effective) else OptionPicker.Opts()
             picker.rebindOpts(selected, newOpts)
             paint()
         }
