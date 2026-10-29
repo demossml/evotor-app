@@ -27,3 +27,12 @@ DEFAULT-AD-HOC: нет
 | `data/LoyaltyBenefit.kt:111` | `return card.freeAvailable > 0 \|\| card.vouchers.isNotEmpty()` | `canOffer` (частота окна, не показ кэшбэка) |
 
 Ожидание промпта подтвердилось: условие скрытия кэшбэка найдено ровно одно — `MainActivity.kt:3164`.
+
+## STEP-A01 — Чистая модель предложений окна клиента
+
+Статус: DONE
+Коммит: `feat(cashier): ClientOffers model`
+Что сделано: новый `data/ClientOffers.kt` (gift / cashback / vouchers + `any`) и 8 тестов; UI не менялся.
+Тесты: `ClientOffersTest` — 8 passed; охранный набор `:app:testDebugUnitTest` — **277 passed, 0 failed**; `:app:lintDebug` — 0 errors
+Изменённые тесты: нет
+DEFAULT-AD-HOC: нет
