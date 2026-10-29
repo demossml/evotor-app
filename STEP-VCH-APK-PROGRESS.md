@@ -73,3 +73,31 @@ DEFAULT-AD-HOC: нет
 | Размер | 5 713 919 байт |
 | versionCode / versionName | 135 / `5.2.10-cashback-with-vouchers` (aapt badging) |
 | Подпись | `CN=6.7 Coffee, OU=POS, O=6.7 Coffee, L=Yekaterinburg, C=RU` (apksigner) |
+
+## STEP-A04 — Отчёт и цикл перепроверки
+
+Статус: DONE
+Коммит: `docs(cashier): implementation report`
+Что сделано: пройден чеклист перепроверки (11 пунктов), написан `IMPLEMENTATION-VCH-APK-REPORT.md`.
+Тесты: `:app:testDebugUnitTest` — 277 / 0; `:app:lintDebug` — 0 errors; `:app:assembleRelease` — SUCCESS
+Изменённые тесты: нет
+DEFAULT-AD-HOC: нет
+
+Чеклист (проход 1 — все пункты закрыты, второй проход не потребовался):
+
+```
+[x] 1. testDebugUnitTest — 277 / 0 (база 269 + 8; +2 из A02 не нужны: тесты уже были)
+[x] 2. lintDebug — 0 errors
+[x] 3. assembleRelease — BUILD SUCCESSFUL
+[x] 4. grep "voucherList.isEmpty" MainActivity.kt — пусто
+[x] 5. ClientOffers: ClientOffers.kt:9 (определение) + MainActivity.kt:3102 (использование)
+[x] 6. diff 8652010..HEAD: ClientOffers.kt, ClientOffersTest.kt, MainActivity.kt,
+       build.gradle.kts, STEP-VCH-APK-PROGRESS.md (+ отчёт A04)
+[x] 7. Запрещённые файлы (scanner, CardSession, FiscalDiscount, SellLauncher,
+       DiscountIntegrationService, LoyaltyApi, Voucher, Choice, DiscountCalc,
+       CatalogAdapter, Cart) — diff пуст
+[x] 8. Взаимоисключение в трёх лямбдах: 3151 / 3162 / 3173
+[x] 9. versionCode 135, versionName 5.2.10-cashback-with-vouchers
+[x] 10. @Ignore и закомментированных тестов нет
+[x] 11. Прогресс содержит A00…A03 со статусом DONE
+```
