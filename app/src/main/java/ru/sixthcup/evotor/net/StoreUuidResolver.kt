@@ -45,6 +45,15 @@ object StoreUuidResolver {
         "ru.evotor.provider" to listOf("store", "stores", "device"),
     )
 
+    /**
+     * UUID точки продаж. APP_UUID приложения (manifest `app_uuid`) — не точка:
+     * отклоняется из любого источника, включая уже сохранённый кэш.
+     */
+    internal fun isStoreUuid(value: String?): Boolean {
+        val v = value?.trim().orEmpty()
+        return UUID_RE.matches(v) && !v.equals(BuildConfig.APP_UUID, ignoreCase = true)
+    }
+
     /** Только чтение кэша, без side-effects (для HTTP-заголовков). */
     fun peek(context: Context): String? = cached(context)
 
@@ -52,7 +61,7 @@ object StoreUuidResolver {
         cached(context)?.let { Log.i(TAG, "resolved=$it (cache)"); return it }
 
         val fromBuild = BuildConfig.STORE_UUID.trim()
-        if (fromBuild.isNotEmpty() && UUID_RE.matches(fromBuild)) {
+        if (isStoreUuid(fromBuild)) {
             save(context, fromBuild)
             Log.i(TAG, "resolved=$fromBuild (build)")
             return fromBuild
@@ -82,7 +91,7 @@ object StoreUuidResolver {
 
     fun remember(context: Context, uuid: String?) {
         val v = uuid?.trim().orEmpty()
-        if (UUID_RE.matches(v)) {
+        if (isStoreUuid(v)) {
             save(context, v)
             Log.i(TAG, "remembered=$v")
         }
@@ -92,7 +101,7 @@ object StoreUuidResolver {
         .applicationContext
         .getSharedPreferences(PREF, Context.MODE_PRIVATE)
         .getString(KEY, null)
-        ?.takeIf { UUID_RE.matches(it) }
+        ?.takeIf { isStoreUuid(it) }
 
     private fun save(context: Context, uuid: String) {
         context.applicationContext
@@ -108,7 +117,7 @@ object StoreUuidResolver {
             } catch (_: Throwable) {
                 null
             } ?: continue
-            UUID_RE.find(raw)?.let { return it.value }
+            UUID_RE.find(raw)?.value?.takeIf { isStoreUuid(it) }?.let { return it }
         }
         return null
     }
@@ -119,13 +128,16 @@ object StoreUuidResolver {
                 val uri = Uri.parse("content://$authority/$path")
                 val found = try {
                     context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                        // Только колонки «store/shop»: любой UUID подряд (app/device/user) — не точка.
+                        val cols = (0 until minOf(c.columnCount, 24)).filter { i ->
+                            val n = c.getColumnName(i).orEmpty().lowercase()
+                            "store" in n || "shop" in n
+                        }
                         var result: String? = null
-                        val scan = minOf(c.columnCount, 24)
                         while (c.moveToNext() && result == null) {
-                            for (i in 0 until scan) {
+                            for (i in cols) {
                                 val v = try { c.getString(i) } catch (_: Throwable) { null } ?: continue
-                                if (UUID_RE.matches(v.trim())) { result = v.trim(); break }
-                                UUID_RE.find(v)?.let { result = it.value }
+                                result = UUID_RE.find(v)?.value?.takeIf { isStoreUuid(it) }
                                 if (result != null) break
                             }
                         }
@@ -160,7 +172,7 @@ object StoreUuidResolver {
             }
             val o = JSONObject(body)
             val s = o.optString("storeUuid").trim()
-            if (UUID_RE.matches(s)) s else null
+            if (isStoreUuid(s)) s else null
         } catch (e: Throwable) {
             Log.w(TAG, "whoami failed: ${e.message}")
             null

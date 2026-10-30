@@ -2,6 +2,7 @@ package ru.sixthcup.evotor.data
 
 import android.content.Context
 import android.database.Cursor
+import android.util.Log
 import ru.evotor.framework.inventory.InventoryApi
 import ru.evotor.framework.inventory.ProductItem
 import ru.evotor.framework.inventory.ProductTable
@@ -96,6 +97,8 @@ data class UpsellItem(
  * Один запрос ко всей таблице, без запросов на каждый товар (DESCRIPTION читается из той же строки).
  */
 object InventoryRepository {
+    private const val TAG = "Inventory"
+
     fun load(context: Context): List<CatalogProduct> {
         val raw = mutableListOf<CatalogProduct>()
         val groups = HashMap<String, String>()
@@ -109,9 +112,14 @@ object InventoryRepository {
             val allowCol = col(c, "ALLOW_TO_SELL", "allowToSell")
             val descCol = col(c, ProductTable.ROW_DESCRIPTION, "description")
             val parentCol = col(c, ProductTable.ROW_PARENT_UUID, "parentUuid")
-            // CODE = article_number, который backend пишет при выгрузке (`sc-<id>`).
-            // Стабильная связка backend ↔ терминал: не зависит от UUID точки и переименований.
-            val codeCol = col(c, ProductTable.ROW_CODE, "code", "CODE")
+            // Канон `sc-<id>` (article_number облака): колонка зависит от версии ПО терминала,
+            // поэтому читаем все кандидаты, а не только ROW_CODE.
+            val articleCols = (listOf(ProductTable.ROW_CODE) + ArticleCode.COLUMNS)
+                .distinct()
+                .mapNotNull { n -> c.getColumnIndex(n).takeIf { it >= 0 }?.let { n to it } }
+                .distinctBy { it.second }
+            Log.i(TAG, "inventory_article_columns ${articleCols.map { it.first }}")
+            var canonCount = 0
             while (c.moveToNext()) {
                 val uuid = uuidCol?.let { c.getString(it) }?.trim().orEmpty()
                 val name = nameCol?.let { c.getString(it) }?.trim().orEmpty()
@@ -127,9 +135,11 @@ object InventoryRepository {
                 if (!allow) continue
                 val desc = descCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
                 val parent = parentCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
-                val code = codeCol?.let { try { c.getString(it) } catch (_: Throwable) { null } }?.trim()?.takeIf { it.isNotEmpty() }
+                val code = ArticleCode.pick(articleCols.map { (_, i) -> try { c.getString(i) } catch (_: Throwable) { null } })
+                if (ArticleCode.isCanon(code)) canonCount++
                 raw.add(CatalogProduct(uuid, name, price, allow, desc, desc, code, parentUuid = parent))
             }
+            Log.i(TAG, "inventory_article_canon count=$canonCount of=${raw.size}")
         }
         return raw.map { p ->
             val g = p.parentUuid?.let { groups[it] }

@@ -3,15 +3,10 @@ package ru.sixthcup.evotor.data
 import ru.sixthcup.evotor.net.CatalogApi
 
 /**
- * Add-ons for the item sheet of the selected size.
- *
- * 1) toppings already on the size
- * 2) sibling of the same card (variantGroup / groupId)
- * 3) last catalog payload: groupId or loose name -> byGroupId
- *    (volume from local #group=, enrich missed uuid/name — still show milk/syrup)
+ * Схема добавок принадлежит карточке объёмов, а не отдельному uuid размера:
+ * свои toppings → toppings соседа той же карточки → toppings группы backend (`groupId`).
  */
 object SheetToppings {
-
     fun forSheet(
         selected: CatalogProduct,
         variants: List<CatalogProduct>,
@@ -24,8 +19,8 @@ object SheetToppings {
         if (!sibling.isNullOrEmpty()) return sibling
 
         val pl = payload ?: return emptyList()
-        val gid = selected.groupId
-            ?: variants.mapNotNull { it.groupId }.firstOrNull()
+        val gid = cardGroupId(selected, pl)
+            ?: variants.firstNotNullOfOrNull { cardGroupId(it, pl) }
             ?: Names.looseNameGroupId(Names.normalize(selected.name), pl.nameGroupId)
             ?: variants.firstNotNullOfOrNull {
                 Names.looseNameGroupId(Names.normalize(it.name), pl.nameGroupId)
@@ -49,6 +44,23 @@ object SheetToppings {
             toppings = tops,
             supportsMods = selected.supportsMods || tops.isNotEmpty(),
         )
+    }
+
+    /** Товар каталога 6.7 для размера: uuid точки → артикул `sc-<id>` → точное имя (запасной путь). */
+    fun identity(p: CatalogProduct, payload: CatalogApi.Payload): CatalogApi.Enrich? {
+        payload.byUuid[p.uuid]?.let { return it }
+        val article = p.article?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        article?.let { payload.byArticle[it] }?.let { return it }
+        return payload.byNameExact[Names.normalizeExact(p.name)]
+    }
+
+    /** groupId карточки: локальный → identity → `groups[]` (uuid/productId). */
+    private fun cardGroupId(p: CatalogProduct, payload: CatalogApi.Payload): Int? {
+        p.groupId?.let { return it }
+        val e = identity(p, payload)
+        return e?.groupId
+            ?: payload.groupByUuid[p.uuid]
+            ?: e?.productId?.let { payload.groupByProductId[it] }
     }
 
     private fun sameCard(a: CatalogProduct, b: CatalogProduct): Boolean {

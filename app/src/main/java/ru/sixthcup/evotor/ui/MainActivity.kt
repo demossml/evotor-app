@@ -45,6 +45,7 @@ import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.R
 import ru.sixthcup.evotor.data.CardInfo
 import ru.sixthcup.evotor.data.SheetToppings
+import ru.sixthcup.evotor.data.SheetContract
 import ru.sixthcup.evotor.data.CardPoll
 import ru.sixthcup.evotor.data.CardProgress
 import ru.sixthcup.evotor.data.BenefitPromptGuard
@@ -155,6 +156,8 @@ class MainActivity : AppCompatActivity() {
     private var adapter: CatalogAdapter? = null
     private var searchRunnable: Runnable? = null
     private var lastEnrich: CatalogApi.Payload? = null
+    /** Каталог получен по HTTP в этой сессии (не кэш): только тогда пустая схема = ошибка сопоставления. */
+    private var catalogFetchOk = false
     private var payButton: Button? = null
     private var cartButton: Button? = null
     private var cartBarRoot: View? = null
@@ -377,7 +380,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 return@thread
             }
-            StoreUuidResolver.remember(ctx, enrich.storeUuid ?: storeUuid)
+            // whoami/peek/catalog — одна точка: эхо backend не подменяет запрошенный store.
+            if (storeUuid != null && enrich.storeUuid != null && !storeUuid.equals(enrich.storeUuid, ignoreCase = true)) {
+                Log.e(TAG, "store_mismatch requested=$storeUuid echoed=${enrich.storeUuid}")
+            }
+            StoreUuidResolver.remember(ctx, storeUuid ?: enrich.storeUuid)
             CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
             val mergedResult = CatalogApi.mergeWithStats(inv, enrich)
             val merged = mergedResult.first
@@ -388,6 +395,7 @@ class MainActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 swipeRefresh?.isRefreshing = false
                 lastEnrich = enrich
+                catalogFetchOk = true
                 products = merged
                 variantModel = DrinkVariants.build(merged)
                 combos = Combos.from(merged)
@@ -1068,18 +1076,13 @@ class MainActivity : AppCompatActivity() {
             maxCount = t.maxCount,
             id = t.id,
         )
-        // Backend scheme may use any groupKey; map known ones, rest → extra.
-        val byGroup = p.toppings.groupBy { it.groupKey.trim().lowercase() }
-        val known = setOf("milk", "молоко", "syrup", "сироп", "sugar", "сахар", "topping", "extra", "other", "добавки", "добавка")
-        fun toOpts(vararg keys: String) = keys.flatMap { k -> byGroup[k].orEmpty().map { fromTopping(it) } }
-        val restExtra = byGroup.filterKeys { it !in known }.values.flatten().map { fromTopping(it) }
+        val g = SheetContract.group(p.toppings)
         // Merge Evotor #opt= inventory items with backend toppings (do not drop one for the other).
         return OptionPicker.Opts(
-            milk = mapEv(evotor.milk) + toOpts("milk", "молоко"),
-            syrup = mapEv(evotor.syrup) + toOpts("syrup", "сироп"),
-            sugar = mapEv(evotor.sugar) + toOpts("sugar", "сахар"),
-            extra = mapEv(evotor.extra, max = EVOTOR_EXTRA_LIMIT) +
-                toOpts("topping", "extra", "other", "добавки", "добавка") + restExtra,
+            milk = mapEv(evotor.milk) + g.milk.map(::fromTopping),
+            syrup = mapEv(evotor.syrup) + g.syrup.map(::fromTopping),
+            sugar = mapEv(evotor.sugar) + g.sugar.map(::fromTopping),
+            extra = mapEv(evotor.extra, max = EVOTOR_EXTRA_LIMIT) + g.extra.map(::fromTopping),
         )
     }
 
@@ -1089,13 +1092,26 @@ class MainActivity : AppCompatActivity() {
      */
     private fun showItemSheet(p: CatalogProduct) {
         dismissSheets()
-        val variants = variantModel.variantsOf(p)
-        val hasTops = variants.any { it.toppings.isNotEmpty() } || p.toppings.isNotEmpty()
-        val opts = if (p.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(
-            // Свои добавки размера; если их нет — добавки другого размера этой же карточки.
-            SheetToppings.effective(p, variants, lastEnrich)
-        ) else OptionPicker.Opts()
-        Log.i("SC_TOP", "sheet base=${p.name} variants=${variants.size} topsPerVariant=${variants.map { it.toppings.size }} opts(milk=${opts.milk.size},syrup=${opts.syrup.size},extra=${opts.extra.size})")
+        val own = variantModel.variantsOf(p)
+        // Карточка объёмов — одна сущность: схема добавок общая для всех размеров.
+        val variants = SheetContract.cardVariants(own, lastEnrich)
+        val start = variants.firstOrNull { it.uuid == p.uuid } ?: SheetToppings.effective(p, variants, lastEnrich)
+        val hasTops = variants.any { it.toppings.isNotEmpty() }
+        val opts = if (start.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(start) else OptionPicker.Opts()
+        val scheme = SheetContract.scheme(variants, lastEnrich, catalogFetchOk)
+        Log.i(
+            "SC_TOP",
+            "sheet base=${p.name} variants=${variants.size} topsPerVariant=${SheetContract.topsPerVariant(variants)} " +
+                "ownPerVariant=${SheetContract.topsPerVariant(own)} scheme=$scheme " +
+                "opts(milk=${opts.milk.size},syrup=${opts.syrup.size},extra=${opts.extra.size})",
+        )
+        if (scheme == SheetContract.Scheme.MAPPING_ERROR) {
+            Log.e(
+                "SC_TOP",
+                "mapping_error base=${p.name} store=${lastEnrich?.storeUuid ?: "-"} " +
+                    "variants=${own.map { "${it.article ?: "-"}|${it.uuid}|${it.name}" }}",
+            )
+        }
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
@@ -1180,8 +1196,21 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "topping_blocked_no_uuid productId=${productIdOf(p.uuid)} toppingIds=$blockedToppings")
         }
 
+        if (scheme == SheetContract.Scheme.MAPPING_ERROR) {
+            body.addView(TextView(this).apply {
+                text = "Ошибка сопоставления с каталогом 6.7: добавки этой карточки не найдены на терминале. " +
+                    "Обновите каталог; если не помогло — сообщите администратору."
+                textSize = 11f
+                setTextColor(android.graphics.Color.rgb(0xB4, 0x23, 0x18))
+                setPadding(dp(9), dp(7), dp(9), dp(7))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.rgb(0xFD, 0xEC, 0xEA)); cornerRadius = dp(9).toFloat()
+                }
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(9) })
+        }
+
         val picker = OptionPicker(this)
-        picker.bind(variants, opts, p)
+        picker.bind(variants, opts, start)
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
 
         fun paint() {
@@ -1299,8 +1328,9 @@ class MainActivity : AppCompatActivity() {
             safeRender()
             return
         }
-        val variants = variantModel.variantsOf(drink)
-        val opts = if (drink.supportsMods || drink.toppings.isNotEmpty() || !variantModel.options.isEmpty) optionsFor(drink) else OptionPicker.Opts()
+        val variants = SheetContract.cardVariants(variantModel.variantsOf(drink), lastEnrich)
+        val drinkCard = variants.firstOrNull { it.uuid == drink.uuid } ?: SheetToppings.effective(drink, variants, lastEnrich)
+        val opts = if (drinkCard.supportsMods || drinkCard.toppings.isNotEmpty() || !variantModel.options.isEmpty) optionsFor(drinkCard) else OptionPicker.Opts()
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
