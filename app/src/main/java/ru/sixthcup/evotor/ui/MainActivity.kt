@@ -1163,7 +1163,7 @@ class MainActivity : AppCompatActivity() {
         val hasTops = variants.any { it.toppings.isNotEmpty() } || p.toppings.isNotEmpty()
         val opts = if (p.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(
             // Свои добавки размера; если их нет — добавки другого размера этой же карточки.
-            SheetToppings.effective(p, variants)
+            SheetToppings.effective(p, variants, lastEnrich)
         ) else OptionPicker.Opts()
         Log.i("SC_TOP", "sheet base=${p.name} variants=${variants.size} topsPerVariant=${variants.map { it.toppings.size }} opts(milk=${opts.milk.size},syrup=${opts.syrup.size},extra=${opts.extra.size})")
 
@@ -1267,7 +1267,7 @@ class MainActivity : AppCompatActivity() {
         // opts от первого variant на весь sheet.
         picker.onVariantChanged = { selected ->
             // Донор: у выбранного размера добавок может не быть, у соседнего той же карточки они есть.
-            val effective = SheetToppings.effective(selected, variants)
+            val effective = SheetToppings.effective(selected, variants, lastEnrich)
             Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${effective.toppings.size} own=${selected.toppings.size}")
             val newOpts = if (effective.supportsMods || effective.toppings.isNotEmpty() || !variantModel.options.isEmpty)
                 optionsFor(effective) else OptionPicker.Opts()

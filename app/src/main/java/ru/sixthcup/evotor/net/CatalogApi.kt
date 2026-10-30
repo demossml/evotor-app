@@ -250,16 +250,20 @@ object CatalogApi {
             // Явная группа: identity → локальная → groups[] с сервера → legacy exact-name.
             // Stripped-имя (byName) для группировки НЕ используется: риск склеить чужие товары.
             val serverGroup = e?.productId?.let { payload.groupByProductId[it] } ?: payload.groupByUuid[p.uuid]
+            val stripped = Names.normalize(p.name)
             val groupId = trusted?.groupId
                 ?: p.groupId
                 ?: serverGroup
                 ?: byExact?.groupId
                 // legacy: stripped-имя уникально резолвится в одну группу (донор добавок)
-                ?: payload.nameGroupId[Names.normalize(p.name)]
+                ?: payload.nameGroupId[stripped]
+                // local extra tokens after volume strip — still map to unique server group
+                ?: Names.looseNameGroupId(stripped, payload.nameGroupId)
 
             val tops = (e?.toppings ?: emptyList())
                 .ifEmpty { groupId?.let { payload.byGroupId[it] } ?: emptyList() }
                 .ifEmpty { p.toppings }
+            // Group toppings alone are enough for the sheet even without product-level match.
             if (e == null && tops.isEmpty()) return@map p
             val featured = if (e != null) {
                 p.featured || e.featured ||

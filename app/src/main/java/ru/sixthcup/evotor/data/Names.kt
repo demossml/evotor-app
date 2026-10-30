@@ -40,6 +40,20 @@ object Names {
             .replace(Regex("\\s+"), " ")
             .trim()
 
+    /**
+     * Soft resolve volume-stripped name to groupId when local name has extra tokens
+     * (e.g. local "kapuchino m" vs server key "kapuchino"). Prefers longest matching key.
+     * Keys come only from server nameGroupId (unique group per stripped name).
+     */
+    fun looseNameGroupId(normalizedBase: String, nameGroupId: Map<String, Int>): Int? {
+        if (normalizedBase.isEmpty() || nameGroupId.isEmpty()) return null
+        nameGroupId[normalizedBase]?.let { return it }
+        val hits = nameGroupId.entries.filter { (key, _) ->
+            key.isNotEmpty() && (normalizedBase == key || normalizedBase.startsWith("$key "))
+        }
+        return hits.maxByOrNull { it.key.length }?.value
+    }
+
     /** Совпадает ли название товара с названием добавки (с точностью до нормализации). */
     fun sameName(a: String?, b: String?): Boolean {
         val na = normalize(a)

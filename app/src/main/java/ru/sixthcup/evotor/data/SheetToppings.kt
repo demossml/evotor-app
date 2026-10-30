@@ -1,31 +1,59 @@
 package ru.sixthcup.evotor.data
 
+import ru.sixthcup.evotor.net.CatalogApi
+
 /**
- * Какие добавки показывает item-sheet для выбранного объёма.
+ * Add-ons for the item sheet of the selected size.
  *
- * Схема добавок у размеров одной карточки общая, но на кассе `toppings` могут оказаться только у части размеров
- * (размер не склеился с каталогом, пришёл из номенклатуры Эвотор). Без донора смена объёма на такой размер
- * убирала секции «Молоко»/«Сироп», хотя «Объём» оставался.
- *
- * Донор берётся только из переданного списка вариантов этой же карточки и только если `variantGroup` совпадает:
- * добавки чужой карточки подмешивать нельзя.
+ * 1) toppings already on the size
+ * 2) sibling of the same card (variantGroup / groupId)
+ * 3) last catalog payload: groupId or loose name -> byGroupId
+ *    (volume from local #group=, enrich missed uuid/name — still show milk/syrup)
  */
 object SheetToppings {
 
-    fun forSheet(selected: CatalogProduct, variants: List<CatalogProduct>): List<Topping> {
+    fun forSheet(
+        selected: CatalogProduct,
+        variants: List<CatalogProduct>,
+        payload: CatalogApi.Payload? = null,
+    ): List<Topping> {
         if (selected.toppings.isNotEmpty()) return selected.toppings
-        return variants
-            .firstOrNull { it.uuid != selected.uuid && it.toppings.isNotEmpty() && sameCard(it, selected) }
-            ?.toppings
-            ?: emptyList()
+        val sibling = variants.firstOrNull {
+            it.uuid != selected.uuid && it.toppings.isNotEmpty() && sameCard(it, selected)
+        }?.toppings
+        if (!sibling.isNullOrEmpty()) return sibling
+
+        val pl = payload ?: return emptyList()
+        val gid = selected.groupId
+            ?: variants.mapNotNull { it.groupId }.firstOrNull()
+            ?: Names.looseNameGroupId(Names.normalize(selected.name), pl.nameGroupId)
+            ?: variants.firstNotNullOfOrNull {
+                Names.looseNameGroupId(Names.normalize(it.name), pl.nameGroupId)
+            }
+        if (gid != null) {
+            val fromGroup = pl.byGroupId[gid]
+            if (!fromGroup.isNullOrEmpty()) return fromGroup
+        }
+        return emptyList()
     }
 
-    /** Выбранный вариант с подставленными добавками (донор или собственные). */
-    fun effective(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct {
-        val tops = forSheet(selected, variants)
-        return if (tops === selected.toppings) selected else selected.copy(toppings = tops)
+    fun effective(
+        selected: CatalogProduct,
+        variants: List<CatalogProduct>,
+        payload: CatalogApi.Payload? = null,
+    ): CatalogProduct {
+        val tops = forSheet(selected, variants, payload)
+        if (tops.isEmpty()) return selected
+        if (tops === selected.toppings) return selected
+        return selected.copy(
+            toppings = tops,
+            supportsMods = selected.supportsMods || tops.isNotEmpty(),
+        )
     }
 
-    private fun sameCard(a: CatalogProduct, b: CatalogProduct): Boolean =
-        a.variantGroup == b.variantGroup
+    private fun sameCard(a: CatalogProduct, b: CatalogProduct): Boolean {
+        if (a.variantGroup != null && a.variantGroup == b.variantGroup) return true
+        if (a.groupId != null && a.groupId == b.groupId) return true
+        return false
+    }
 }
