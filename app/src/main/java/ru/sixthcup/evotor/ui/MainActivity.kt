@@ -757,7 +757,7 @@ class MainActivity : AppCompatActivity() {
         val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         strip.addView(chips)
         chipsScroll = strip; chipsRow = chips
-        searchHost = null; chipsHost = strip
+        chipsHost = strip
 
         val ad = CatalogAdapter(CatalogCallbacks(
             onTap = { onProductTap(it) },
@@ -842,79 +842,9 @@ class MainActivity : AppCompatActivity() {
         updateBar()
     }
 
-    private var searchHost: View? = null
     private var chipsHost: View? = null
     private var searchQuery: String = ""
-    private var searchEdit: EditText? = null
 
-    /** `.searchrow`: поле 48 (радиус 14, лупа 17, ✕ 24) + кнопка скана 48. */
-    private fun buildSearchRow(m: Ds.Metrics): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(m.sidePad), 0, dp(m.sidePad), 0)
-        }
-        val field = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(12), 0)
-            background = rounded(WHITE, 14, LINE)
-            Ds.shadowS(this)
-        }
-        field.addView(icon(this, R.drawable.ic_search, 17f, UiKit.MUTED), LinearLayout.LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(9) })
-        val edit = EditText(this).apply {
-            hint = "Найти напиток"
-            setHintTextColor(UiKit.MUTED)
-            setTextColor(INK)
-            textSize = 12.5f
-            background = null
-            setPadding(0, 0, 0, 0)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            imeOptions = EditorInfo.IME_ACTION_SEARCH
-            maxLines = 1
-            isSingleLine = true
-            setText(searchQuery)
-        }
-        searchEdit = edit
-        val clear = FrameLayout(this).apply {
-            background = rounded(UiKit.SURFACE_2, 12, null)
-            visibility = if (searchQuery.isEmpty()) View.GONE else View.VISIBLE
-            contentDescription = "Очистить поиск"
-            addView(icon(this@MainActivity, R.drawable.ic_close, 10f, UiKit.MUTED), FrameLayout.LayoutParams(dp(10), dp(10), Gravity.CENTER))
-            setOnClickListener { edit.setText("") }
-        }
-        edit.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
-            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) {
-                searchQuery = s?.toString().orEmpty()
-                clear.visibility = if (searchQuery.isEmpty()) View.GONE else View.VISIBLE
-                searchRunnable?.let { handler.removeCallbacks(it) }
-                val r = Runnable { refreshRows(false) }
-                searchRunnable = r
-                handler.postDelayed(r, 120)
-            }
-        })
-        edit.setOnEditorActionListener { v, id, _ ->
-            if (id == EditorInfo.IME_ACTION_SEARCH) {
-                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(v.windowToken, 0)
-                true
-            } else false
-        }
-        field.addView(edit, LinearLayout.LayoutParams(0, WRAP, 1f))
-        field.addView(clear, LinearLayout.LayoutParams(dp(24), dp(24)))
-        row.addView(field, LinearLayout.LayoutParams(0, dp(48), 1f))
-        val scan = FrameLayout(this).apply {
-            background = rounded(WHITE, 14, LINE)
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Сканировать карту гостя"
-            Ds.shadowS(this)
-            addView(icon(this@MainActivity, R.drawable.ic_scan, 21f, INK), FrameLayout.LayoutParams(dp(21), dp(21), Gravity.CENTER))
-            setOnClickListener { notice = null; screen = Screen.CARD; safeRender() }
-        }
-        row.addView(scan, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
-        return row
-    }
 
     private fun leftBorder(color: Int): android.graphics.drawable.Drawable {
         val line = android.graphics.drawable.ColorDrawable(LINE)

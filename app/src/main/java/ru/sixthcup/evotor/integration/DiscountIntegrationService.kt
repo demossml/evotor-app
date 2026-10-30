@@ -102,7 +102,6 @@ class DiscountIntegrationService : IntegrationService() {
                     // На чек оставляем только кэшбэк и комбо: иначе скидка удвоится.
                     val split = FiscalCalc.split(gross, eligibleUnitPrices, info, choice, now)
                     var discountKopecks = (split.receiptDiscountKopecks + comboKopecks).coerceAtMost(grossKopecks)
-                    val floorNeeded = false
                     val total = BigDecimal(discountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
                     val cbKopecks = DiscountCalc.kopecks(cbRub)
                     val voucherApplied = calc.voucher.signum() > 0

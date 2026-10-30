@@ -98,21 +98,6 @@ internal fun priceText(p: CatalogProduct, meta: String? = null): CharSequence {
     return sb
 }
 
-private fun qtyPill(ctx: Context, density: Float): TextView = TextView(ctx).apply {
-    textSize = 13f
-    setOnest(true)
-    setTextColor(UiKit.WHITE)
-    gravity = Gravity.CENTER
-    minWidth = (28 * density).toInt()
-    setPadding((8 * density).toInt(), 0, (8 * density).toInt(), 0)
-    background = UiKit.rounded(density, UiKit.BRAND, 14, null)
-    visibility = View.GONE
-}
-
-private fun applyQty(v: TextView, uuid: String) {
-    val n = Cart.qty(uuid)
-    if (n > 0) { v.text = "×$n"; v.visibility = View.VISIBLE } else v.visibility = View.GONE
-}
 
 private val PRODUCT_DIFF = object : DiffUtil.ItemCallback<CatalogProduct>() {
     override fun areItemsTheSame(a: CatalogProduct, b: CatalogProduct) = a.uuid == b.uuid
