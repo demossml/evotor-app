@@ -80,6 +80,7 @@ import ru.sixthcup.evotor.data.ServerCatalog
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.CatalogCache
+import ru.sixthcup.evotor.data.CatalogMode
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.Combo
@@ -387,7 +388,7 @@ class MainActivity : AppCompatActivity() {
             val cachedStore = StoreUuidResolver.peek(ctx)
             val known = lastEnrich ?: CatalogCache.load(ctx, cachedStore)
             val knownAt = CatalogCache.savedAt(ctx, cachedStore)
-            val cachedServerMode = known?.features?.serverCatalog == true
+            val cachedServerMode = CatalogMode.useServerCatalog(known?.features?.serverCatalog)
             val first = when {
                 inv != null && known != null && cachedServerMode -> ServerCatalog.build(inv, known).products
                 inv != null && known != null -> CatalogApi.merge(inv, known)
@@ -449,8 +450,9 @@ class MainActivity : AppCompatActivity() {
             }
             StoreUuidResolver.remember(ctx, storeUuid ?: enrich.storeUuid)
             CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
-            // Как строить витрину, решает backend-флаг: серверный режим или прежняя склейка.
-            val serverMode = enrich.features?.serverCatalog == true
+            // Как строить витрину, решает флаг backend, но серверный режим пока выключен
+            // на стороне кассы: в нём витрина рассыпается на отдельные объёмы (см. CatalogMode).
+            val serverMode = CatalogMode.useServerCatalog(enrich.features?.serverCatalog)
             val serverShelf = if (serverMode) ServerCatalog.build(inv, enrich) else null
             val mergedResult = CatalogApi.mergeWithStats(inv, enrich)
             val merged = serverShelf?.products ?: mergedResult.first
