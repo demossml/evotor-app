@@ -71,6 +71,52 @@ object DrinkConfig {
         return out
     }
 
+    /**
+     * Вариант с раздельными блоками конфигурации (молоко отдельно от добавок).
+     * Правила те же: обычное молоко (`isFree`) и `sendToReceipt=false` в чек не идут.
+     */
+    fun receiptLines(
+        variant: CatalogProduct,
+        milk: MilkOption?,
+        additions: List<AdditionOption>,
+    ): List<Line> {
+        val chosen = ArrayList<Topping>(additions.size + 1)
+        milk?.let {
+            chosen.add(
+                Topping(
+                    id = it.id,
+                    name = it.label,
+                    // Бесплатное молоко не имеет цены в конфигурации: цену даёт касса по uuid.
+                    priceRub = BigDecimal.ZERO,
+                    groupKey = "milk",
+                    evotorUuid = it.evotorUuid,
+                    isDefault = it.isDefault,
+                    zeroOption = it.isFree,
+                    available = it.available,
+                    sendToReceipt = it.sendToReceipt,
+                ),
+            )
+        }
+        additions.forEach { a ->
+            chosen.add(
+                Topping(
+                    id = a.id,
+                    name = a.name,
+                    priceRub = a.priceRub,
+                    groupKey = a.groupKey,
+                    maxCount = a.maxCount,
+                    evotorUuid = a.evotorUuid,
+                    required = a.required,
+                    isDefault = a.isDefault,
+                    zeroOption = a.zeroOption,
+                    available = a.available,
+                    sendToReceipt = a.sendToReceipt,
+                ),
+            )
+        }
+        return receiptLines(variant, chosen)
+    }
+
     /** Итог по строкам — справочно для UI; деньги принимает Эвотор по фактическим ценам каталога. */
     fun total(lines: List<Line>): BigDecimal =
         lines.fold(BigDecimal.ZERO) { acc, l -> acc.add(l.priceRub) }

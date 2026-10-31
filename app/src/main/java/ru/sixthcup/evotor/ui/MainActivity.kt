@@ -69,6 +69,8 @@ import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.DrinkConfig
+import ru.sixthcup.evotor.data.ProductConfig
+import ru.sixthcup.evotor.data.ProductConfigCache
 import ru.sixthcup.evotor.data.ServerCatalog
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CheckoutChoice
@@ -87,6 +89,7 @@ import ru.sixthcup.evotor.net.DeviceHeaders
 import ru.sixthcup.evotor.net.LoyaltyApi
 import ru.sixthcup.evotor.net.QueueNumberApi
 import ru.sixthcup.evotor.net.CatalogApi
+import ru.sixthcup.evotor.net.ProductConfigApi
 import ru.sixthcup.evotor.net.StoreUuidResolver
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
@@ -304,6 +307,14 @@ class MainActivity : AppCompatActivity() {
 
     /** Лист товара: не даём добавить одну и ту же конфигурацию дважды подряд. */
     private var sheetAdding = false
+
+    /** Конфигурация, полученная для открываемой карточки (молоко/добавки с сервера). */
+    private var pendingConfig: ProductConfig? = null
+    /** Идёт запрос конфигурации для этого uuid — второй тап игнорируем. */
+    private var configLoadingUuid: String? = null
+    private var productsLoadingSheet = false
+    /** Поколение запросов конфигурации: ответ для закрытой карточки не применяем. */
+    private var configGen = 0
 
     /** Состав листа: в server-режиме только собственные добавки продукта. */
     private fun sheetProduct(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct =
@@ -1076,12 +1087,83 @@ class MainActivity : AppCompatActivity() {
 
     private fun onProductTap(p: CatalogProduct) {
         combos.firstOrNull { it.id == p.uuid }?.let { showComboSheet(it); return }
-        // Есть выбор объёма/молока/сиропа — открываем item-sheet; иначе сразу в чек.
-        if (variantModel.hasChoice(p)) showItemSheet(p)
+        // Конфигурация товара с сервера: молоко и добавки — отдельные схемы.
+        openProduct(p)
+    }
+
+    /**
+     * Карточка товара: тянем актуальную конфигурацию через прокси Evotor Cloud.
+     *
+     * Никогда не добавляет товар в чек молча: если у товара может быть обязательная схема
+     * молока, касса либо покажет окно, либо честно скажет, что конфигурации нет.
+     * 404 — маршрут ещё не реализован на backend, работаем по каталогу как раньше.
+     */
+    private fun openProduct(p: CatalogProduct) {
+        if (configLoadingUuid == p.uuid) return // двойной тап по той же карточке
+        val backendId = lastEnrich?.byUuid?.get(p.uuid)?.productId?.takeIf { it > 0 }
+        val storeUuid = lastEnrich?.storeUuid ?: StoreUuidResolver.peek(this)
+        if (backendId == null || storeUuid.isNullOrBlank()) {
+            openProductLegacy(p, "config_skipped reason=no_product_id")
+            return
+        }
+        if (!variantModel.hasChoice(p) && pendingConfig == null) {
+            // Товар без выбора по каталогу всё равно может иметь схему на сервере — спрашиваем.
+        }
+        configLoadingUuid = p.uuid
+        productsLoadingSheet = true
+        val gen = ++configGen
+        thread(name = "product-config") {
+            val res = ProductConfigApi.fetch(backendId, storeUuid)
+            var savedAt = 0L
+            val cached = if (res.config == null) {
+                ProductConfigCache.load(this, storeUuid, backendId)?.also { savedAt = it.second }
+            } else null
+            runOnUiThread {
+                if (isFinishing || isDestroyed || gen != configGen) return@runOnUiThread
+                configLoadingUuid = null
+                productsLoadingSheet = false
+                val cfg = res.config ?: cached?.first
+                when {
+                    cfg != null -> {
+                        if (res.config != null) ProductConfigCache.save(this, cfg)
+                        pendingConfig = cfg
+                        if (cached != null) {
+                            notice = "Конфигурация с сервера недоступна — используются сохранённые данные"
+                            noticeKind = Kind.WARN
+                            Log.i(TAG, "config_cache_used product=$backendId ageMs=${System.currentTimeMillis() - savedAt}")
+                        }
+                        openProductLegacy(p, "config_ok volumes=${cfg.volumes.size} milk=${cfg.milk != null} additions=${cfg.additions != null}")
+                    }
+                    res.unsupported -> openProductLegacy(p, "config_unsupported")
+                    res.noConfiguration -> openProductLegacy(p, "config_empty")
+                    else -> {
+                        // Достоверной конфигурации нет: не продаём «вслепую» товар, у которого схема может быть.
+                        notice = res.error ?: "Не удалось получить конфигурацию товара"
+                        noticeKind = Kind.WARN
+                        Log.w(TAG, "config_failed_no_cache product=$backendId status=${res.httpStatus} err=${res.error}")
+                        openProductLegacy(p, "config_fallback_catalog")
+                    }
+                }
+            }
+        }
+    }
+
+    /** Открытие окна/добавление по данным каталога (прежняя логика). */
+    private fun openProductLegacy(p: CatalogProduct, why: String) {
+        Log.i(TAG, "product_open ${p.uuid} $why")
+        if (variantModel.hasChoice(p) || pendingConfigFor(p) != null) showItemSheet(p)
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
         }
+    }
+
+    /** Конфигурация относится к этому товару (по одному из его объёмов). */
+    private fun pendingConfigFor(p: CatalogProduct): ProductConfig? {
+        val cfg = pendingConfig ?: return null
+        val uuids = variantModel.variantsOf(p).map { it.uuid }.toSet() + p.uuid
+        val hit = cfg.volumes.any { it.evotorUuid != null && it.evotorUuid in uuids }
+        return if (hit) cfg else null
     }
     /**
      * item-sheet 1:1 index: hero → название+цена → описание → теги → «в чеке уже N» →
@@ -1099,7 +1181,78 @@ class MainActivity : AppCompatActivity() {
     private fun productIdOf(uuid: String): Int? =
         lastEnrich?.byUuid?.get(uuid)?.productId?.takeIf { it > 0 }
 
+    /**
+     * Опции из серверной конфигурации: молоко — отдельный блок схемы `milk`,
+     * остальное — из схемы `additions`. Цена берётся из номенклатуры Эвотор по uuid,
+     * бесплатное молоко показывается без цены и в чек не идёт.
+     */
+    private fun configOpts(cfg: ProductConfig, volumeProductId: Int?): OptionPicker.Opts? {
+        val milkScheme = volumeProductId?.let { cfg.milkFor(it) }
+        val addScheme = volumeProductId?.let { cfg.additionsFor(it) }
+        if (milkScheme == null && addScheme == null) return null
+        fun terminalPrice(uuid: String?, fallback: BigDecimal): BigDecimal =
+            uuid?.let { u -> products.firstOrNull { it.uuid == u }?.priceRub } ?: fallback
+        val milk = milkScheme?.options.orEmpty().map { o ->
+            val onTerminal = o.evotorUuid?.let { u -> products.any { it.uuid == u } } ?: false
+            OptionPicker.Opt(
+                key = "c:m:${o.id}",
+                label = o.label,
+                price = if (o.isFree) BigDecimal.ZERO else terminalPrice(o.evotorUuid, BigDecimal.ZERO),
+                evotorUuid = o.evotorUuid,
+                isDefault = o.isDefault,
+                required = cfg.milk?.required == true,
+                zeroOption = o.isFree,
+                available = o.available && (o.isFree || onTerminal),
+                maxCount = 1,
+                id = o.id,
+                sendToReceipt = o.sendToReceipt,
+            )
+        }
+        val additions = addScheme?.options.orEmpty()
+        fun mapOpts(group: String) = additions.filter { it.groupKey.equals(group, ignoreCase = true) }.map { o ->
+            val onTerminal = o.evotorUuid?.let { u -> products.any { it.uuid == u } } ?: false
+            OptionPicker.Opt(
+                key = "c:a:${o.id}",
+                label = o.name,
+                price = terminalPrice(o.evotorUuid, o.priceRub),
+                evotorUuid = o.evotorUuid,
+                isDefault = o.isDefault,
+                required = o.required,
+                zeroOption = o.zeroOption,
+                available = o.available && (o.zeroOption || onTerminal),
+                maxCount = o.maxCount,
+                id = o.id,
+                sendToReceipt = o.sendToReceipt,
+            )
+        }
+        val extra = additions.filterNot {
+            it.groupKey.equals("syrup", true) || it.groupKey.equals("sugar", true) || it.groupKey.equals("milk", true)
+        }.map { o ->
+            val onTerminal = o.evotorUuid?.let { u -> products.any { it.uuid == u } } ?: false
+            OptionPicker.Opt(
+                key = "c:a:${o.id}", label = o.name,
+                price = terminalPrice(o.evotorUuid, o.priceRub), evotorUuid = o.evotorUuid,
+                isDefault = o.isDefault, required = o.required, zeroOption = o.zeroOption,
+                available = o.available && (o.zeroOption || onTerminal), maxCount = o.maxCount, id = o.id,
+                sendToReceipt = o.sendToReceipt,
+            )
+        }
+        Log.i(
+            TAG,
+            "config_opts volume=$volumeProductId milk=${milk.size} syrup=${mapOpts("syrup").size} " +
+                "sugar=${mapOpts("sugar").size} extra=${extra.size} requiredMilk=${cfg.milk?.required == true}",
+        )
+        return OptionPicker.Opts(milk = milk, syrup = mapOpts("syrup"), sugar = mapOpts("sugar"), extra = extra)
+    }
+
     private fun optionsFor(p: CatalogProduct): OptionPicker.Opts {
+        val cfg = pendingConfigFor(p)
+        if (cfg != null) {
+            val volumeId = cfg.volumes.firstOrNull { it.evotorUuid == p.uuid }?.productId
+                ?: cfg.volumes.firstOrNull { it.evotorUuid != null && variantModel.variantsOf(p).any { v -> v.uuid == it.evotorUuid } }?.productId
+                ?: cfg.productId
+            configOpts(cfg, volumeId)?.let { return it }
+        }
         val evotor = variantModel.options
         // maxCount у опций из номенклатуры не задан: milk/syrup/sugar — одиночный выбор,
         // extra — «можно несколько» (лимит backend-схемы применяется к её же опциям).
@@ -1363,6 +1516,8 @@ class MainActivity : AppCompatActivity() {
         Fonts.apply(root)
         dialog.setContentView(root)
         styleSheet(dialog)
+        // Конфигурация живёт ровно одно открытие карточки товара.
+        dialog.setOnDismissListener { pendingConfig = null }
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true

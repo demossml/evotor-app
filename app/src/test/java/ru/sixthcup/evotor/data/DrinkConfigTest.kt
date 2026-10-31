@@ -147,4 +147,46 @@ class DrinkConfigTest {
         val lines = DrinkConfig.receiptLines(variant(), listOf(oddMilk))
         assertEquals(DrinkConfig.Role.MILK, lines[1].role)
     }
+
+    // Конфигурация с сервера: молоко и добавки — раздельные блоки
+    @Test
+    fun `config milk - ordinary milk is not a receipt line even with uuid`() {
+        val ordinary = MilkOption(
+            id = 1, productId = null, label = "Обычное молоко", evotorUuid = "REGULAR-UUID",
+            isFree = true, isDefault = true, sendToReceipt = false, available = true,
+        )
+        val lines = DrinkConfig.receiptLines(variant(), ordinary, emptyList())
+        assertEquals(1, lines.size)
+        assertEquals(d("190"), DrinkConfig.total(lines))
+    }
+
+    @Test
+    fun `config milk - paid alternative becomes its own line`() {
+        val coconut = MilkOption(
+            id = 2, productId = 900, label = "Кокосовое молоко", evotorUuid = "COCONUT-UUID",
+            isFree = false, isDefault = false, sendToReceipt = true, available = true,
+        )
+        val lines = DrinkConfig.receiptLines(variant(), coconut, emptyList())
+        assertEquals(2, lines.size)
+        assertEquals(DrinkConfig.Role.MILK, lines[1].role)
+        assertEquals("COCONUT-UUID", lines[1].uuid)
+    }
+
+    @Test
+    fun `config additions - paid additions are lines, zero options are not`() {
+        val paid = AdditionOption(
+            id = 21, productId = 901, name = "Ванильный сироп", groupKey = "syrup",
+            evotorUuid = "VANILLA-UUID", priceRub = d("50"), required = false, maxCount = 2,
+            isDefault = false, zeroOption = false, available = true, sendToReceipt = true,
+        )
+        val zero = AdditionOption(
+            id = 22, productId = null, name = "Без сиропа", groupKey = "syrup",
+            evotorUuid = null, priceRub = BigDecimal.ZERO, required = false, maxCount = 1,
+            isDefault = false, zeroOption = true, available = true, sendToReceipt = false,
+        )
+        val lines = DrinkConfig.receiptLines(variant(), null, listOf(paid, zero))
+        assertEquals(2, lines.size)
+        assertEquals("VANILLA-UUID", lines[1].uuid)
+        assertEquals(d("240"), DrinkConfig.total(lines))
+    }
 }
