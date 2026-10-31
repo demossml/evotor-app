@@ -37,6 +37,8 @@ object ConfigDiagnostics {
         val volumeMatched: Boolean,
         /** В конфигурации вообще есть схемы (молоко или добавки). */
         val hasSchemes: Boolean,
+        /** `configErrors` от backend: `links` и подобные коды. */
+        val configErrors: List<String> = emptyList(),
     )
 
     /**
@@ -49,6 +51,7 @@ object ConfigDiagnostics {
         "invalid_product_id" -> "У товара нет корректного id на сервере — обновите каталог"
         "proxy_forbidden" -> "Нет доступа к схемам товара (403) — проверьте токен точки"
         "store_uuid_mismatch" -> "Точка в запросе и в заголовке не совпадают"
+        "links" -> "объёмы не привязаны к товарам Эвотор этой точки"
         else -> null
     }
 
@@ -73,6 +76,9 @@ object ConfigDiagnostics {
                 "Схема не назначена (используются сохранённые данные с сервера)."
             fetch.error != null ->
                 errorText(fetch.error) ?: "Схема не получена: сервер недоступен. Проверьте связь и повторите."
+            view.configErrors.isNotEmpty() ->
+                "Сервер вернул конфигурацию с ошибкой: " + errorText(view.configErrors.first())
+                    .orEmpty().ifBlank { view.configErrors.joinToString(", ") }
             view.hasSchemes ->
                 if (view.volumeMatched) "Схема есть, но опции недоступны (нет товаров Эвотор)."
                 else "Для этого объёма схема не назначена (объём не сопоставлен с сервером)."

@@ -141,6 +141,16 @@ class ProductConfigStrictFieldsTest {
     }
 
     @Test
+    fun `server config errors are parsed as codes`() {
+        val json = body().replace(
+            "\"volumes\"",
+            "\"configErrors\":[\"links\",{\"code\":\"volumes_unlinked\"}],\"volumes\"",
+        )
+        val cfg = parse(json).config
+        assertEquals(listOf("links", "volumes_unlinked"), cfg?.configErrors)
+    }
+
+    @Test
     fun `fetch with unknown product id never returns a usable config`() {
         val res = ProductConfigApi.fetch(0, store)
         assertNull(res.config)

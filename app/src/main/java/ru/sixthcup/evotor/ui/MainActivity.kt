@@ -1639,6 +1639,7 @@ class MainActivity : AppCompatActivity() {
                 volumeMatched = sheetCfg == null || sheetCfg.volumes.isEmpty() ||
                     ProductConfigGuard.volumeProductId(sheetCfg, start.uuid) != null,
                 hasSchemes = sheetCfg?.let { it.milk != null || it.additions != null } == true,
+                configErrors = sheetCfg?.configErrors.orEmpty(),
             ),
         )
         if (configHint != null) {

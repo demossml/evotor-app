@@ -28,7 +28,8 @@ class ConfigDiagnosticsTest {
         catalog: Int = 0,
         volumeMatched: Boolean = true,
         hasSchemes: Boolean = true,
-    ) = ConfigDiagnostics.View(milk, additions, catalog, volumeMatched, hasSchemes)
+        configErrors: List<String> = emptyList(),
+    ) = ConfigDiagnostics.View(milk, additions, catalog, volumeMatched, hasSchemes, configErrors)
 
     @Test
     fun `no hint when schemes are present`() {
@@ -96,6 +97,19 @@ class ConfigDiagnosticsTest {
         assertEquals("Нет доступа к схемам товара (403) — проверьте токен точки", ConfigDiagnostics.errorText("proxy_forbidden"))
         assertNull(ConfigDiagnostics.errorText("socket timeout"))
         assertNull(ConfigDiagnostics.errorText(null))
+    }
+
+    // Сервер сам сообщает причину: configErrors: ["links"] — объёмы не привязаны к точке.
+    @Test
+    fun `server config errors are shown with a human explanation`() {
+        val text = ConfigDiagnostics.hint(fetch(), view(hasSchemes = false, configErrors = listOf("links")))
+        assertTrue(text!!, text.contains("объёмы не привязаны к товарам Эвотор этой точки"))
+    }
+
+    @Test
+    fun `unknown server config error is shown as a code`() {
+        val text = ConfigDiagnostics.hint(fetch(), view(hasSchemes = false, configErrors = listOf("weird_code")))
+        assertTrue(text!!, text.contains("weird_code"))
     }
 
     @Test

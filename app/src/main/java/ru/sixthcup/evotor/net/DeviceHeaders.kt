@@ -19,8 +19,12 @@ object DeviceHeaders {
     fun apply(conn: HttpURLConnection, context: Context? = SixthCupApp.instance) {
         val ctx = context ?: return
         try {
-            StoreUuidResolver.peek(ctx)?.let {
-                conn.setRequestProperty("X-Evotor-Store-Uuid", it)
+            // Не дублируем: если вызывающий уже поставил точку явно (как запрос конфигурации),
+            // оставляем его значение — иначе на провод уходит "uuid, uuid" и сервер ругается.
+            if (conn.getRequestProperty("X-Evotor-Store-Uuid").isNullOrBlank()) {
+                StoreUuidResolver.peek(ctx)?.let {
+                    conn.setRequestProperty("X-Evotor-Store-Uuid", it)
+                }
             }
             deviceUuid(ctx)?.let {
                 conn.setRequestProperty("X-Evotor-Device-UUID", it)

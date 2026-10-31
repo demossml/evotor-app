@@ -145,6 +145,7 @@ object ProductConfigApi {
                                 volumes = parseVolumes(root.optJSONArray("volumes")),
                                 milk = parseMilk(root.optJSONObject("milk")),
                                 additions = parseAdditions(root.optJSONObject("additions")),
+                                configErrors = parseConfigErrors(root.optJSONArray("configErrors")),
                             )
                             val empty = config.volumes.size <= 1 && config.milk == null && config.additions == null
                             Log.i(
@@ -163,6 +164,22 @@ object ProductConfigApi {
             Log.w(TAG, "config_parse_failed ${e.javaClass.simpleName}")
             FetchResult(null, httpStatus, "Некорректный ответ конфигурации")
         }
+
+    /** `configErrors: ["links"]` или `[{"code":"links"}]` — коды, а не готовый текст. */
+    private fun parseConfigErrors(a: org.json.JSONArray?): List<String> {
+        if (a == null) return emptyList()
+        val out = ArrayList<String>(a.length())
+        for (i in 0 until a.length()) {
+            val raw = a.opt(i)
+            val code = when (raw) {
+                is String -> raw
+                is JSONObject -> raw.optString("code").ifBlank { raw.optString("error") }
+                else -> ""
+            }.trim()
+            if (code.isNotEmpty()) out.add(code)
+        }
+        return out
+    }
 
     private fun parseVolumes(a: org.json.JSONArray?): List<VolumeOption> {
         if (a == null) return emptyList()

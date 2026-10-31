@@ -17,6 +17,11 @@ data class ProductConfig(
     val milk: MilkConfig? = null,
     /** `null` — ни одному объёму схема добавок не назначена. */
     val additions: AdditionsConfig? = null,
+    /**
+     * Коды проблем от backend (`configErrors`): например `links` — объёмы не привязаны
+     * к товарам Эвотор этой точки. Показываем кассиру, чтобы причина была видна без логов.
+     */
+    val configErrors: List<String> = emptyList(),
 ) {
     /** Есть ли что выбирать кассиру. Пустая конфигурация = обычное добавление товара. */
     val hasChoices: Boolean
