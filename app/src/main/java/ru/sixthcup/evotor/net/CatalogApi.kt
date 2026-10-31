@@ -65,7 +65,16 @@ object CatalogApi {
          * и чип «Всё». `null` — backend старее настройки, касса работает как раньше.
          */
         val menu: Menu? = null,
+        /**
+         * `features` из ответа каталога. `serverCatalog = true` — витрину и состав листа
+         * строим из серверного JSON, без склейки по имени и без донора добавок.
+         * Нет поля (старый backend) — прежний merge-путь.
+         */
+        val features: Features? = null,
     )
+
+    /** Флаги каталога, которые backend включает по версии кассы. */
+    data class Features(val serverCatalog: Boolean = false)
 
     /** `menu` каталога: как касса рисует чипы групп (админка → Меню → Группы). */
     data class Menu(
@@ -112,6 +121,13 @@ object CatalogApi {
         val articleNumber: String? = null,
         /** products.category_id: нужен для скрытия добавок по id категории. */
         val categoryId: Int? = null,
+        /**
+         * Можно ли продавать на этой точке. Нет поля — считаем продаваемым (обратная совместимость).
+         * `false` не выбрасывает строку из ответа: она нужна диагностике и админке.
+         */
+        val sellable: Boolean = true,
+        /** Почему `sellable=false`: no_store_link | no_evotor_uuid | hidden_modifier | … */
+        val notReadyReason: String? = null,
     )
 
     /** Результат запроса каталога: payload == null — сеть/сервер не отдали данные. */
@@ -375,6 +391,9 @@ object CatalogApi {
                 parentProductId = if (o.has("parentProductId") && !o.isNull("parentProductId")) o.optInt("parentProductId") else null,
                 articleNumber = o.optString("articleNumber").trim().ifBlank { null },
                 categoryId = if (o.has("categoryId") && !o.isNull("categoryId")) o.optInt("categoryId") else null,
+                // Нет поля — товар продаваемый (старый backend и старые кэши).
+                sellable = if (o.has("sellable")) o.optBoolean("sellable", true) else true,
+                notReadyReason = o.optString("notReadyReason").trim().ifBlank { null },
             )
             enrichAll.add(enrich)
             if (uuid.isNotEmpty()) map[uuid] = enrich
@@ -478,6 +497,10 @@ object CatalogApi {
             groupByProductId = groupByProductId,
             groupByUuid = groupByUuid,
             menu = menu,
+            // Пока APK не выпущен, backend отдаёт serverCatalog=false — путь остаётся прежним.
+            features = root.optJSONObject("features")?.let { f ->
+                Features(serverCatalog = f.optBoolean("serverCatalog", false))
+            },
         )
     }
 

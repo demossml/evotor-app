@@ -84,4 +84,40 @@ class CatalogCacheTest {
             file.delete()
         }
     }
+
+    @Test
+    fun `cache keeps server catalog flag and sellable rows`() {
+        val file = File.createTempFile("catalog-cache-server", ".json")
+        try {
+            val blocked = enrich(hide = false, categoryId = null).copy(
+                productId = 43, name = "Раф", sellable = false, notReadyReason = "no_store_link",
+            )
+            val payload = CatalogApi.Payload(
+                byUuid = mapOf("u-42" to enrich(hide = false, categoryId = null), "u-43" to blocked),
+                upsellDefault = emptyList(),
+                features = CatalogApi.Features(serverCatalog = true),
+            )
+            CatalogCache.saveTo(file, payload)
+            val back = CatalogCache.loadFrom(file)
+            assertEquals(true, back?.features?.serverCatalog)
+            assertEquals(true, back?.byUuid?.get("u-42")?.sellable)
+            assertEquals(false, back?.byUuid?.get("u-43")?.sellable)
+            assertEquals("no_store_link", back?.byUuid?.get("u-43")?.notReadyReason)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `old cache without features keeps legacy mode`() {
+        val file = File.createTempFile("catalog-cache-legacy", ".json")
+        try {
+            CatalogCache.saveTo(file, CatalogApi.Payload(byUuid = mapOf("u-42" to enrich(false, null)), upsellDefault = emptyList()))
+            val back = CatalogCache.loadFrom(file)
+            assertEquals(false, back?.features?.serverCatalog)
+            assertEquals(true, back?.byUuid?.get("u-42")?.sellable)
+        } finally {
+            file.delete()
+        }
+    }
 }

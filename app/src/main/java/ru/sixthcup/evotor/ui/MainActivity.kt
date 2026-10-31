@@ -68,6 +68,7 @@ import ru.sixthcup.evotor.data.QueueOrder
 import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.ServerCatalog
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.CatalogCache
@@ -293,6 +294,17 @@ class MainActivity : AppCompatActivity() {
     private var catalogNote: String? = null
     private var swipeRefresh: SwipeRefreshLayout? = null
 
+    /**
+     * Витрина и лист собраны из серверного каталога (`features.serverCatalog`).
+     * В этом режиме добавки листа берутся только с самого продукта — «донора» по имени
+     * и соседнему размеру нет (CHANGES-FROM-PLAN F3).
+     */
+    private var serverCatalogMode = false
+
+    /** Состав листа: в server-режиме только собственные добавки продукта. */
+    private fun sheetProduct(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct =
+        if (serverCatalogMode) selected else SheetToppings.effective(selected, variants, lastEnrich)
+
     private fun setProducts(list: List<CatalogProduct>) {
         products = list
         // Флаг «можно в подарок» мог измениться в админке — обновляем строки корзины.
@@ -327,7 +339,9 @@ class MainActivity : AppCompatActivity() {
             val cachedStore = StoreUuidResolver.peek(ctx)
             val known = lastEnrich ?: CatalogCache.load(ctx, cachedStore)
             val knownAt = CatalogCache.savedAt(ctx, cachedStore)
+            val cachedServerMode = known?.features?.serverCatalog == true
             val first = when {
+                inv != null && known != null && cachedServerMode -> ServerCatalog.build(inv, known).products
                 inv != null && known != null -> CatalogApi.merge(inv, known)
                 inv != null -> CatalogApi.applySoftFocus(inv)
                 else -> null
@@ -345,6 +359,7 @@ class MainActivity : AppCompatActivity() {
                         Log.i(TAG, "catalog_cache ageMin=${((System.currentTimeMillis() - knownAt) / 60_000L).coerceAtLeast(0L)}")
                     }
                 }
+                serverCatalogMode = cachedServerMode
                 if (first == null) { if (products.isEmpty()) productsError = true } else setProducts(first)
                 CheckoutChoice.saveCombo(this, comboDiscountRub())
                 if (screen == Screen.ORDER) refreshChromeAndRows(false)
@@ -386,21 +401,45 @@ class MainActivity : AppCompatActivity() {
             }
             StoreUuidResolver.remember(ctx, storeUuid ?: enrich.storeUuid)
             CatalogCache.save(ctx, enrich, storeUuid ?: enrich.storeUuid)
+            // Как строить витрину, решает backend-флаг: серверный режим или прежняя склейка.
+            val serverMode = enrich.features?.serverCatalog == true
+            val serverShelf = if (serverMode) ServerCatalog.build(inv, enrich) else null
             val mergedResult = CatalogApi.mergeWithStats(inv, enrich)
-            val merged = mergedResult.first
+            val merged = serverShelf?.products ?: mergedResult.first
             val match = mergedResult.second
+            if (serverShelf != null) {
+                Log.i(
+                    "SC_CAT",
+                    "mode=server store=${storeUuid ?: "-"} sellable=${serverShelf.shown} shown=${serverShelf.shown} " +
+                        "hidden_flag=${serverShelf.hiddenByFlag} not_sellable=${serverShelf.notSellable} " +
+                        "missing_terminal=${serverShelf.missingOnTerminal} absent_on_server=${serverShelf.absentOnServer}",
+                )
+            } else {
+                Log.i(
+                    "SC_CAT",
+                    "mode=merge store=${storeUuid ?: "-"} shown=${merged.size} " +
+                        "toppings=${merged.count { it.toppings.isNotEmpty() }}",
+                )
+            }
             val withTop = merged.count { it.toppings.isNotEmpty() }
             val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 swipeRefresh?.isRefreshing = false
                 lastEnrich = enrich
+                serverCatalogMode = serverMode
                 catalogFetchOk = true
                 products = merged
                 variantModel = DrinkVariants.build(merged)
                 combos = Combos.from(merged)
                 upsellDefault = enrich.upsellDefault
-                catalogNote = null
+                catalogNote = serverShelf?.let { sh ->
+                    when {
+                        sh.missingOnTerminal > 0 -> "Каталог сервера: ${sh.shown} позиций, ${sh.missingOnTerminal} ещё не загружены на терминал"
+                        sh.notSellable > 0 -> "Каталог сервера: ${sh.shown} позиций, ${sh.notSellable} не готовы к продаже"
+                        else -> null
+                    }
+                }
                 catalogLoadedAt = System.currentTimeMillis()
                 Log.i(TAG, "enrich ok products=${merged.size} matchedUuid=${enrich.byUuid.size} matchedName=${enrich.byName.size} withToppings=$withTop sellableToppings=$withSellable store=$storeUuid")
                 // Диагностика: ответ непустой, но ни один товар не обогащён — обычно значит,
@@ -1095,7 +1134,7 @@ class MainActivity : AppCompatActivity() {
         val own = variantModel.variantsOf(p)
         // Карточка объёмов — одна сущность: схема добавок общая для всех размеров.
         val variants = SheetContract.cardVariants(own, lastEnrich)
-        val start = variants.firstOrNull { it.uuid == p.uuid } ?: SheetToppings.effective(p, variants, lastEnrich)
+        val start = variants.firstOrNull { it.uuid == p.uuid } ?: sheetProduct(p, variants)
         val hasTops = variants.any { it.toppings.isNotEmpty() }
         val opts = if (start.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(start) else OptionPicker.Opts()
         val scheme = SheetContract.scheme(variants, lastEnrich, catalogFetchOk)
@@ -1226,7 +1265,7 @@ class MainActivity : AppCompatActivity() {
         // opts от первого variant на весь sheet.
         picker.onVariantChanged = { selected ->
             // Донор: у выбранного размера добавок может не быть, у соседнего той же карточки они есть.
-            val effective = SheetToppings.effective(selected, variants, lastEnrich)
+            val effective = sheetProduct(selected, variants)
             Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${effective.toppings.size} own=${selected.toppings.size}")
             val newOpts = if (effective.supportsMods || effective.toppings.isNotEmpty() || !variantModel.options.isEmpty)
                 optionsFor(effective) else OptionPicker.Opts()
@@ -1329,7 +1368,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val variants = SheetContract.cardVariants(variantModel.variantsOf(drink), lastEnrich)
-        val drinkCard = variants.firstOrNull { it.uuid == drink.uuid } ?: SheetToppings.effective(drink, variants, lastEnrich)
+        val drinkCard = variants.firstOrNull { it.uuid == drink.uuid } ?: sheetProduct(drink, variants)
         val opts = if (drinkCard.supportsMods || drinkCard.toppings.isNotEmpty() || !variantModel.options.isEmpty) optionsFor(drinkCard) else OptionPicker.Opts()
 
         val dialog = BottomSheetDialog(this)

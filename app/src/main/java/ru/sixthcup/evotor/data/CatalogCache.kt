@@ -62,6 +62,9 @@ object CatalogCache {
                     sizeUnit = optStr("sizeUnit"),
                     articleNumber = optStr("articleNumber"),
                     categoryId = if (o.has("categoryId") && !o.isNull("categoryId")) o.optInt("categoryId") else null,
+                    // Старый кэш без этих полей: товар считаем продаваемым.
+                    sellable = if (o.has("sellable")) o.optBoolean("sellable", true) else true,
+                    notReadyReason = optStr("notReadyReason"),
                 )
             }
             fun parseEnrich(o: JSONObject): CatalogApi.Enrich {
@@ -88,6 +91,8 @@ object CatalogCache {
                     sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
                     sizeUnit = str("sizeUnit"),
                     articleNumber = str("articleNumber"),
+                    sellable = if (o.has("sellable")) o.optBoolean("sellable", true) else true,
+                    notReadyReason = str("notReadyReason"),
                     categoryId = if (o.has("categoryId") && !o.isNull("categoryId")) o.optInt("categoryId") else null,
                 )
             }
@@ -177,6 +182,9 @@ object CatalogCache {
                 groupByProductId = groupByProductId,
                 groupByUuid = groupByUuid,
                 menu = menu,
+                features = root.optJSONObject("features")?.let { f ->
+                    CatalogApi.Features(serverCatalog = f.optBoolean("serverCatalog", false))
+                },
             )
         } catch (_: Throwable) {
             null
@@ -225,6 +233,8 @@ object CatalogCache {
                     .put("sizeUnit", e.sizeUnit ?: JSONObject.NULL)
                     .put("articleNumber", e.articleNumber ?: JSONObject.NULL)
                     .put("categoryId", e.categoryId ?: JSONObject.NULL)
+                    .put("sellable", e.sellable)
+                    .put("notReadyReason", e.notReadyReason ?: JSONObject.NULL)
                 if (e.countsAsCup != null) o.put("countsAsCup", e.countsAsCup)
                 if (e.freeEligible != null) o.put("freeEligible", e.freeEligible)
                 if (e.isFood != null) o.put("isFood", e.isFood)
@@ -251,6 +261,7 @@ object CatalogCache {
                 .put("groupByProduct", groupByProduct)
                 .put("groupByUuid", groupByUuid)
                 .put("savedAt", System.currentTimeMillis())
+                .put("features", JSONObject().put("serverCatalog", payload.features?.serverCatalog == true))
             // Настройка вкладок переживает offline-запуск так же, как остальной каталог.
             payload.menu?.let { m ->
                 val order = JSONArray()
