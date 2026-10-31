@@ -1,6 +1,7 @@
 package ru.sixthcup.evotor.sell
 
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.FiscalLine
 import java.math.BigDecimal
 
@@ -90,14 +91,35 @@ object ReceiptPlan {
     }
 
     /**
+     * Текст для кассира: чего нет в номенклатуре (с uuid — по нему ищут товар в Эвоторе).
+     */
+    fun missingMessage(missing: List<MissingProduct>): String =
+        "Нет товара в кассе: " +
+            missing.joinToString(", ") { "${it.name} (${it.productUuid})" } +
+            ". Обновите каталог Эвотор."
+
+    /**
+     * Отдельные uuid строк корзины, которые надо проверить в номенклатуре терминала
+     * до резервирования номера очереди. Синтетические (`mod:…`) и пустые не проверяются —
+     * они всё равно не попадут в чек.
+     */
+    fun cartUuids(lines: List<CartLine>): List<String> {
+        val out = ArrayList<String>(lines.size)
+        for (line in lines) {
+            val uuid = line.productUuid
+            if (uuid.isBlank() || !Cart.isSellable(uuid)) continue
+            if (out.contains(uuid)) continue
+            out.add(uuid)
+        }
+        return out
+    }
+
+    /**
      * Причина, по которой чек открывать нельзя. `null` — можно.
      * Сообщение содержит uuid отсутствующего товара: кассир видит, что именно обновить.
      */
     fun blockReason(result: Result): String? {
-        if (result.missing.isNotEmpty()) {
-            val list = result.missing.joinToString(", ") { "${it.name} (${it.productUuid})" }
-            return "Нет товара в кассе: $list. Обновите каталог Эвотор."
-        }
+        if (result.missing.isNotEmpty()) return missingMessage(result.missing)
         if (result.skippedSynthetic > 0) {
             return "В чеке есть позиция без товара Эвотор — удалите её из корзины."
         }

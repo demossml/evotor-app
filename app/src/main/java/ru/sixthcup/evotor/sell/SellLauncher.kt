@@ -46,6 +46,11 @@ object SellLauncher {
         spendCashback: Boolean,
         cashbackKopecks: Long,
         voucherId: Int? = null,
+        /**
+         * Номенклатура, уже проверенная вызывающим до резервирования номера очереди.
+         * `null` — искать в терминале здесь (старое поведение).
+         */
+        preflight: Map<String, ProductItem.Product>? = null,
         onDone: (Outcome) -> Unit,
     ) {
         val lines = Cart.all()
@@ -73,7 +78,7 @@ object SellLauncher {
             // ReceiptPlan (его же проверяют тесты); здесь только обращение к номенклатуре терминала.
             val terminal = HashMap<String, ProductItem.Product?>()
             val plan = ReceiptPlan.plan(fiscalLines) { uuid ->
-                val item = try {
+                val item = preflight?.get(uuid) ?: try {
                     InventoryApi.getProductByUuid(activity, uuid) as? ProductItem.Product
                 } catch (_: Throwable) {
                     null

@@ -78,6 +78,26 @@ class RepeatSessionTest {
     }
 
     @Test
+    fun `nothing opens automatically after cancel`() {
+        val session = RepeatSession()
+        session.start(listOf(a, b))
+        session.cancel()
+        assertNull("после отмены продолжать нечего", session.resume())
+        assertNull(session.added(a))
+        assertNull(session.pending)
+        assertFalse(session.active)
+    }
+
+    @Test
+    fun `closing the sheet twice does not report the interruption twice`() {
+        val session = RepeatSession()
+        session.start(listOf(a, b))
+        assertTrue(session.closedWithoutAdd(a))
+        assertFalse("повторный вызов обработчика закрытия игнорируется", session.closedWithoutAdd(a))
+        assertEquals(1, session.remaining)
+    }
+
+    @Test
     fun `restart does not mix the new queue with the old one`() {
         val session = RepeatSession()
         session.start(listOf(a, b, c))

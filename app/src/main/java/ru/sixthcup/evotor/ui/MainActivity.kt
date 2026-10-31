@@ -70,6 +70,7 @@ import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLines
 import ru.sixthcup.evotor.data.RepeatOrder
+import ru.sixthcup.evotor.data.RepeatInterrupt
 import ru.sixthcup.evotor.data.RepeatSession
 import ru.sixthcup.evotor.data.ProductConfig
 import ru.sixthcup.evotor.data.ProductConfigCache
@@ -99,6 +100,10 @@ import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
 import ru.sixthcup.evotor.scanner.ScannerHub
 import ru.sixthcup.evotor.scanner.ScannerReceiver
+import ru.evotor.framework.inventory.InventoryApi
+import ru.evotor.framework.inventory.ProductItem
+import ru.sixthcup.evotor.sell.MissingProduct
+import ru.sixthcup.evotor.sell.ReceiptPlan
 import ru.sixthcup.evotor.sell.SellLauncher
 import ru.evotor.framework.receipt.Receipt
 import ru.evotor.framework.receipt.ReceiptApi
@@ -330,6 +335,13 @@ class MainActivity : AppCompatActivity() {
      * (`openProduct`), а не копируется из прошлого чека.
      */
     private val repeat = RepeatSession()
+    /** Сколько позиций осталось не добавлено после прерывания повтора (null — прерывания нет). */
+    private var repeatInterrupt: Int? = null
+    /** Отложенная проверка «можно ли показать диалог прерывания». */
+    private val repeatInterruptCheck = Runnable { showRepeatInterruptIfIdle() }
+    /** Открыт лист поверх каталога (карточка, комбо, клиент): диалог повтора поверх не показываем. */
+    private var catalogSheetOpen = false
+    private var repeatDialog: BottomSheetDialog? = null
 
     /** Состав листа: в server-режиме только собственные добавки продукта. */
     private fun sheetProduct(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct =
@@ -1223,24 +1235,49 @@ class MainActivity : AppCompatActivity() {
         next?.let { openProduct(it) }
     }
 
-    /** Окно закрыто без добавления: повтор прерван, остаток не теряется молча. */
+    /**
+     * Окно товара закрыто без добавления (крестик, Back, тап мимо): повтор прерван,
+     * остаток не теряется молча. Диалог показываем не сразу и не поверх другой карточки.
+     */
     private fun onRepeatSheetClosed(closed: CatalogProduct) {
         if (!repeat.closedWithoutAdd(closed)) return
         val left = repeat.remaining
         Log.i(TAG, "repeat_interrupted ${closed.uuid} left=$left")
-        notice = if (left > 0) {
-            "Повтор не завершён: осталось $left поз."
-        } else {
-            "Повтор не завершён: ${closed.name} не добавлен"
-        }
+        repeatInterrupt = left
+        notice = RepeatInterrupt.notice(left, closed.name)
         noticeKind = Kind.WARN
         safeRender()
-        askRepeatRemainder(left)
+        scheduleRepeatInterrupt()
     }
 
-    /** Явный выбор кассира: продолжить прерванный повтор или отменить остаток. */
+    /** Отложенная проверка: пока открыта другая карточка, решение не навязываем. */
+    private fun scheduleRepeatInterrupt() {
+        if (repeatInterrupt == null) return
+        val host = window?.decorView ?: return
+        host.removeCallbacks(repeatInterruptCheck)
+        host.postDelayed(repeatInterruptCheck, REPEAT_INTERRUPT_DELAY_MS)
+    }
+
+    private fun showRepeatInterruptIfIdle() {
+        if (isFinishing || isDestroyed) return
+        val pending = repeatInterrupt
+        if (!RepeatInterrupt.shouldShow(pending, catalogSheetOpen, repeatDialog?.isShowing == true)) {
+            // Кассир уже открыл другую карточку или диалог уже на экране — не мешаем.
+            if (pending != null) Log.i(TAG, "repeat_interrupt_postponed sheet_open=${catalogSheetOpen}")
+            return
+        }
+        askRepeatRemainder(repeat.remaining)
+    }
+
+    /**
+     * Явный выбор кассира: продолжить прерванный повтор или отменить остаток.
+     * Повторное открытие безопасно: второй диалог не создаётся.
+     */
     private fun askRepeatRemainder(left: Int) {
+        if (repeatDialog?.isShowing == true) return
+        val hasQueue = repeat.active
         val dialog = BottomSheetDialog(this)
+        repeatDialog = dialog
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
@@ -1253,10 +1290,10 @@ class MainActivity : AppCompatActivity() {
             setTextColor(INK)
         })
         root.addView(TextView(this).apply {
-            text = if (left > 0) {
-                "Не добавлено: $left поз. Продолжить повтор или отменить остаток?"
-            } else {
-                "Позиция не добавлена. Повторить заново?"
+            text = when {
+                hasQueue && left > 0 -> "Не добавлено: $left поз. Продолжить повтор или отменить остаток?"
+                hasQueue -> "Позиция не добавлена. Продолжить повтор?"
+                else -> "Позиция не добавлена. Повторить заказ заново?"
             }
             textSize = 13f
             setTextColor(UiKit.MUTED)
@@ -1274,14 +1311,21 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { act() }
         }
         root.addView(
-            actionButton("Продолжить повтор", primary = true) {
+            actionButton(if (hasQueue) "Продолжить повтор" else "Повторить заново", primary = true) {
+                repeatInterrupt = null
                 dialog.dismiss()
-                repeat.resume()?.let { openProduct(it) }
+                if (hasQueue) {
+                    repeat.resume()?.let { openProduct(it) }
+                } else {
+                    // Очередь пуста: «заново» — это новый план по прошлому чеку.
+                    repeatLastOrder()
+                }
             },
             LinearLayout.LayoutParams(MATCH, WRAP),
         )
         root.addView(
             actionButton("Отменить повтор", primary = false) {
+                repeatInterrupt = null
                 dialog.dismiss()
                 cancelRepeat()
             },
@@ -1290,10 +1334,13 @@ class MainActivity : AppCompatActivity() {
         Fonts.apply(root)
         dialog.setContentView(root)
         styleSheet(dialog)
+        dialog.setOnDismissListener { if (repeatDialog === dialog) repeatDialog = null }
         dialog.show()
     }
 
+    /** Отмена остатка: ничего не открываем автоматически. */
     private fun cancelRepeat() {
+        repeatInterrupt = null
         val lost = repeat.cancel()
         notice = if (lost > 0) "Повтор отменён: не добавлено $lost поз." else "Повтор отменён"
         noticeKind = Kind.WARN
@@ -1621,10 +1668,17 @@ class MainActivity : AppCompatActivity() {
         dialog.setContentView(root)
         styleSheet(dialog)
         // Конфигурация живёт ровно одно открытие карточки товара.
+        var closedOnce = false
         dialog.setOnDismissListener {
+            if (closedOnce) return@setOnDismissListener
+            closedOnce = true
+            catalogSheetOpen = false
             pendingConfig = null
             onRepeatSheetClosed(p)
+            // Другая карточка могла закрыться раньше: даём шанс показать решение по повтору.
+            scheduleRepeatInterrupt()
         }
+        catalogSheetOpen = true
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
@@ -1960,6 +2014,14 @@ class MainActivity : AppCompatActivity() {
         Fonts.apply(root)
         dialog.setContentView(root)
         styleSheet(dialog)
+        var closedOnce = false
+        dialog.setOnDismissListener {
+            if (closedOnce) return@setOnDismissListener
+            closedOnce = true
+            catalogSheetOpen = false
+            scheduleRepeatInterrupt()
+        }
+        catalogSheetOpen = true
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
@@ -2096,7 +2158,7 @@ class MainActivity : AppCompatActivity() {
         emptyCartBarRoot?.visibility = if (empty) View.VISIBLE else View.GONE
         repeatOrderView?.visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
         (repeatOrderView as? TextView)?.text =
-            if (repeat.active || repeat.incomplete) "Отменить повтор" else "Повторить"
+            if (repeat.active || repeat.incomplete || repeatInterrupt != null) "Продолжить повтор" else "Повторить"
         val cta = cartBarRoot?.tag as? View
         cta?.isEnabled = !empty
         cta?.alpha = if (empty) 0.5f else 1f
@@ -2149,7 +2211,12 @@ class MainActivity : AppCompatActivity() {
             contentDescription = "Повторить прошлый заказ"
             visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
             setOnClickListener {
-                if (repeat.active || repeat.incomplete) cancelRepeat() else repeatLastOrder()
+                if (repeat.active || repeat.incomplete || repeatInterrupt != null) {
+                    // Открывает решение «продолжить / отменить» — в том числе повторно.
+                    askRepeatRemainder(repeat.remaining)
+                } else {
+                    repeatLastOrder()
+                }
             }
         }
         repeatOrderView = repeat
@@ -3488,6 +3555,14 @@ class MainActivity : AppCompatActivity() {
         Fonts.apply(root)
         dialog.setContentView(root)
         styleSheet(dialog)
+        var closedOnce = false
+        dialog.setOnDismissListener {
+            if (closedOnce) return@setOnDismissListener
+            closedOnce = true
+            catalogSheetOpen = false
+            scheduleRepeatInterrupt()
+        }
+        catalogSheetOpen = true
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
@@ -3545,13 +3620,39 @@ class MainActivity : AppCompatActivity() {
             showReceiptIssues(issues)
             return
         }
+        // Номенклатура проверяется ДО резервирования номера очереди и ДО открытия чека:
+        // непродаваемый товар не должен расходовать серверный номер и не даёт частичной продажи.
+        val terminalItems = HashMap<String, ProductItem.Product>()
+        val missing = ArrayList<MissingProduct>()
+        ReceiptPlan.cartUuids(Cart.all()).forEach { uuid ->
+            val item = try {
+                InventoryApi.getProductByUuid(this, uuid) as? ProductItem.Product
+            } catch (t: Throwable) {
+                Log.w(TAG, "terminal_lookup_failed uuid=$uuid", t)
+                null
+            }
+            if (item == null) {
+                val name = Cart.all().firstOrNull { it.productUuid == uuid }?.name.orEmpty()
+                missing.add(MissingProduct(uuid, name))
+            } else {
+                terminalItems[uuid] = item
+            }
+        }
+        if (missing.isNotEmpty()) {
+            Log.e(TAG, "receipt_blocked_missing products=${missing.map { it.productUuid }}")
+            notice = ReceiptPlan.missingMessage(missing)
+            noticeKind = Kind.ERROR
+            loadProducts(userInitiated = true)
+            safeRender()
+            return
+        }
         sendingReceipt = true
         // Выгода комбо должна быть уже записана: её применяет DiscountIntegrationService.
         CheckoutChoice.saveCombo(this, comboDiscountRub())
         // Номер очереди обязан быть в хранилище ДО печати (PrintExtra срабатывает после оплаты).
         // Запрос синхронный с коротким таймаутом; ошибка/таймаут — чек печатается без номера.
         requestQueueNumberBlocking()
-        SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks, voucherId) { outcome ->
+        SellLauncher.openSellReceipt(this, free, spend, cashbackKopecks, voucherId, terminalItems) { outcome ->
             sendingReceipt = false
             if (outcome.ok) {
                 // Чек открыт, но оплата не подтверждена: заказ ждёт (PENDING), номер не тратится.
@@ -5025,6 +5126,11 @@ class MainActivity : AppCompatActivity() {
         const val CATALOG_REFRESH_MS = 60 * 1000L
         /** Лимит «можно несколько» для добавок из номенклатуры Эвотор (у них нет maxCount с backend). */
         const val EVOTOR_EXTRA_LIMIT = 99
+        /**
+         * Пауза перед вопросом о прерванном повторе: за это время кассир либо откроет
+         * другую карточку (тогда диалог не показываем), либо экран успокоится.
+         */
+        const val REPEAT_INTERRUPT_DELAY_MS = 300L
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         val BRAND = UiKit.BRAND

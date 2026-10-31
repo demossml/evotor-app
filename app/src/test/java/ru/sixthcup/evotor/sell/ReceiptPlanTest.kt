@@ -239,6 +239,28 @@ class ReceiptPlanTest {
         assertNull(ReceiptPlan.blockReason(decide(emptyList())))
     }
 
+    // 17. Предварительная проверка номенклатуры (до резервирования номера очереди):
+    // синтетические и пустые uuid не проверяются, повторы схлопываются.
+    @Test
+    fun `cartUuids lists unique real products only`() {
+        val lines = listOf(
+            CartLine("VOL-250", "Капучино", d("250")),
+            CartLine("MILK-COCONUT", "Кокосовое молоко", d("60"), optionId = 2),
+            CartLine("VOL-250", "Капучино", d("250")),
+            CartLine("mod:milk", "Молоко", BigDecimal.ZERO),
+            CartLine("", "Пустая", BigDecimal.ZERO),
+        )
+        assertEquals(listOf("VOL-250", "MILK-COCONUT"), ReceiptPlan.cartUuids(lines))
+    }
+
+    // 18. Сообщение об отсутствующем товаре содержит uuid — по нему ищут товар в Эвоторе.
+    @Test
+    fun `missing message names the product uuid`() {
+        val text = ReceiptPlan.missingMessage(listOf(MissingProduct("MILK-COCONUT", "Кокосовое молоко")))
+        assertTrue(text, text.contains("MILK-COCONUT"))
+        assertTrue(text, text.contains("Кокосовое молоко"))
+    }
+
     private fun decideWithTerminal(chosen: List<Topping>, terminal: Map<String, TerminalItem>): ReceiptPlan.Result {
         val cartLines = CartLines.of(variant, chosen, "250 мл", "VOL-250|sig")
         return ReceiptPlan.plan(FiscalLines.build(cartLines, noDiscount())) { terminal[it] }
