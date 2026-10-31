@@ -11,6 +11,7 @@ import android.widget.TextView
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.OptionRule
+import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.ToppingRules
 import java.math.BigDecimal
 
@@ -37,7 +38,24 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         val maxCount: Int = 1,
         /** `Topping.id` из схемы каталога; null — опция из номенклатуры Эвотор (`#opt=`). */
         val id: Int? = null,
+        /** Явный флаг сервера: отправлять ли опцию отдельной позицией (по умолчанию — да). */
+        val sendToReceipt: Boolean = true,
     ) {
+        /** Проекция в доменную модель: правила чека считаются в одном месте ([DrinkConfig]). */
+        fun toTopping(groupKey: String): Topping = Topping(
+            id = id ?: 0,
+            name = label,
+            priceRub = price,
+            groupKey = groupKey,
+            maxCount = maxCount,
+            evotorUuid = evotorUuid,
+            required = required,
+            isDefault = isDefault,
+            zeroOption = zeroOption,
+            available = available,
+            sendToReceipt = sendToReceipt,
+        )
+
         /** Правила те же, что проверяет валидатор чека: платная опция без uuid недоступна. */
         fun rule(): OptionRule = OptionRule(
             key = key,
@@ -188,6 +206,19 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     fun chosen(): List<Opt> =
         (listOfNotNull(milk, syrup, sugar) + extras.values)
             .filter { it.sellable && !it.zeroOption && !it.evotorUuid.isNullOrBlank() }
+
+    /**
+     * Выбор в доменных терминах: объём (молоко) отделён от добавок, обычное молоко
+     * остаётся только выбором рецепта и в чек не идёт (см. [DrinkConfig]).
+     */
+    fun chosenToppings(): List<Topping> {
+        val out = ArrayList<Topping>(4)
+        milk?.let { out.add(it.toTopping("milk")) }
+        syrup?.let { out.add(it.toTopping("syrup")) }
+        sugar?.let { out.add(it.toTopping("sugar")) }
+        extras.values.forEach { out.add(it.toTopping("extra")) }
+        return out
+    }
 
     /** Ключи выбранных опций — для проверки обязательных групп и лимитов. */
     fun selectedKeys(): Set<String> =

@@ -34,6 +34,8 @@ object ToppingJson {
         zeroOption = o.optBoolean("zeroOption", false),
         available = if (o.has("available")) o.optBoolean("available", true) else true,
         productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
+        // Нет поля — прежнее поведение: в чек идёт всё платное с uuid.
+        sendToReceipt = if (o.has("sendToReceipt")) o.optBoolean("sendToReceipt", true) else true,
     )
 
     fun toJson(list: List<Topping>): JSONArray {
@@ -51,7 +53,8 @@ object ToppingJson {
                     .put("isDefault", t.isDefault)
                     .put("zeroOption", t.zeroOption)
                     .put("available", t.available)
-                    .put("productId", t.productId ?: JSONObject.NULL),
+                    .put("productId", t.productId ?: JSONObject.NULL)
+                    .put("sendToReceipt", t.sendToReceipt),
             )
         }
         return a

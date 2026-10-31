@@ -68,6 +68,7 @@ import ru.sixthcup.evotor.data.QueueOrder
 import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.DrinkConfig
 import ru.sixthcup.evotor.data.ServerCatalog
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.CheckoutChoice
@@ -300,6 +301,9 @@ class MainActivity : AppCompatActivity() {
      * и соседнему размеру нет (CHANGES-FROM-PLAN F3).
      */
     private var serverCatalogMode = false
+
+    /** Лист товара: не даём добавить одну и ту же конфигурацию дважды подряд. */
+    private var sheetAdding = false
 
     /** Состав листа: в server-режиме только собственные добавки продукта. */
     private fun sheetProduct(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct =
@@ -1114,6 +1118,7 @@ class MainActivity : AppCompatActivity() {
             available = t.available,
             maxCount = t.maxCount,
             id = t.id,
+            sendToReceipt = t.sendToReceipt,
         )
         val g = SheetContract.group(p.toppings)
         // Merge Evotor #opt= inventory items with backend toppings (do not drop one for the other).
@@ -1320,27 +1325,39 @@ class MainActivity : AppCompatActivity() {
                         "total=${chosen.fold(BigDecimal.ZERO) { acc, o -> acc.add(o.price) }.toPlainString()}",
                 )
             }
-            val signature = picker.signature().ifBlank { variant.uuid }
-            repeat(qty) {
-                Cart.add(
-                    CartLine(
-                        variant.uuid,
-                        variant.name,
-                        variant.priceRub,
-                        BigDecimal.ONE,
-                        picker.modsText(),
-                        variant.freeEligible,
-                        signature,
-                    ),
-                )
-                // Каждая опция с товаром Эвотор — отдельная позиция: склад и отчётность сходятся.
-                picker.chosen().forEach { o ->
-                    val uuid = o.evotorUuid?.takeIf { it.isNotBlank() } ?: return@forEach
-                    Cart.add(CartLine(uuid, "${o.label} (${variant.name})", o.price, BigDecimal.ONE, optionId = o.id))
+            // Защита от двойного нажатия: одно открытие листа = одно добавление.
+            if (sheetAdding) return@setOnClickListener
+            sheetAdding = true
+            try {
+                val signature = picker.signature().ifBlank { variant.uuid }
+                // Объём — сам товар; платное молоко и платные добавки — отдельные позиции.
+                // Обычное молоко (zeroOption) и опции с sendToReceipt=false в чек не идут.
+                val lines = DrinkConfig.receiptLines(variant, picker.chosenToppings())
+                repeat(qty) {
+                    lines.forEachIndexed { index, line ->
+                        Cart.add(
+                            if (index == 0) {
+                                CartLine(
+                                    line.uuid, line.name, line.priceRub, BigDecimal.ONE,
+                                    picker.modsText(), variant.freeEligible, signature,
+                                )
+                            } else {
+                                CartLine(line.uuid, line.name, line.priceRub, BigDecimal.ONE, optionId = line.optionId)
+                            },
+                        )
+                    }
                 }
+                Log.i(
+                    TAG,
+                    "receipt_lines volume=${variant.uuid} lines=${lines.size} " +
+                        "milk=${lines.count { it.role == DrinkConfig.Role.MILK }} " +
+                        "addons=${lines.count { it.role == DrinkConfig.Role.ADDON }} qty=$qty",
+                )
+                onCartChanged()
+                dialog.dismiss()
+            } finally {
+                sheetAdding = false
             }
-            onCartChanged()
-            dialog.dismiss()
         }
 
         Fonts.apply(root)

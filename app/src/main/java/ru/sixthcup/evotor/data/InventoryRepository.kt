@@ -80,6 +80,11 @@ data class Topping(
     val zeroOption: Boolean = false,
     val available: Boolean = true,
     val productId: Int? = null,
+    /**
+     * Надо ли отправлять опцию отдельной позицией в чек.
+     * Явный флаг сервера (`sendToReceipt`); нет поля — решает `zeroOption` и наличие uuid.
+     */
+    val sendToReceipt: Boolean = true,
 )
 
 data class UpsellItem(
