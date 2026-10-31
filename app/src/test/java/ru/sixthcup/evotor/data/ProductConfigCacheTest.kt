@@ -64,6 +64,23 @@ class ProductConfigCacheTest {
         assertEquals(store, cfg.getString("storeUuid"))
     }
 
+    // Этап 2: устаревшая запись кэша не должна считаться достоверной конфигурацией.
+    @Test
+    fun `stale cache record is not fresh`() {
+        val now = 1_800_000_000_000L
+        assertTrue(ProductConfigCache.isFresh(now, now))
+        assertTrue(ProductConfigCache.isFresh(now - ProductConfigCache.MAX_AGE_MS, now))
+        assertTrue(
+            "граница TTL включительно",
+            ProductConfigCache.isFresh(now - ProductConfigCache.MAX_AGE_MS, now),
+        )
+        assertTrue(
+            "на 1 мс старше TTL — уже не годна",
+            !ProductConfigCache.isFresh(now - ProductConfigCache.MAX_AGE_MS - 1, now),
+        )
+        assertTrue("нет времени записи — не годна", !ProductConfigCache.isFresh(0L, now))
+    }
+
     // АУДИТ Q4: схема берётся строго для своего объёма, без подстановки чужой
     @Test
     fun `audit Q4 - milk scheme of another volume is not used`() {

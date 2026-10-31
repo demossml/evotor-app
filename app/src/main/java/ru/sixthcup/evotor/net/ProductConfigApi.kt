@@ -109,38 +109,52 @@ object ProductConfigApi {
                     Log.w(TAG, "config_schema_mismatch got=$schema expected=$SCHEMA_VERSION")
                     FetchResult(null, httpStatus, "Несовместимая версия конфигурации ($schema)")
                 } else {
-                    // Чужая точка: UUID из другого store использовать нельзя.
-                    val storeUuid = root.optString("storeUuid").trim()
-                    val productId = root.optInt("productId", expectedProductId)
+                    // Обязательные поля проверяем по типу и значению; отсутствующее поле
+                    // не подменяем ожидаемым — конфигурация отклоняется.
+                    val storeRaw = root.opt("storeUuid")
+                    val storeUuid = (storeRaw as? String)?.trim().orEmpty()
+                    val pidRaw = root.opt("productId")
+                    val productId = when (pidRaw) {
+                        is Int -> pidRaw
+                        is Long -> pidRaw.toInt()
+                        else -> 0
+                    }
                     when {
-                        storeUuid.isNotEmpty() && expectedStoreUuid.isNotEmpty() &&
-                            !storeUuid.equals(expectedStoreUuid, ignoreCase = true) -> {
+                        storeUuid.isEmpty() -> {
+                            Log.w(TAG, "config_store_missing product=$expectedProductId type=${storeRaw?.javaClass?.simpleName}")
+                            FetchResult(null, httpStatus, "В ответе нет торговой точки")
+                        }
+                        expectedStoreUuid.isNotEmpty() && !storeUuid.equals(expectedStoreUuid, ignoreCase = true) -> {
                             Log.w(TAG, "config_store_mismatch want=$expectedStoreUuid got=$storeUuid")
                             FetchResult(null, httpStatus, "Конфигурация другой точки")
                         }
+                        productId <= 0 -> {
+                            Log.w(TAG, "config_product_missing type=${pidRaw?.javaClass?.simpleName}")
+                            FetchResult(null, httpStatus, "В ответе нет идентификатора товара")
+                        }
                         // Q9: чужой товар приходит при ошибке на сервере или подмене кэша.
-                        productId > 0 && expectedProductId > 0 && productId != expectedProductId -> {
+                        productId != expectedProductId -> {
                             Log.w(TAG, "config_product_mismatch want=$expectedProductId got=$productId")
                             FetchResult(null, httpStatus, "Конфигурация другого товара")
                         }
                         else -> {
-                        val config = ProductConfig(
-                            schemaVersion = schema,
-                            storeUuid = storeUuid.ifEmpty { expectedStoreUuid },
-                            productId = productId,
-                            volumes = parseVolumes(root.optJSONArray("volumes")),
-                            milk = parseMilk(root.optJSONObject("milk")),
-                            additions = parseAdditions(root.optJSONObject("additions")),
-                        )
-                        val empty = config.volumes.size <= 1 && config.milk == null && config.additions == null
-                        Log.i(
-                            TAG,
-                            "config_ok product=$productId volumes=${config.volumes.size} " +
-                                "milk=${config.milk?.byProductId?.values?.sumOf { it.options.size } ?: 0} " +
-                                "additions=${config.additions?.byProductId?.values?.sumOf { it.options.size } ?: 0} " +
-                                "store=${config.storeUuid}",
-                        )
-                        FetchResult(config, httpStatus, null, noConfiguration = empty)
+                            val config = ProductConfig(
+                                schemaVersion = schema,
+                                storeUuid = storeUuid,
+                                productId = productId,
+                                volumes = parseVolumes(root.optJSONArray("volumes")),
+                                milk = parseMilk(root.optJSONObject("milk")),
+                                additions = parseAdditions(root.optJSONObject("additions")),
+                            )
+                            val empty = config.volumes.size <= 1 && config.milk == null && config.additions == null
+                            Log.i(
+                                TAG,
+                                "config_ok product=$productId volumes=${config.volumes.size} " +
+                                    "milk=${config.milk?.byProductId?.values?.sumOf { it.options.size } ?: 0} " +
+                                    "additions=${config.additions?.byProductId?.values?.sumOf { it.options.size } ?: 0} " +
+                                    "store=${config.storeUuid}",
+                            )
+                            FetchResult(config, httpStatus, null, noConfiguration = empty)
                         }
                     }
                 }

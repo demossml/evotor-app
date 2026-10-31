@@ -30,14 +30,32 @@ object ProductConfigCache {
         }
     }
 
-    fun load(ctx: Context, storeUuid: String, productId: Int): Pair<ProductConfig, Long>? = try {
+    /** Сутки: более старая запись не считается достоверной — схемы на сервере могли измениться. */
+    const val MAX_AGE_MS = 24L * 60 * 60 * 1000
+
+    /** Годна ли запись на момент [now]. Старое или битое время — не годна. */
+    fun isFresh(savedAt: Long, now: Long): Boolean = savedAt > 0L && now - savedAt <= MAX_AGE_MS
+
+    fun load(
+        ctx: Context,
+        storeUuid: String,
+        productId: Int,
+        now: Long = System.currentTimeMillis(),
+    ): Pair<ProductConfig, Long>? = try {
         val f = file(ctx, storeUuid, productId)
         if (!f.isFile || f.length() == 0L) null else {
             val root = JSONObject(f.readText())
             val savedAt = root.optLong("savedAt", 0L)
-            // Через тот же парсер: кэш и сеть читаются одинаково.
+            // Через тот же парсер: кэш и сеть читаются одинаково (productId/storeUuid сверяются).
             val parsed = ProductConfigApi.parse(root.getJSONObject("config").toString(), productId, storeUuid).config
-            if (parsed == null) null else parsed to savedAt
+            when {
+                parsed == null -> null
+                !isFresh(savedAt, now) -> {
+                    Log.i(TAG, "config_cache_stale product=$productId ageMs=${now - savedAt}")
+                    null
+                }
+                else -> parsed to savedAt
+            }
         }
     } catch (e: Throwable) {
         Log.w(TAG, "config_cache_load_failed product=$productId", e)
