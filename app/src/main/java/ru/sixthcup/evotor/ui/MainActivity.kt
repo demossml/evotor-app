@@ -68,7 +68,8 @@ import ru.sixthcup.evotor.data.QueueOrder
 import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
-import ru.sixthcup.evotor.data.DrinkConfig
+import ru.sixthcup.evotor.data.CartLines
+import ru.sixthcup.evotor.data.RepeatOrder
 import ru.sixthcup.evotor.data.ProductConfig
 import ru.sixthcup.evotor.data.ProductConfigCache
 import ru.sixthcup.evotor.data.ProductConfigGuard
@@ -323,6 +324,11 @@ class MainActivity : AppCompatActivity() {
      * открывал бы окно (молчаливая продажа запрещена).
      */
     private val silentAddByUuid = HashMap<String, Boolean>()
+    /**
+     * Очередь «Повторить»: каждая позиция снова проходит путь конфигурации
+     * (`openProduct`), а не копируется из прошлого чека.
+     */
+    private val repeatQueue = ArrayDeque<CatalogProduct>()
 
     /** Состав листа: в server-режиме только собственные добавки продукта. */
     private fun sheetProduct(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct =
@@ -1177,6 +1183,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * «Повторить» на пустом чеке: план считает [RepeatOrder], поэтому обязательное молоко
+     * и объём не обходятся, платные опции не восстанавливаются автоматически, а удалённый
+     * из каталога товар не возвращается.
+     */
+    private fun repeatLastOrder() {
+        val plan = RepeatOrder.plan(Cart.lastOrderLines(), products) { uuid ->
+            silentAddByUuid[uuid] == true
+        }
+        repeatQueue.clear()
+        if (plan.isEmpty) {
+            notice = plan.skipped.firstOrNull()?.let { "Повторить нельзя: ${it.label} — ${it.reason}" }
+                ?: "Повторить нечего — прошлый заказ не сохранён"
+            noticeKind = Kind.WARN
+            safeRender()
+            return
+        }
+        plan.restore.forEach { Cart.add(it) }
+        if (plan.restore.isNotEmpty()) onCartChanged()
+        plan.skipped.forEach { Log.i(TAG, "repeat_skip ${it.productUuid} reason=${it.reason}") }
+        repeatQueue.addAll(plan.needsChoice)
+        Log.i(
+            TAG,
+            "repeat_plan restore=${plan.restore.size} choice=${plan.needsChoice.size} skipped=${plan.skipped.size}",
+        )
+        if (plan.skipped.isNotEmpty()) {
+            notice = "Не восстановлено: " + plan.skipped.joinToString(", ") { it.label }
+            noticeKind = Kind.WARN
+        }
+        openNextRepeatItem()
+    }
+
+    /** Следующая позиция повтора: обычный путь открытия карточки со всеми проверками. */
+    private fun openNextRepeatItem() {
+        val next = repeatQueue.removeFirstOrNull() ?: return
+        openProduct(next)
+    }
+
+    /**
      * Открытие окна или добавление по данным каталога.
      *
      * [allowDirectAdd] = true только если сервер подтвердил, что схем нет. Иначе товар
@@ -1190,6 +1234,7 @@ class MainActivity : AppCompatActivity() {
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
+            openNextRepeatItem()
         }
     }
 
@@ -1473,32 +1518,19 @@ class MainActivity : AppCompatActivity() {
             if (sheetAdding) return@setOnClickListener
             sheetAdding = true
             try {
-                val signature = picker.signature().ifBlank { variant.uuid }
                 // Объём — сам товар; платное молоко и платные добавки — отдельные позиции.
                 // Обычное молоко (zeroOption) и опции с sendToReceipt=false в чек не идут.
-                val lines = DrinkConfig.receiptLines(variant, picker.chosenToppings())
-                repeat(qty) {
-                    lines.forEachIndexed { index, line ->
-                        Cart.add(
-                            if (index == 0) {
-                                CartLine(
-                                    line.uuid, line.name, line.priceRub, BigDecimal.ONE,
-                                    picker.modsText(), variant.freeEligible, signature,
-                                )
-                            } else {
-                                CartLine(line.uuid, line.name, line.priceRub, BigDecimal.ONE, optionId = line.optionId)
-                            },
-                        )
-                    }
-                }
+                // Сборка строк — [CartLines] (её же проверяют тесты).
+                val lines = CartLines.of(variant, picker.chosenToppings(), picker.modsText(), picker.signature(), qty)
+                lines.forEach { Cart.add(it) }
                 Log.i(
                     TAG,
-                    "receipt_lines volume=${variant.uuid} lines=${lines.size} " +
-                        "milk=${lines.count { it.role == DrinkConfig.Role.MILK }} " +
-                        "addons=${lines.count { it.role == DrinkConfig.Role.ADDON }} qty=$qty",
+                    "cart_lines volume=${variant.uuid} lines=${lines.size} qty=$qty " +
+                        "options=${lines.count { it.optionId != null }}",
                 )
                 onCartChanged()
                 dialog.dismiss()
+                openNextRepeatItem()
             } finally {
                 sheetAdding = false
             }
@@ -2030,15 +2062,7 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
             contentDescription = "Повторить прошлый заказ"
             visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
-            setOnClickListener {
-                if (Cart.repeatLast()) {
-                    onCartChanged()
-                } else {
-                    notice = "Повторить нечего — прошлый заказ не сохранён"
-                    noticeKind = Kind.WARN
-                    safeRender()
-                }
-            }
+            setOnClickListener { repeatLastOrder() }
         }
         repeatOrderView = repeat
         empty.addView(repeat, LinearLayout.LayoutParams(WRAP, dp(36)).apply { leftMargin = dp(10) })

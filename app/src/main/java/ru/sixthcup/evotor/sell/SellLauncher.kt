@@ -19,7 +19,6 @@ import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.FiscalLines
-import java.math.BigDecimal
 import ru.sixthcup.evotor.data.VoucherCalc
 import java.util.UUID
 
@@ -72,43 +71,45 @@ object SellLauncher {
                         "voucher=${split.voucherId ?: 0} floor=${split.floorApplied} lines=${fiscalLines.size}",
                 )
             }
-            for (line in fiscalLines) {
-                // Синтетические uuid добавок (mod:…) и пустой uuid не существуют в номенклатуре Эвотор —
-                // не кладём «ручную» позицию без НДС/типа (фискальный риск).
-                if (!Cart.isSellable(line.productUuid) || line.productUuid.isBlank()) {
-                    skippedSynthetic++
-                    continue
+            // Решение «какие строки корзины станут позициями и по какой цене» считает чистый
+            // ReceiptPlan (его же проверяют тесты); здесь только обращение к номенклатуре терминала.
+            val terminal = HashMap<String, ProductItem.Product?>()
+            val plan = ReceiptPlan.plan(fiscalLines) { uuid ->
+                val item = try {
+                    InventoryApi.getProductByUuid(activity, uuid) as? ProductItem.Product
+                } catch (_: Throwable) {
+                    null
                 }
-                // Берём настоящий товар Эвотор (НДС, тип, код, единица измерения — как в нативном меню).
-                val item = try { InventoryApi.getProductByUuid(activity, line.productUuid) as? ProductItem.Product } catch (_: Throwable) { null }
-                if (item == null) {
-                    missing++
-                    Log.w("SellLauncher", "position_missing_in_terminal product=${line.productUuid}")
+                terminal[uuid] = item
+                item?.let { TerminalItem(it.uuid, it.price) }
+            }
+            skippedSynthetic = plan.skippedSynthetic
+            missing = plan.missingInTerminal
+            plan.priceMismatch.forEach { uuid ->
+                Log.w("SellLauncher", "price_mismatch product=$uuid")
+            }
+            plan.positions.forEach { pos ->
+                if (!pos.inTerminal) {
+                    Log.w("SellLauncher", "position_missing_in_terminal product=${pos.productUuid}")
                 }
-                // Цена в чеке — цена терминала. Расхождение с каталогом только логируем (п.4 контракта).
-                val terminalPrice = item?.price
-                if (terminalPrice != null && terminalPrice.compareTo(line.unitPrice) != 0) {
-                    Log.w(
-                        "SellLauncher",
-                        "price_mismatch product=${line.productUuid} catalog=${line.unitPrice.toPlainString()} terminal=${terminalPrice.toPlainString()}",
+                // Позиция с настоящим товаром Эвотор несёт его НДС/тип/код/единицу измерения.
+                val item = terminal[pos.productUuid]
+                val builder = if (item != null) {
+                    Position.Builder.newInstance(item, pos.quantity).setPrice(pos.price)
+                } else {
+                    Position.Builder.newInstance(
+                        UUID.randomUUID().toString(), pos.productUuid, pos.name,
+                        Measure("шт", 0, 0), pos.price, pos.quantity,
                     )
                 }
-                val price = terminalPrice ?: line.unitPrice
-                val builder = if (item != null) {
-                    Position.Builder.newInstance(item, line.quantity).setPrice(price)
-                } else {
-                    Position.Builder.newInstance(UUID.randomUUID().toString(), line.productUuid, line.name, Measure("шт", 0, 0), price, line.quantity)
-                }
                 // Цена со скидкой — только когда она реально ниже; 0 ₽ не бывает (пол 1 ₽ в FiscalCalc).
-                line.unitPriceWithDiscount?.let { discounted ->
-                    if (discounted > BigDecimal.ZERO && discounted < price) {
-                        builder.setPriceWithDiscountPosition(discounted)
-                        Log.i(
-                            "SellLauncher",
-                            "fiscal_pos product=${line.productUuid} price=${price.toPlainString()} " +
-                                "withDiscount=${discounted.toPlainString()} qty=${line.quantity.toPlainString()}",
-                        )
-                    }
+                pos.discountPrice?.let { discounted ->
+                    builder.setPriceWithDiscountPosition(discounted)
+                    Log.i(
+                        "SellLauncher",
+                        "fiscal_pos product=${pos.productUuid} price=${pos.price.toPlainString()} " +
+                            "withDiscount=${discounted.toPlainString()} qty=${pos.quantity.toPlainString()}",
+                    )
                 }
                 positionAdds.add(PositionAdd(builder.build()))
             }

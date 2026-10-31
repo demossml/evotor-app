@@ -91,24 +91,22 @@ object Cart {
     fun hasLastOrder(): Boolean = ctx?.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         ?.getString(KEY_LAST, null)?.isNotBlank() == true
 
-    /** Восстановить прошлый чек в пустую корзину. Возвращает false, если повторять нечего. */
-    fun repeatLast(): Boolean {
-        val c = ctx ?: return false
-        if (!lines.isEmpty()) return false
-        val raw = c.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY_LAST, null) ?: return false
+    /**
+     * Строки прошлого чека — только чтение.
+     *
+     * Восстанавливать их напрямую нельзя: это обходило бы обязательные схемы молока и объёма,
+     * а платные добавки попадали бы в чек без проверки. Решение принимает
+     * [RepeatOrder.plan], а сам повтор идёт через обычный путь конфигурации товара.
+     */
+    fun lastOrderLines(): List<CartLine> {
+        val c = ctx ?: return emptyList()
+        val raw = c.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY_LAST, null)
+            ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
-            for (i in 0 until arr.length()) {
-                val line = decode(arr.getJSONObject(i)) ?: continue
-                if (!isSellable(line.productUuid)) continue
-                val key = line.cartKey.ifBlank { line.productUuid }
-                lines[key] = line.copy(cartKey = key)
-            }
-            save()
-            !lines.isEmpty()
+            (0 until arr.length()).mapNotNull { i -> decode(arr.getJSONObject(i)) }
         } catch (_: Throwable) {
-            lines.clear()
-            false
+            emptyList()
         }
     }
 
