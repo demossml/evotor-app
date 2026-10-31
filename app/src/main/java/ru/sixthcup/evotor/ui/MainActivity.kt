@@ -1226,7 +1226,9 @@ class MainActivity : AppCompatActivity() {
                     }
                     else -> {
                         // Достоверной конфигурации нет: не продаём «вслепую» товар, у которого схема может быть.
-                        notice = res.error ?: "Не удалось получить конфигурацию товара"
+                        notice = ConfigDiagnostics.errorText(res.error)
+                            ?: res.error
+                            ?: "Не удалось получить конфигурацию товара"
                         noticeKind = Kind.WARN
                         Log.w(TAG, "config_failed_no_cache product=$backendId status=${res.httpStatus} err=${res.error}")
                         silentAddByUuid.remove(p.uuid)

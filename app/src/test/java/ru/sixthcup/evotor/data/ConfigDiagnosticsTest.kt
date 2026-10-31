@@ -83,6 +83,21 @@ class ConfigDiagnosticsTest {
         assertTrue(text!!, text.contains("недоступны"))
     }
 
+    // Backend отдаёт 200 {ok:false, error:"product_not_found"} — это не «нет сети».
+    @Test
+    fun `product not found is explained in human words`() {
+        val text = ConfigDiagnostics.hint(fetch(httpStatus = 200, error = "product_not_found"), view())
+        assertEquals("Товар не найден на сервере — обновите каталог", text)
+    }
+
+    @Test
+    fun `backend error codes are mapped for the cashier`() {
+        assertEquals("Сервер не получил UUID точки — проверьте настройку кассы", ConfigDiagnostics.errorText("store_required"))
+        assertEquals("Нет доступа к схемам товара (403) — проверьте токен точки", ConfigDiagnostics.errorText("proxy_forbidden"))
+        assertNull(ConfigDiagnostics.errorText("socket timeout"))
+        assertNull(ConfigDiagnostics.errorText(null))
+    }
+
     @Test
     fun `no scheme at all on the server`() {
         val text = ConfigDiagnostics.hint(fetch(), view(hasSchemes = false))
@@ -121,6 +136,14 @@ class ProductConfigAppliesToTest {
     fun `config of another product does not apply`() {
         val unlinked = vol.copy(evotorUuid = null)
         assertTrue(!ProductConfigGuard.appliesTo(cfg(listOf(unlinked), milk), setOf("VOL-250"), 502))
+    }
+
+    // backend отдаёт available=false, если объём не связан с этой точкой
+    @Test
+    fun `volume marked unavailable blocks the sale`() {
+        val unavailable = vol.copy(available = false)
+        val blocked = ProductConfigGuard.blockers(cfg(listOf(unavailable), milk), "VOL-250")
+        assertTrue(blocked.toString(), blocked.first().contains("недоступен"))
     }
 
     @Test

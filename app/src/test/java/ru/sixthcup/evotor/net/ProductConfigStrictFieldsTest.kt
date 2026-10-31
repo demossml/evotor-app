@@ -111,6 +111,35 @@ class ProductConfigStrictFieldsTest {
         assertFalse(ProductConfigPolicy.silentAddAllowed(withMilk))
     }
 
+    // Новый backend отвечает на неизвестный товар 200 {ok:false, error:"product_not_found"},
+    // а не 404: иначе касса считала бы, что маршрута нет.
+    @Test
+    fun `ok false with product_not_found is not a configuration`() {
+        val res = parse("""{"ok":false,"schemaVersion":1,"error":"product_not_found","storeUuid":"$store","productId":999999}""")
+        assertNull(res.config)
+        assertEquals("product_not_found", res.error)
+        assertFalse(ProductConfigPolicy.silentAddAllowed(res))
+    }
+
+    // backend отдаёт ключ каждого объёма: схема без опций = «схемы нет», а не ошибка.
+    @Test
+    fun `empty scheme for one volume keeps the schemes of another`() {
+        val json = """
+            {"ok":true,"schemaVersion":1,"storeUuid":"$store","productId":501,
+             "volumes":[
+               {"productId":501,"evotorUuid":"VOL-250","name":"Капучино 250 мл","label":"250 мл","priceRub":250,"available":true},
+               {"productId":502,"evotorUuid":"VOL-350","name":"Капучино 350 мл","label":"350 мл","priceRub":300,"available":true}],
+             "milk":{"required":true,"byProductId":{
+               "501":{"schemeId":1,"options":[{"id":1,"label":"Обычное молоко","isFree":true,"isDefault":true,"sendToReceipt":false,"available":true}]},
+               "502":{"schemeId":null,"options":[]}}},
+             "additions":{"required":false,"byProductId":{"501":{"schemeId":1,"options":[]},"502":{"schemeId":null,"options":[]}}}}
+        """.trimIndent()
+        val cfg = assertNotNull(parse(json).config).let { parse(json).config!! }
+        assertEquals(1, cfg.milkFor(501)!!.options.size)
+        assertEquals(0, cfg.milkFor(502)!!.options.size)
+        assertNull("пустая схема добавок = схемы нет", cfg.additions)
+    }
+
     @Test
     fun `fetch with unknown product id never returns a usable config`() {
         val res = ProductConfigApi.fetch(0, store)

@@ -3,6 +3,7 @@ package ru.sixthcup.evotor.net
 import android.content.Context
 import android.provider.Settings
 import android.util.Log
+import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.SixthCupApp
 import java.net.HttpURLConnection
 
@@ -25,6 +26,10 @@ object DeviceHeaders {
                 conn.setRequestProperty("X-Evotor-Device-UUID", it)
                 conn.setRequestProperty("X-Evotor-Device-Uuid", it)
             }
+            // Версия кассы: по ней backend включает новые возможности каталога
+            // (`features.serverCatalog`), не ломая старые сборки.
+            conn.setRequestProperty("X-App-Version-Code", BuildConfig.VERSION_CODE.toString())
+            conn.setRequestProperty("X-App-Version-Name", BuildConfig.VERSION_NAME)
         } catch (e: Throwable) {
             Log.w(TAG, "apply headers failed: ${e.message}")
         }

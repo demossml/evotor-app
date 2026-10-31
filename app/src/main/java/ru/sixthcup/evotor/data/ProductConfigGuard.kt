@@ -48,6 +48,10 @@ object ProductConfigGuard {
         if (c.volumes.isNotEmpty() && pid == null) {
             return listOf("Объём не опознан: выберите другой размер")
         }
+        // Объём помечен недоступным (нет связи с точкой / снят с продажи в админке).
+        c.volumes.firstOrNull { !it.evotorUuid.isNullOrBlank() && it.evotorUuid == volumeEvotorUuid }
+            ?.takeIf { !it.available }
+            ?.let { return listOf("Этот объём недоступен — выберите другой размер") }
         val out = ArrayList<String>(2)
         val milk = c.milk
         if (milk != null && milk.required) {
