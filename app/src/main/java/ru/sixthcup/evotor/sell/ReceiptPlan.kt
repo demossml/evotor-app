@@ -7,9 +7,12 @@ import java.math.BigDecimal
 /** Товар номенклатуры терминала, нужный для фискальной позиции: цена в чеке — его цена. */
 data class TerminalItem(val productUuid: String, val price: BigDecimal?)
 
+/** Строка корзины, для которой в терминале нет товара: позиция не создаётся, чек блокируется. */
+data class MissingProduct(val productUuid: String, val name: String)
+
 /**
  * Позиция чека: ровно то, что уходит в `Position.Builder` у [SellLauncher].
- * Позиции не склеиваются: скидочная единица приходит отдельной строкой из [FiscalLine].
+ * Создаётся только для товара, найденного в номенклатуре Эвотор.
  */
 data class ReceiptPosition(
     val productUuid: String,
@@ -19,36 +22,38 @@ data class ReceiptPosition(
     val price: BigDecimal,
     /** `setPriceWithDiscountPosition` — только когда цена реально ниже. */
     val discountPrice: BigDecimal?,
-    /** Товар найден в номенклатуре Эвотор (иначе позиция «ручная», без НДС/типа). */
-    val inTerminal: Boolean,
 )
 
 /**
- * Сборка позиций чека из корзины. Чистый Kotlin: продажа вызывает [plan], тесты проверяют
- * тот же код, что работает на кассе, а не отдельный вспомогательный метод.
+ * Сборка позиций чека из корзины. Чистый Kotlin: продажа вызывает [plan] и [blockReason],
+ * тесты проверяют тот же код, что работает на кассе.
  *
  * Правила:
  * 1. позиция обязана иметь реальный uuid Эвотор (`mod:…` и пустые uuid не продаются);
- * 2. цена — из номенклатуры терминала, расхождение с каталогом только фиксируется;
- * 3. цена со скидкой ставится лишь если она больше нуля и ниже цены позиции (пол 1 ₽ в [ru.sixthcup.evotor.data.FiscalCalc]);
- * 4. количество, uuid и состав строк не меняются — их собрал путь «В чек».
+ * 2. товар обязан существовать в номенклатуре терминала: «ручную» позицию
+ *    (`newInstance(uuid, productUuid, name, Measure, …)`) не создаём — SDK ставит ей
+ *    `ProductType.NORMAL` и `TaxNumber = null`, фискальные признаки не гарантированы.
+ *    Такой товар попадает в [Result.missing], а чек блокируется;
+ * 3. цена — из номенклатуры терминала, расхождение с каталогом только фиксируется;
+ * 4. цена со скидкой ставится лишь если она больше нуля и ниже цены позиции
+ *    (пол 1 ₽ в [ru.sixthcup.evotor.data.FiscalCalc]).
  */
 object ReceiptPlan {
 
     data class Result(
         val positions: List<ReceiptPosition>,
+        /** Строки без товара в терминале — чек открывать нельзя (частичной продажи нет). */
+        val missing: List<MissingProduct>,
         /** Позиции без товара Эвотор (синтетические добавки) — в чек не идут. */
         val skippedSynthetic: Int,
-        /** Позиции, которых нет в номенклатуре терминала: уйдут «ручной» строкой. */
-        val missingInTerminal: Int,
         /** uuid, у которых цена терминала разошлась с ценой корзины. */
         val priceMismatch: List<String>,
     )
 
     fun plan(fiscalLines: List<FiscalLine>, terminal: (String) -> TerminalItem?): Result {
         val positions = ArrayList<ReceiptPosition>(fiscalLines.size + 2)
+        val missing = ArrayList<MissingProduct>(2)
         var skippedSynthetic = 0
-        var missing = 0
         val mismatch = ArrayList<String>(2)
 
         for (line in fiscalLines) {
@@ -57,10 +62,15 @@ object ReceiptPlan {
                 continue
             }
             val item = terminal(line.productUuid)
-            val terminalPrice = item?.price
             if (item == null) {
-                missing++
-            } else if (terminalPrice != null && terminalPrice.compareTo(line.unitPrice) != 0) {
+                // Товара нет в номенклатуре: не выдумываем позицию, а блокируем чек.
+                if (missing.none { it.productUuid == line.productUuid }) {
+                    missing.add(MissingProduct(line.productUuid, line.name))
+                }
+                continue
+            }
+            val terminalPrice = item.price
+            if (terminalPrice != null && terminalPrice.compareTo(line.unitPrice) != 0) {
                 mismatch.add(line.productUuid)
             }
             val price = terminalPrice ?: line.unitPrice
@@ -73,10 +83,25 @@ object ReceiptPlan {
                     quantity = line.quantity,
                     price = price,
                     discountPrice = discounted,
-                    inTerminal = item != null,
                 ),
             )
         }
-        return Result(positions, skippedSynthetic, missing, mismatch)
+        return Result(positions, missing, skippedSynthetic, mismatch)
+    }
+
+    /**
+     * Причина, по которой чек открывать нельзя. `null` — можно.
+     * Сообщение содержит uuid отсутствующего товара: кассир видит, что именно обновить.
+     */
+    fun blockReason(result: Result): String? {
+        if (result.missing.isNotEmpty()) {
+            val list = result.missing.joinToString(", ") { "${it.name} (${it.productUuid})" }
+            return "Нет товара в кассе: $list. Обновите каталог Эвотор."
+        }
+        if (result.skippedSynthetic > 0) {
+            return "В чеке есть позиция без товара Эвотор — удалите её из корзины."
+        }
+        if (result.positions.isEmpty()) return "Корзина пуста"
+        return null
     }
 }

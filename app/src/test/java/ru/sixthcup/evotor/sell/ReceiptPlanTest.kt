@@ -2,6 +2,7 @@ package ru.sixthcup.evotor.sell
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,7 +74,7 @@ class ReceiptPlanTest {
         assertEquals("VOL-250", plan.positions[0].productUuid)
         assertEquals(d("250"), plan.positions[0].price)
         assertEquals(BigDecimal.ONE, plan.positions[0].quantity)
-        assertTrue(plan.positions[0].inTerminal)
+        assertNull(ReceiptPlan.blockReason(plan))
     }
 
     // 2. Бесплатное обычное молоко не создаёт позицию.
@@ -90,7 +91,7 @@ class ReceiptPlanTest {
         val plan = decide(listOf(milk(2, "Кокосовое молоко", "MILK-COCONUT")))
         assertEquals(listOf("VOL-250", "MILK-COCONUT"), plan.positions.map { it.productUuid })
         assertEquals(d("60"), plan.positions[1].price)
-        assertTrue(plan.positions[1].inTerminal)
+        assertNull(ReceiptPlan.blockReason(plan))
     }
 
     // 4. Добавка — отдельная позиция по своему uuid.
@@ -177,9 +178,9 @@ class ReceiptPlanTest {
 
         assertEquals(listOf("VOL-250", "MILK-COCONUT", "SYRUP-VANILLA"), plan.positions.map { it.productUuid })
         assertEquals(listOf(d("250"), d("60"), d("50")), plan.positions.map { it.price })
-        assertTrue(plan.positions.all { it.inTerminal })
+        assertNull(ReceiptPlan.blockReason(plan))
         assertFalse(plan.positions.any { it.discountPrice != null })
-        assertEquals(0, plan.missingInTerminal)
+        assertTrue(plan.missing.isEmpty())
     }
 
     // 12. Бесплатное молоко в полном пути: позиция одна, молоко остаётся в рецепте.
@@ -192,6 +193,55 @@ class ReceiptPlanTest {
         assertEquals(1, plan.positions.size)
         assertEquals("VOL-250", plan.positions[0].productUuid)
         assertEquals("250 мл", lines[0].recipe)
+    }
+
+    // 13. Основного товара нет в номенклатуре: позиция не создаётся, чек блокируется с uuid.
+    @Test
+    fun `missing main product blocks the receipt with its uuid`() {
+        val plan = decideWithTerminal(emptyList(), terminalItems - "VOL-250")
+        assertTrue("позиция не создаётся", plan.positions.isEmpty())
+        assertEquals(listOf("VOL-250"), plan.missing.map { it.productUuid })
+        val reason = ReceiptPlan.blockReason(plan)
+        assertNotNull(reason)
+        assertTrue(reason!!, reason.contains("VOL-250"))
+    }
+
+    // 14. Платного молока нет в номенклатуре: чек блокируется, строка не теряется молча.
+    @Test
+    fun `missing paid milk blocks the receipt`() {
+        val plan = decideWithTerminal(
+            listOf(milk(2, "Кокосовое молоко", "MILK-COCONUT")),
+            terminalItems - "MILK-COCONUT",
+        )
+        assertEquals(listOf("MILK-COCONUT"), plan.missing.map { it.productUuid })
+        assertEquals("основной товар не продаётся частично", listOf("VOL-250"), plan.positions.map { it.productUuid })
+        val reason = ReceiptPlan.blockReason(plan)
+        assertNotNull(reason)
+        assertTrue(reason!!, reason.contains("MILK-COCONUT"))
+    }
+
+    // 15. Добавки нет в номенклатуре: чек блокируется.
+    @Test
+    fun `missing addition blocks the receipt`() {
+        val plan = decideWithTerminal(
+            listOf(addon(21, "Ванильный сироп", "SYRUP-VANILLA")),
+            terminalItems - "SYRUP-VANILLA",
+        )
+        assertEquals(listOf("SYRUP-VANILLA"), plan.missing.map { it.productUuid })
+        val reason = ReceiptPlan.blockReason(plan)
+        assertNotNull(reason)
+        assertTrue(reason!!, reason.contains("SYRUP-VANILLA"))
+    }
+
+    // 16. Обычный чек блокировки не имеет.
+    @Test
+    fun `complete receipt is not blocked`() {
+        assertNull(ReceiptPlan.blockReason(decide(emptyList())))
+    }
+
+    private fun decideWithTerminal(chosen: List<Topping>, terminal: Map<String, TerminalItem>): ReceiptPlan.Result {
+        val cartLines = CartLines.of(variant, chosen, "250 мл", "VOL-250|sig")
+        return ReceiptPlan.plan(FiscalLines.build(cartLines, noDiscount())) { terminal[it] }
     }
 
     private fun config() = ProductConfig(

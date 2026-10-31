@@ -70,6 +70,7 @@ import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLines
 import ru.sixthcup.evotor.data.RepeatOrder
+import ru.sixthcup.evotor.data.RepeatSession
 import ru.sixthcup.evotor.data.ProductConfig
 import ru.sixthcup.evotor.data.ProductConfigCache
 import ru.sixthcup.evotor.data.ProductConfigGuard
@@ -328,7 +329,7 @@ class MainActivity : AppCompatActivity() {
      * Очередь «Повторить»: каждая позиция снова проходит путь конфигурации
      * (`openProduct`), а не копируется из прошлого чека.
      */
-    private val repeatQueue = ArrayDeque<CatalogProduct>()
+    private val repeat = RepeatSession()
 
     /** Состав листа: в server-режиме только собственные добавки продукта. */
     private fun sheetProduct(selected: CatalogProduct, variants: List<CatalogProduct>): CatalogProduct =
@@ -1191,8 +1192,8 @@ class MainActivity : AppCompatActivity() {
         val plan = RepeatOrder.plan(Cart.lastOrderLines(), products) { uuid ->
             silentAddByUuid[uuid] == true
         }
-        repeatQueue.clear()
         if (plan.isEmpty) {
+            repeat.cancel()
             notice = plan.skipped.firstOrNull()?.let { "Повторить нельзя: ${it.label} — ${it.reason}" }
                 ?: "Повторить нечего — прошлый заказ не сохранён"
             noticeKind = Kind.WARN
@@ -1202,7 +1203,8 @@ class MainActivity : AppCompatActivity() {
         plan.restore.forEach { Cart.add(it) }
         if (plan.restore.isNotEmpty()) onCartChanged()
         plan.skipped.forEach { Log.i(TAG, "repeat_skip ${it.productUuid} reason=${it.reason}") }
-        repeatQueue.addAll(plan.needsChoice)
+        // Новая очередь не смешивается со старой: RepeatSession.start очищает предыдущую.
+        val first = repeat.start(plan.needsChoice)
         Log.i(
             TAG,
             "repeat_plan restore=${plan.restore.size} choice=${plan.needsChoice.size} skipped=${plan.skipped.size}",
@@ -1211,13 +1213,91 @@ class MainActivity : AppCompatActivity() {
             notice = "Не восстановлено: " + plan.skipped.joinToString(", ") { it.label }
             noticeKind = Kind.WARN
         }
-        openNextRepeatItem()
+        first?.let { openProduct(it) }
     }
 
-    /** Следующая позиция повтора: обычный путь открытия карточки со всеми проверками. */
-    private fun openNextRepeatItem() {
-        val next = repeatQueue.removeFirstOrNull() ?: return
-        openProduct(next)
+    /** Позиция повтора фактически добавлена: только теперь открываем следующую. */
+    private fun repeatAdvanced(added: CatalogProduct) {
+        val next = repeat.added(added)
+        Log.i(TAG, "repeat_added ${added.uuid} left=${repeat.remaining}")
+        next?.let { openProduct(it) }
+    }
+
+    /** Окно закрыто без добавления: повтор прерван, остаток не теряется молча. */
+    private fun onRepeatSheetClosed(closed: CatalogProduct) {
+        if (!repeat.closedWithoutAdd(closed)) return
+        val left = repeat.remaining
+        Log.i(TAG, "repeat_interrupted ${closed.uuid} left=$left")
+        notice = if (left > 0) {
+            "Повтор не завершён: осталось $left поз."
+        } else {
+            "Повтор не завершён: ${closed.name} не добавлен"
+        }
+        noticeKind = Kind.WARN
+        safeRender()
+        askRepeatRemainder(left)
+    }
+
+    /** Явный выбор кассира: продолжить прерванный повтор или отменить остаток. */
+    private fun askRepeatRemainder(left: Int) {
+        val dialog = BottomSheetDialog(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(WHITE)
+            setPadding(dp(20), dp(18), dp(20), dp(16))
+        }
+        root.addView(TextView(this).apply {
+            text = "Повтор не завершён"
+            textSize = 17f
+            weight(Fonts.STRONG)
+            setTextColor(INK)
+        })
+        root.addView(TextView(this).apply {
+            text = if (left > 0) {
+                "Не добавлено: $left поз. Продолжить повтор или отменить остаток?"
+            } else {
+                "Позиция не добавлена. Повторить заново?"
+            }
+            textSize = 13f
+            setTextColor(UiKit.MUTED)
+            setPadding(0, dp(6), 0, dp(12))
+        })
+        fun actionButton(label: String, primary: Boolean, act: () -> Unit) = TextView(this).apply {
+            text = label
+            textSize = 13.5f
+            weight(Fonts.SEMIBOLD)
+            gravity = Gravity.CENTER
+            setTextColor(if (primary) WHITE else INK)
+            background = rounded(if (primary) BRAND else WHITE, 13, if (primary) null else LINE)
+            isClickable = true
+            setPadding(0, dp(12), 0, dp(12))
+            setOnClickListener { act() }
+        }
+        root.addView(
+            actionButton("Продолжить повтор", primary = true) {
+                dialog.dismiss()
+                repeat.resume()?.let { openProduct(it) }
+            },
+            LinearLayout.LayoutParams(MATCH, WRAP),
+        )
+        root.addView(
+            actionButton("Отменить повтор", primary = false) {
+                dialog.dismiss()
+                cancelRepeat()
+            },
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) },
+        )
+        Fonts.apply(root)
+        dialog.setContentView(root)
+        styleSheet(dialog)
+        dialog.show()
+    }
+
+    private fun cancelRepeat() {
+        val lost = repeat.cancel()
+        notice = if (lost > 0) "Повтор отменён: не добавлено $lost поз." else "Повтор отменён"
+        noticeKind = Kind.WARN
+        safeRender()
     }
 
     /**
@@ -1234,7 +1314,7 @@ class MainActivity : AppCompatActivity() {
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
-            openNextRepeatItem()
+            repeatAdvanced(p)
         }
     }
 
@@ -1529,8 +1609,9 @@ class MainActivity : AppCompatActivity() {
                         "options=${lines.count { it.optionId != null }}",
                 )
                 onCartChanged()
+                // Продвигаем очередь ДО закрытия окна: иначе его dismiss посчитает повтор прерванным.
+                repeatAdvanced(p)
                 dialog.dismiss()
-                openNextRepeatItem()
             } finally {
                 sheetAdding = false
             }
@@ -1540,7 +1621,10 @@ class MainActivity : AppCompatActivity() {
         dialog.setContentView(root)
         styleSheet(dialog)
         // Конфигурация живёт ровно одно открытие карточки товара.
-        dialog.setOnDismissListener { pendingConfig = null }
+        dialog.setOnDismissListener {
+            pendingConfig = null
+            onRepeatSheetClosed(p)
+        }
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
@@ -2011,6 +2095,8 @@ class MainActivity : AppCompatActivity() {
         cartBarRoot?.visibility = if (empty) View.GONE else View.VISIBLE
         emptyCartBarRoot?.visibility = if (empty) View.VISIBLE else View.GONE
         repeatOrderView?.visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
+        (repeatOrderView as? TextView)?.text =
+            if (repeat.active || repeat.incomplete) "Отменить повтор" else "Повторить"
         val cta = cartBarRoot?.tag as? View
         cta?.isEnabled = !empty
         cta?.alpha = if (empty) 0.5f else 1f
@@ -2062,7 +2148,9 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
             contentDescription = "Повторить прошлый заказ"
             visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
-            setOnClickListener { repeatLastOrder() }
+            setOnClickListener {
+                if (repeat.active || repeat.incomplete) cancelRepeat() else repeatLastOrder()
+            }
         }
         repeatOrderView = repeat
         empty.addView(repeat, LinearLayout.LayoutParams(WRAP, dp(36)).apply { leftMargin = dp(10) })
@@ -3474,6 +3562,12 @@ class MainActivity : AppCompatActivity() {
             } else {
                 notice = outcome.message
                 noticeKind = Kind.ERROR
+                if (outcome.blockedBeforeSend) {
+                    // Чек не открывался: зарезервированный номер не должен «сгореть» на непродаже.
+                    QueueNumberStore.clear(this)
+                    SalePrintStore.clear(this)
+                    Log.i(TAG, "receipt_blocked_before_send number_cleared")
+                }
                 if (outcome.catalogRefresh) loadProducts(userInitiated = true)
                 if (screen == Screen.ORDER) safeRender()
             }

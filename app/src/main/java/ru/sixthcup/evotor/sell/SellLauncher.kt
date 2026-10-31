@@ -10,7 +10,6 @@ import ru.evotor.framework.core.action.event.receipt.changes.receipt.SetExtra
 import ru.evotor.framework.inventory.InventoryApi
 import ru.evotor.framework.inventory.ProductItem
 import ru.evotor.framework.navigation.NavigationApi
-import ru.evotor.framework.receipt.Measure
 import ru.evotor.framework.receipt.Position
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
@@ -20,7 +19,6 @@ import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.FiscalLines
 import ru.sixthcup.evotor.data.VoucherCalc
-import java.util.UUID
 
 /**
  * Передача собранных позиций в Эвотор. APK — не касса: суммы, налоги и оплату считает POS.
@@ -38,6 +36,8 @@ object SellLauncher {
         val message: String,
         /** Позиция не найдена в номенклатуре терминала — нужно обновить каталог. */
         val catalogRefresh: Boolean = false,
+        /** Чек не открывался: позиции в Эвотор не передавались (частичной продажи нет). */
+        val blockedBeforeSend: Boolean = false,
     )
 
     fun openSellReceipt(
@@ -55,8 +55,6 @@ object SellLauncher {
         }
         try {
             val positionAdds = ArrayList<PositionAdd>(lines.size + 2)
-            var skippedSynthetic = 0
-            var missing = 0
             // Льгота уходит в чек ценами позиций: receiptDiscount срабатывает не на всех прошивках.
             val split = FiscalCalc.split(
                 Cart.gross(), Cart.giftEligibleLines().map { it.priceRub },
@@ -83,25 +81,32 @@ object SellLauncher {
                 terminal[uuid] = item
                 item?.let { TerminalItem(it.uuid, it.price) }
             }
-            skippedSynthetic = plan.skippedSynthetic
-            missing = plan.missingInTerminal
+            // Товара нет в номенклатуре — чек не открываем: «ручная» позиция из
+            // newInstance(uuid, productUuid, name, Measure, …) получает ProductType.NORMAL
+            // и TaxNumber = null, корректную фискализацию гарантировать нельзя.
+            val blocked = ReceiptPlan.blockReason(plan)
+            if (blocked != null) {
+                plan.missing.forEach { m ->
+                    Log.e("SellLauncher", "position_missing_in_terminal product=${m.productUuid} name=${m.name}")
+                }
+                onDone(
+                    Outcome(
+                        ok = false,
+                        message = blocked,
+                        catalogRefresh = plan.missing.isNotEmpty(),
+                        blockedBeforeSend = true,
+                    ),
+                )
+                return
+            }
             plan.priceMismatch.forEach { uuid ->
                 Log.w("SellLauncher", "price_mismatch product=$uuid")
             }
             plan.positions.forEach { pos ->
-                if (!pos.inTerminal) {
-                    Log.w("SellLauncher", "position_missing_in_terminal product=${pos.productUuid}")
-                }
                 // Позиция с настоящим товаром Эвотор несёт его НДС/тип/код/единицу измерения.
                 val item = terminal[pos.productUuid]
-                val builder = if (item != null) {
-                    Position.Builder.newInstance(item, pos.quantity).setPrice(pos.price)
-                } else {
-                    Position.Builder.newInstance(
-                        UUID.randomUUID().toString(), pos.productUuid, pos.name,
-                        Measure("шт", 0, 0), pos.price, pos.quantity,
-                    )
-                }
+                    ?: error("position without terminal item ${pos.productUuid}")
+                val builder = Position.Builder.newInstance(item, pos.quantity).setPrice(pos.price)
                 // Цена со скидкой — только когда она реально ниже; 0 ₽ не бывает (пол 1 ₽ в FiscalCalc).
                 pos.discountPrice?.let { discounted ->
                     builder.setPriceWithDiscountPosition(discounted)
@@ -114,12 +119,8 @@ object SellLauncher {
                 positionAdds.add(PositionAdd(builder.build()))
             }
             if (positionAdds.isEmpty()) {
-                onDone(
-                    Outcome(
-                        false,
-                        if (skippedSynthetic > 0) "Нет позиций с товаром Эвотор (добавки без uuid)" else "Корзина пуста",
-                    ),
-                )
+                // Недостижимо после blockReason, но чек без позиций открывать нельзя.
+                onDone(Outcome(false, "Корзина пуста"))
                 return
             }
             val card = CardSession.get(activity)
@@ -169,13 +170,13 @@ object SellLauncher {
                                 activity.startActivity(NavigationApi.createIntentForSellReceiptPayment())
                             } catch (e: Throwable) {
                                 Log.e("SellLauncher", "receipt_open_failed ${e.javaClass.simpleName}")
-                                onDone(Outcome(false, e.message ?: "Не удалось открыть оплату", missing > 0))
+                                onDone(Outcome(false, e.message ?: "Не удалось открыть оплату"))
                                 return@IntegrationManagerCallback
                             }
                             Log.i(
                                 "SellLauncher",
                                 "positions_sent count=${positionAdds.size} sum=${positionsTotal.toPlainString()} " +
-                                    "toppings=$hasToppings skipped=${skippedSynthetic + missing}",
+                                    "toppings=$hasToppings",
                             )
                             if (setExtra != null) {
                                 Log.i(
@@ -183,18 +184,18 @@ object SellLauncher {
                                     "extras_written v=2 hasOp=$extrasHasOp free=$extrasFree cb=$extrasCb voucher=$extrasVoucher",
                                 )
                             }
-                            onDone(Outcome(true, "Чек открыт", missing > 0))
+                            onDone(Outcome(true, "Чек открыт"))
                         } else {
                             CheckoutChoice.clear(activity)
                             val msg = result?.error?.message ?: "Не удалось открыть чек"
                             Log.e("SellLauncher", "receipt_rejected $msg")
-                            onDone(Outcome(false, msg, missing > 0))
+                            onDone(Outcome(false, msg))
                         }
                     } catch (e: Exception) {
                         CheckoutChoice.clear(activity)
                         Log.e("SellLauncher", "integration", e)
                         Log.e("SellLauncher", "receipt_error ${e.javaClass.simpleName}")
-                        onDone(Outcome(false, e.message ?: "Integration error", missing > 0))
+                        onDone(Outcome(false, e.message ?: "Integration error"))
                     }
                 },
             )
