@@ -184,4 +184,12 @@ class ProductConfigParseTest {
         val cfg0 = ProductConfigApi.parse(body(milk = emptyMilk), 501, store).config!!
         assertNull("пустая схема молока не рисует блок", cfg0.milk)
     }
+
+    // АУДИТ Q9: конфигурация другого товара не должна применяться
+    @Test
+    fun `audit Q9 - response for another product is rejected`() {
+        val res = ProductConfigApi.parse(body(milk = milkJson).replace("\"productId\":501", "\"productId\":777"), 501, store)
+        assertNull("конфигурация чужого товара не должна приниматься", res.config)
+        assertNotNull(res.error)
+    }
 }

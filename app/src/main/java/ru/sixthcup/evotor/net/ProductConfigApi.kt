@@ -23,6 +23,20 @@ import java.net.URL
  * Авторизацию добавляет облако: в APK нет ни токенов, ни заголовков `Authorization`.
  * Таймауты — под ограничения прокси (connect ≤ 5 с, read ≤ 10 с). Вызывать только с фона.
  */
+/**
+ * Право кассы добавить товар в чек **без** окна конфигурации.
+ *
+ * Только явное подтверждение сервера (`ok`, схем нет) даёт это право. Сетевая ошибка,
+ * 404 и отсутствие `productId` — не дают: у товара может быть обязательная схема молока,
+ * и молчаливая продажа обошла бы её.
+ */
+object ProductConfigPolicy {
+    fun silentAddAllowed(result: ProductConfigApi.FetchResult?): Boolean {
+        if (result == null) return false
+        return result.config != null && result.noConfiguration
+    }
+}
+
 object ProductConfigApi {
     private const val TAG = "ProductConfig"
     const val SCHEMA_VERSION = 1
@@ -98,12 +112,18 @@ object ProductConfigApi {
                     // Чужая точка: UUID из другого store использовать нельзя.
                     val storeUuid = root.optString("storeUuid").trim()
                     val productId = root.optInt("productId", expectedProductId)
-                    if (storeUuid.isNotEmpty() && expectedStoreUuid.isNotEmpty() &&
-                        !storeUuid.equals(expectedStoreUuid, ignoreCase = true)
-                    ) {
-                        Log.w(TAG, "config_store_mismatch want=$expectedStoreUuid got=$storeUuid")
-                        FetchResult(null, httpStatus, "Конфигурация другой точки")
-                    } else {
+                    when {
+                        storeUuid.isNotEmpty() && expectedStoreUuid.isNotEmpty() &&
+                            !storeUuid.equals(expectedStoreUuid, ignoreCase = true) -> {
+                            Log.w(TAG, "config_store_mismatch want=$expectedStoreUuid got=$storeUuid")
+                            FetchResult(null, httpStatus, "Конфигурация другой точки")
+                        }
+                        // Q9: чужой товар приходит при ошибке на сервере или подмене кэша.
+                        productId > 0 && expectedProductId > 0 && productId != expectedProductId -> {
+                            Log.w(TAG, "config_product_mismatch want=$expectedProductId got=$productId")
+                            FetchResult(null, httpStatus, "Конфигурация другого товара")
+                        }
+                        else -> {
                         val config = ProductConfig(
                             schemaVersion = schema,
                             storeUuid = storeUuid.ifEmpty { expectedStoreUuid },
@@ -121,6 +141,7 @@ object ProductConfigApi {
                                 "store=${config.storeUuid}",
                         )
                         FetchResult(config, httpStatus, null, noConfiguration = empty)
+                        }
                     }
                 }
             }

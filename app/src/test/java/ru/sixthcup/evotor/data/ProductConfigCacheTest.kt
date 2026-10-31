@@ -2,6 +2,7 @@ package ru.sixthcup.evotor.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.sixthcup.evotor.net.ProductConfigApi
@@ -61,5 +62,15 @@ class ProductConfigCacheTest {
         val cfg = ProductConfigCache.toJson(config()).getJSONObject("config")
         assertEquals(1, cfg.optInt("schemaVersion"))
         assertEquals(store, cfg.getString("storeUuid"))
+    }
+
+    // АУДИТ Q4: схема берётся строго для своего объёма, без подстановки чужой
+    @Test
+    fun `audit Q4 - milk scheme of another volume is not used`() {
+        val cfg = config()
+        // У 501 есть схема; volume uuid 350 в конфигурации есть, но схемы для 502 нет.
+        assertEquals(2, cfg.milkForVolume("VOL-250")!!.options.size)
+        assertNull("у 350 мл своей схемы нет — подставлять схему 250 нельзя", cfg.milkForVolume("VOL-350"))
+        assertNull("неизвестный объём не получает чужую схему", cfg.milkForVolume("VOL-UNKNOWN"))
     }
 }

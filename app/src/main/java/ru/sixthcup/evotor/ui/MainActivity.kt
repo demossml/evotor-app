@@ -90,6 +90,7 @@ import ru.sixthcup.evotor.net.LoyaltyApi
 import ru.sixthcup.evotor.net.QueueNumberApi
 import ru.sixthcup.evotor.net.CatalogApi
 import ru.sixthcup.evotor.net.ProductConfigApi
+import ru.sixthcup.evotor.net.ProductConfigPolicy
 import ru.sixthcup.evotor.net.StoreUuidResolver
 import ru.sixthcup.evotor.data.Topping
 import ru.sixthcup.evotor.data.UpsellItem
@@ -1103,7 +1104,8 @@ class MainActivity : AppCompatActivity() {
         val backendId = lastEnrich?.byUuid?.get(p.uuid)?.productId?.takeIf { it > 0 }
         val storeUuid = lastEnrich?.storeUuid ?: StoreUuidResolver.peek(this)
         if (backendId == null || storeUuid.isNullOrBlank()) {
-            openProductLegacy(p, "config_skipped reason=no_product_id")
+            // Backend не опознал товар: подтверждения «схем нет» нет → окно, а не молчаливая продажа.
+            openProductLegacy(p, "config_skipped reason=no_product_id", allowDirectAdd = false)
             return
         }
         if (!variantModel.hasChoice(p) && pendingConfig == null) {
@@ -1132,26 +1134,40 @@ class MainActivity : AppCompatActivity() {
                             noticeKind = Kind.WARN
                             Log.i(TAG, "config_cache_used product=$backendId ageMs=${System.currentTimeMillis() - savedAt}")
                         }
-                        openProductLegacy(p, "config_ok volumes=${cfg.volumes.size} milk=${cfg.milk != null} additions=${cfg.additions != null}")
+                        openProductLegacy(
+                            p,
+                            "config_ok volumes=${cfg.volumes.size} milk=${cfg.milk != null} additions=${cfg.additions != null}",
+                            allowDirectAdd = !cfg.hasChoices,
+                        )
                     }
-                    res.unsupported -> openProductLegacy(p, "config_unsupported")
-                    res.noConfiguration -> openProductLegacy(p, "config_empty")
+                    res.unsupported -> openProductLegacy(p, "config_unsupported", allowDirectAdd = false)
+                    res.noConfiguration -> openProductLegacy(
+                        p, "config_empty",
+                        allowDirectAdd = ProductConfigPolicy.silentAddAllowed(res),
+                    )
                     else -> {
                         // Достоверной конфигурации нет: не продаём «вслепую» товар, у которого схема может быть.
                         notice = res.error ?: "Не удалось получить конфигурацию товара"
                         noticeKind = Kind.WARN
                         Log.w(TAG, "config_failed_no_cache product=$backendId status=${res.httpStatus} err=${res.error}")
-                        openProductLegacy(p, "config_fallback_catalog")
+                        openProductLegacy(p, "config_fallback_catalog", allowDirectAdd = false)
                     }
                 }
             }
         }
     }
 
-    /** Открытие окна/добавление по данным каталога (прежняя логика). */
-    private fun openProductLegacy(p: CatalogProduct, why: String) {
-        Log.i(TAG, "product_open ${p.uuid} $why")
-        if (variantModel.hasChoice(p) || pendingConfigFor(p) != null) showItemSheet(p)
+    /**
+     * Открытие окна или добавление по данным каталога.
+     *
+     * [allowDirectAdd] = true только если сервер подтвердил, что схем нет. Иначе товар
+     * открывается окном: у него может быть обязательное молоко, и добавлять его в чек
+     * без окна нельзя (аудит Q1/Q2).
+     */
+    private fun openProductLegacy(p: CatalogProduct, why: String, allowDirectAdd: Boolean) {
+        Log.i(TAG, "product_open ${p.uuid} $why direct=$allowDirectAdd")
+        val hasSheet = variantModel.hasChoice(p) || pendingConfigFor(p) != null
+        if (hasSheet || !allowDirectAdd) showItemSheet(p)
         else {
             Cart.add(CartLine(p.uuid, p.name, p.priceRub, BigDecimal.ONE, p.recipe, p.freeEligible))
             onCartChanged()
@@ -1248,10 +1264,9 @@ class MainActivity : AppCompatActivity() {
     private fun optionsFor(p: CatalogProduct): OptionPicker.Opts {
         val cfg = pendingConfigFor(p)
         if (cfg != null) {
-            val volumeId = cfg.volumes.firstOrNull { it.evotorUuid == p.uuid }?.productId
-                ?: cfg.volumes.firstOrNull { it.evotorUuid != null && variantModel.variantsOf(p).any { v -> v.uuid == it.evotorUuid } }?.productId
-                ?: cfg.productId
-            configOpts(cfg, volumeId)?.let { return it }
+            // Строго свой объём: чужую схему не подставляем (аудит Q4).
+            val volumeId = cfg.volumes.firstOrNull { it.evotorUuid != null && it.evotorUuid == p.uuid }?.productId
+            if (volumeId != null) configOpts(cfg, volumeId)?.let { return it }
         }
         val evotor = variantModel.options
         // maxCount у опций из номенклатуры не задан: milk/syrup/sugar — одиночный выбор,

@@ -25,6 +25,22 @@ data class ProductConfig(
     fun milkFor(productId: Int): MilkScheme? = milk?.byProductId?.get(productId)
 
     fun additionsFor(productId: Int): AdditionScheme? = additions?.byProductId?.get(productId)
+
+    /**
+     * Схема молока строго для объёма с этим Evotor UUID.
+     * Неизвестный объём — `null`: подставлять схему другого размера нельзя (аудит Q4).
+     */
+    fun milkForVolume(evotorUuid: String?): MilkScheme? {
+        val pid = volumes.firstOrNull { it.evotorUuid != null && it.evotorUuid == evotorUuid }?.productId ?: return null
+        val scheme = milkFor(pid) ?: return null
+        return scheme.takeIf { it.options.isNotEmpty() }
+    }
+
+    fun additionsForVolume(evotorUuid: String?): AdditionScheme? {
+        val pid = volumes.firstOrNull { it.evotorUuid != null && it.evotorUuid == evotorUuid }?.productId ?: return null
+        val scheme = additionsFor(pid) ?: return null
+        return scheme.takeIf { it.options.isNotEmpty() }
+    }
 }
 
 data class VolumeOption(
