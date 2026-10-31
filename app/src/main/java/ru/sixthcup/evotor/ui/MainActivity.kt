@@ -69,6 +69,7 @@ import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLines
+import ru.sixthcup.evotor.data.ConfigDiagnostics
 import ru.sixthcup.evotor.data.RepeatOrder
 import ru.sixthcup.evotor.data.RepeatInterrupt
 import ru.sixthcup.evotor.data.RepeatSession
@@ -330,6 +331,11 @@ class MainActivity : AppCompatActivity() {
      * открывал бы окно (молчаливая продажа запрещена).
      */
     private val silentAddByUuid = HashMap<String, Boolean>()
+    /**
+     * Итог последней попытки получить конфигурацию — чтобы кассир видел причину пустого окна
+     * (на терминале нет доступа к logcat).
+     */
+    private var configFetch = ConfigDiagnostics.Fetch.none
     /**
      * Очередь «Повторить»: каждая позиция снова проходит путь конфигурации
      * (`openProduct`), а не копируется из прошлого чека.
@@ -1137,6 +1143,15 @@ class MainActivity : AppCompatActivity() {
         val storeUuid = lastEnrich?.storeUuid ?: StoreUuidResolver.peek(this)
         if (backendId == null || storeUuid.isNullOrBlank()) {
             // Backend не опознал товар: подтверждения «схем нет» нет → окно, а не молчаливая продажа.
+            configFetch = ConfigDiagnostics.Fetch(
+                productId = backendId,
+                storeUuid = storeUuid,
+                requested = false,
+                httpStatus = 0,
+                unsupported = false,
+                error = null,
+                fromCache = false,
+            )
             openProductLegacy(p, "config_skipped reason=no_product_id", allowDirectAdd = false)
             return
         }
@@ -1162,6 +1177,15 @@ class MainActivity : AppCompatActivity() {
                         if (res.config != null) ProductConfigCache.save(this, cfg)
                         silentAddByUuid[p.uuid] = !cfg.hasChoices
                         pendingConfig = cfg
+                        configFetch = ConfigDiagnostics.Fetch(
+                            productId = backendId,
+                            storeUuid = storeUuid,
+                            requested = true,
+                            httpStatus = res.httpStatus,
+                            unsupported = false,
+                            error = null,
+                            fromCache = res.config == null,
+                        )
                         if (cached != null) {
                             notice = "Конфигурация с сервера недоступна — используются сохранённые данные"
                             noticeKind = Kind.WARN
@@ -1175,11 +1199,29 @@ class MainActivity : AppCompatActivity() {
                     }
                     res.unsupported -> {
                         silentAddByUuid.remove(p.uuid)
+                        configFetch = ConfigDiagnostics.Fetch(
+                            productId = backendId,
+                            storeUuid = storeUuid,
+                            requested = true,
+                            httpStatus = res.httpStatus,
+                            unsupported = true,
+                            error = res.error,
+                            fromCache = false,
+                        )
                         openProductLegacy(p, "config_unsupported", allowDirectAdd = false)
                     }
                     res.noConfiguration -> {
                         val direct = ProductConfigPolicy.silentAddAllowed(res)
                         silentAddByUuid[p.uuid] = direct
+                        configFetch = ConfigDiagnostics.Fetch(
+                            productId = backendId,
+                            storeUuid = storeUuid,
+                            requested = true,
+                            httpStatus = res.httpStatus,
+                            unsupported = false,
+                            error = null,
+                            fromCache = false,
+                        )
                         openProductLegacy(p, "config_empty", allowDirectAdd = direct)
                     }
                     else -> {
@@ -1188,6 +1230,15 @@ class MainActivity : AppCompatActivity() {
                         noticeKind = Kind.WARN
                         Log.w(TAG, "config_failed_no_cache product=$backendId status=${res.httpStatus} err=${res.error}")
                         silentAddByUuid.remove(p.uuid)
+                        configFetch = ConfigDiagnostics.Fetch(
+                            productId = backendId,
+                            storeUuid = storeUuid,
+                            requested = true,
+                            httpStatus = res.httpStatus,
+                            unsupported = false,
+                            error = res.error ?: "HTTP ${res.httpStatus}",
+                            fromCache = false,
+                        )
                         openProductLegacy(p, "config_fallback_catalog", allowDirectAdd = false)
                     }
                 }
@@ -1369,8 +1420,9 @@ class MainActivity : AppCompatActivity() {
     private fun pendingConfigFor(p: CatalogProduct): ProductConfig? {
         val cfg = pendingConfig ?: return null
         val uuids = variantModel.variantsOf(p).map { it.uuid }.toSet() + p.uuid
-        val hit = cfg.volumes.any { it.evotorUuid != null && it.evotorUuid in uuids }
-        return if (hit) cfg else null
+        // Если схемы в конфигурации есть, а объём не сопоставлен, конфигурация всё равно
+        // относится к этой карточке: продавать «по каталогу» в обход схем нельзя.
+        return if (ProductConfigGuard.appliesTo(cfg, uuids, productIdOf(p.uuid))) cfg else null
     }
     /**
      * item-sheet 1:1 index: hero → название+цена → описание → теги → «в чеке уже N» →
@@ -1570,6 +1622,31 @@ class MainActivity : AppCompatActivity() {
         picker.bind(variants, opts, start)
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
 
+        // Диагностика на экране: на терминале нет logcat, поэтому причина пустого окна
+        // (нет productId, 404, нет сети, схема не назначена объёму) должна быть видна кассиру.
+        val sheetCfg = pendingConfigFor(start)
+        val configHint = ConfigDiagnostics.hint(
+            configFetch,
+            ConfigDiagnostics.View(
+                milkOptions = opts.milk.size,
+                additionOptions = opts.syrup.size + opts.sugar.size + opts.extra.size,
+                catalogToppings = own.sumOf { it.toppings.size },
+                // Объёмов в ответе нет — схема относится к товару целиком, считать нечего.
+                volumeMatched = sheetCfg == null || sheetCfg.volumes.isEmpty() ||
+                    ProductConfigGuard.volumeProductId(sheetCfg, start.uuid) != null,
+                hasSchemes = sheetCfg?.let { it.milk != null || it.additions != null } == true,
+            ),
+        )
+        if (configHint != null) {
+            body.addView(TextView(this).apply {
+                text = configHint
+                textSize = 11.5f
+                setTextColor(UiKit.MUTED)
+                setPadding(dp(2), dp(2), dp(2), dp(8))
+            }, LinearLayout.LayoutParams(MATCH, WRAP))
+            Log.i(TAG, "config_hint ${start.uuid} text=$configHint")
+        }
+
         fun paint() {
             priceView.text = rub(picker.unitPrice())
             val blocked = configBlocked + picker.blockers()
@@ -1674,6 +1751,7 @@ class MainActivity : AppCompatActivity() {
             closedOnce = true
             catalogSheetOpen = false
             pendingConfig = null
+            configFetch = ConfigDiagnostics.Fetch.none
             onRepeatSheetClosed(p)
             // Другая карточка могла закрыться раньше: даём шанс показать решение по повтору.
             scheduleRepeatInterrupt()

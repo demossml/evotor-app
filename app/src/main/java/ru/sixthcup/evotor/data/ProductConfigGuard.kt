@@ -23,6 +23,22 @@ object ProductConfigGuard {
         volumeProductId(cfg, volumeEvotorUuid)?.let { cfg.additions?.byProductId?.get(it) }
 
     /**
+     * Относится ли конфигурация к этой карточке.
+     *
+     * Вариант 1 — объём карточки найден среди `volumes` (обычный случай).
+     * Вариант 2 — конфигурация запрошена именно для этого товара (`productId` совпал),
+     * но backend не связал объёмы с `evotorUuid`. Тогда схемы не применяем, однако продавать
+     * вслепую нельзя: [blockers] скажет «Объём не опознан», если схемы вообще есть.
+     * Конфигурация без схем (только объёмы) продажу не ограничивает.
+     */
+    fun appliesTo(cfg: ProductConfig, cardEvotorUuids: Set<String>, cardProductId: Int?): Boolean {
+        val volumeHit = cfg.volumes.any { !it.evotorUuid.isNullOrBlank() && it.evotorUuid in cardEvotorUuids }
+        if (volumeHit) return true
+        if (cfg.milk == null && cfg.additions == null) return false
+        return cardProductId != null && cardProductId > 0 && cardProductId == cfg.productId
+    }
+
+    /**
      * Причины, по которым позицию нельзя отдать в чек при известной конфигурации.
      * Пустой список — ограничений нет (обязательные схемы либо не заданы, либо укомплектованы).
      */
