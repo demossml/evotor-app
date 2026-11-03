@@ -6,6 +6,8 @@
     <color name="brand_soft">#E9EDFB</color>
     <color name="brand_mid">#1A6EFF</color>
     <color name="page">#F6F3EE</color>
+    <!-- Фон иконки приложения: фирменный кремовый (UiKit.PAGE), маскот — foreground. -->
+    <color name="ic_launcher_background">#F6F3EE</color>
     <color name="page_deep">#EFE9E0</color>
     <color name="surface">#FFFFFF</color>
     <color name="surface_2">#FBF9F5</color>
