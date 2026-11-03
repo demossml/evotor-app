@@ -46,12 +46,15 @@ object ProductConfigGuard {
         val c = cfg ?: return emptyList()
         val pid = volumeProductId(c, volumeEvotorUuid)
         if (c.volumes.isNotEmpty() && pid == null) {
-            return listOf("Объём не опознан: выберите другой размер")
+            return listOf(
+                if ("links" in c.configErrors) "Объёмы не привязаны к Эвотору на этой точке — продажа запрещена"
+                else "Объём не опознан: выберите другой размер",
+            )
         }
         // Объём помечен недоступным (нет связи с точкой / снят с продажи в админке).
         c.volumes.firstOrNull { !it.evotorUuid.isNullOrBlank() && it.evotorUuid == volumeEvotorUuid }
             ?.takeIf { !it.available }
-            ?.let { return listOf("Этот объём недоступен — выберите другой размер") }
+            ?.let { return listOf(ConfigDiagnostics.unavailableText(it.notReadyReason)) }
         val out = ArrayList<String>(2)
         val milk = c.milk
         if (milk != null && milk.required) {

@@ -393,3 +393,9 @@ Backend реализовал `GET /api/devices/products/:productId/configuration
    к товарам Эвотор этой точки). Коды читаются в `ProductConfig.configErrors` и печатаются
    в подсказке окна: «Сервер вернул конфигурацию с ошибкой: объёмы не привязаны к товарам
    Эвотор этой точки».
+
+## §20. versionCode 151 (5.2.25-config-readiness)
+- Модели Volume/Milk/Addition получили `notReadyReason`; парсер использует `strOrNull` (JSON null ≠ «null»); кэш хранит `notReadyReason` и `configErrors`.
+- `ProductConfigGuard`: `configErrors` содержит `links` → «Объёмы не привязаны к Эвотору на этой точке — продажа запрещена»; недоступный объём → причина через `ConfigDiagnostics.unavailableText`.
+- Тест контракта: `net/ProductConfigContractTest` + `test/resources/product-configuration-fixture.json` (копия backend-фикстуры).
+- Нулевое молоко/`sendToReceipt=false` не создаёт Position (`DrinkConfig.receiptLines`).

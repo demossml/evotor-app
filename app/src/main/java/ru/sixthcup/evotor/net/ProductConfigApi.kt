@@ -186,7 +186,7 @@ object ProductConfigApi {
         val out = ArrayList<VolumeOption>(a.length())
         for (i in 0 until a.length()) {
             val o = a.optJSONObject(i) ?: continue
-            val uuid = o.optString("evotorUuid").trim().ifEmpty { null }
+            val uuid = strOrNull(o, "evotorUuid")
             val name = o.optString("name").trim()
             if (name.isEmpty()) continue
             out.add(
@@ -196,9 +196,10 @@ object ProductConfigApi {
                     name = name,
                     label = o.optString("label").ifBlank { name },
                     sizeValue = if (o.has("sizeValue") && !o.isNull("sizeValue")) o.optInt("sizeValue") else null,
-                    sizeUnit = o.optString("sizeUnit").ifBlank { null },
+                    sizeUnit = strOrNull(o, "sizeUnit"),
                     priceRub = if (o.has("priceRub") && !o.isNull("priceRub")) money(o.optString("priceRub")) else null,
                     available = if (o.has("available")) o.optBoolean("available", true) else true,
+                    notReadyReason = strOrNull(o, "notReadyReason"),
                 ),
             )
         }
@@ -234,12 +235,13 @@ object ProductConfigApi {
                     id = o.optInt("id", 0),
                     productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
                     label = label,
-                    evotorUuid = o.optString("evotorUuid").trim().ifEmpty { null },
+                    evotorUuid = strOrNull(o, "evotorUuid"),
                     isFree = o.optBoolean("isFree", false),
                     isDefault = o.optBoolean("isDefault", false),
                     // Нет поля — обычное правило: бесплатное не отправляем, платное отправляем.
                     sendToReceipt = if (o.has("sendToReceipt")) o.optBoolean("sendToReceipt", true) else !o.optBoolean("isFree", false),
                     available = if (o.has("available")) o.optBoolean("available", true) else true,
+                    notReadyReason = strOrNull(o, "notReadyReason"),
                 ),
             )
         }
@@ -275,7 +277,7 @@ object ProductConfigApi {
                     productId = if (o.has("productId") && !o.isNull("productId")) o.optInt("productId") else null,
                     name = name,
                     groupKey = o.optString("groupKey", "extra"),
-                    evotorUuid = o.optString("evotorUuid").trim().ifEmpty { null },
+                    evotorUuid = strOrNull(o, "evotorUuid"),
                     priceRub = money(o.optString("priceRub")),
                     required = o.optBoolean("required", false),
                     maxCount = o.optInt("maxCount", 1).coerceAtLeast(1),
@@ -283,11 +285,19 @@ object ProductConfigApi {
                     zeroOption = o.optBoolean("zeroOption", false),
                     available = if (o.has("available")) o.optBoolean("available", true) else true,
                     sendToReceipt = if (o.has("sendToReceipt")) o.optBoolean("sendToReceipt", true) else true,
+                    notReadyReason = strOrNull(o, "notReadyReason"),
                 ),
             )
         }
         return out
     }
+
+    /**
+     * Строка из JSON: отсутствует / `null` / пустая → `null`.
+     * На Android `optString` для JSON `null` возвращает текст "null" — его нельзя принимать за UUID.
+     */
+    internal fun strOrNull(o: JSONObject, key: String): String? =
+        if (!o.has(key) || o.isNull(key)) null else o.optString(key).trim().ifEmpty { null }
 
     private fun money(raw: String): BigDecimal = try {
         BigDecimal(raw.trim())

@@ -75,7 +75,8 @@ object ProductConfigCache {
                     .put("sizeValue", v.sizeValue ?: JSONObject.NULL)
                     .put("sizeUnit", v.sizeUnit ?: JSONObject.NULL)
                     .put("priceRub", v.priceRub?.toPlainString() ?: JSONObject.NULL)
-                    .put("available", v.available),
+                    .put("available", v.available)
+                    .put("notReadyReason", v.notReadyReason ?: JSONObject.NULL),
             )
         }
         val cfg = JSONObject()
@@ -84,6 +85,7 @@ object ProductConfigCache {
             .put("storeUuid", c.storeUuid)
             .put("productId", c.productId)
             .put("volumes", volumes)
+            .put("configErrors", JSONArray(c.configErrors))
 
         c.milk?.let { m ->
             val byProduct = JSONObject()
@@ -99,7 +101,8 @@ object ProductConfigCache {
                             .put("isFree", o.isFree)
                             .put("isDefault", o.isDefault)
                             .put("sendToReceipt", o.sendToReceipt)
-                            .put("available", o.available),
+                            .put("available", o.available)
+                            .put("notReadyReason", o.notReadyReason ?: JSONObject.NULL),
                     )
                 }
                 byProduct.put(
@@ -128,7 +131,8 @@ object ProductConfigCache {
                             .put("isDefault", o.isDefault)
                             .put("zeroOption", o.zeroOption)
                             .put("available", o.available)
-                            .put("sendToReceipt", o.sendToReceipt),
+                            .put("sendToReceipt", o.sendToReceipt)
+                            .put("notReadyReason", o.notReadyReason ?: JSONObject.NULL),
                     )
                 }
                 byProduct.put(

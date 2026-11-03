@@ -57,6 +57,8 @@ data class VolumeOption(
     val sizeUnit: String?,
     val priceRub: BigDecimal?,
     val available: Boolean,
+    /** Почему объём не продаётся (`no_store_link` / `no_evotor_uuid` / `zero_price`); `null` — готов. */
+    val notReadyReason: String? = null,
 )
 
 data class MilkConfig(
@@ -77,6 +79,7 @@ data class MilkOption(
     val isDefault: Boolean,
     val sendToReceipt: Boolean,
     val available: Boolean,
+    val notReadyReason: String? = null,
 ) {
     /** Идёт ли отдельной позицией чека. */
     val receiptLine: Boolean
@@ -103,6 +106,7 @@ data class AdditionOption(
     val zeroOption: Boolean,
     val available: Boolean,
     val sendToReceipt: Boolean,
+    val notReadyReason: String? = null,
 ) {
     val receiptLine: Boolean
         get() = available && !zeroOption && sendToReceipt && !evotorUuid.isNullOrBlank()

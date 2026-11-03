@@ -1,0 +1,382 @@
+{
+  "store": "store-fixture-cfg",
+  "cappuccinoId": 6,
+  "espressoId": 8,
+  "cappuccino": {
+    "ok": true,
+    "schemaVersion": 1,
+    "storeUuid": "store-fixture-cfg",
+    "productId": 6,
+    "groupId": 1,
+    "name": "Капучино",
+    "volumes": [
+      {
+        "productId": 6,
+        "name": "Капучино 200 мл",
+        "label": "200 мл",
+        "priceRub": 200,
+        "sizeValue": 200,
+        "sizeUnit": "ml",
+        "evotorUuid": "u-cap-200",
+        "available": true
+      },
+      {
+        "productId": 7,
+        "name": "Капучино 300 мл",
+        "label": "300 мл",
+        "priceRub": 250,
+        "sizeValue": 300,
+        "sizeUnit": "ml",
+        "evotorUuid": "u-cap-300",
+        "available": true
+      }
+    ],
+    "milk": {
+      "required": true,
+      "byProductId": {
+        "6": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 1,
+              "label": "Обычное молоко",
+              "name": "Обычное молоко",
+              "priceRub": 0,
+              "isFree": true,
+              "isDefault": true,
+              "sendToReceipt": false,
+              "available": true
+            },
+            {
+              "id": 2,
+              "productId": 2,
+              "label": "Овсяное",
+              "name": "Овсяное",
+              "evotorUuid": "u-oat",
+              "priceRub": 70,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": true
+            },
+            {
+              "id": 3,
+              "productId": 3,
+              "label": "Кокосовое",
+              "name": "Кокосовое",
+              "priceRub": 80,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": false,
+              "notReadyReason": "no_store_link"
+            }
+          ]
+        },
+        "7": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 1,
+              "label": "Обычное молоко",
+              "name": "Обычное молоко",
+              "priceRub": 0,
+              "isFree": true,
+              "isDefault": true,
+              "sendToReceipt": false,
+              "available": true
+            },
+            {
+              "id": 2,
+              "productId": 2,
+              "label": "Овсяное",
+              "name": "Овсяное",
+              "evotorUuid": "u-oat",
+              "priceRub": 70,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": true
+            },
+            {
+              "id": 3,
+              "productId": 3,
+              "label": "Кокосовое",
+              "name": "Кокосовое",
+              "priceRub": 80,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": false,
+              "notReadyReason": "no_store_link"
+            }
+          ]
+        }
+      }
+    },
+    "additions": {
+      "required": false,
+      "byProductId": {
+        "6": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 4,
+              "productId": 5,
+              "name": "Карамель",
+              "groupKey": "extra",
+              "evotorUuid": "u-car",
+              "priceRub": 30,
+              "required": false,
+              "maxCount": 2,
+              "isDefault": false,
+              "zeroOption": false,
+              "available": true,
+              "sendToReceipt": true
+            }
+          ]
+        },
+        "7": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 4,
+              "productId": 5,
+              "name": "Карамель",
+              "groupKey": "extra",
+              "evotorUuid": "u-car",
+              "priceRub": 30,
+              "required": false,
+              "maxCount": 2,
+              "isDefault": false,
+              "zeroOption": false,
+              "available": true,
+              "sendToReceipt": true
+            }
+          ]
+        }
+      }
+    },
+    "configErrors": [],
+    "errors": [
+      {
+        "kind": "milk",
+        "productId": 3,
+        "name": "Кокосовое",
+        "reason": "no_store_link"
+      }
+    ]
+  },
+  "espresso": {
+    "ok": true,
+    "schemaVersion": 1,
+    "storeUuid": "store-fixture-cfg",
+    "productId": 8,
+    "name": "Эспрессо",
+    "volumes": [
+      {
+        "productId": 8,
+        "name": "Эспрессо",
+        "label": "Эспрессо",
+        "priceRub": 120,
+        "evotorUuid": "u-esp",
+        "available": true
+      }
+    ],
+    "milk": null,
+    "additions": null,
+    "configErrors": [],
+    "errors": []
+  },
+  "cappuccinoOtherStore": {
+    "ok": true,
+    "schemaVersion": 1,
+    "storeUuid": "store-fixture-other",
+    "productId": 6,
+    "groupId": 1,
+    "name": "Капучино",
+    "volumes": [
+      {
+        "productId": 6,
+        "name": "Капучино 200 мл",
+        "label": "200 мл",
+        "priceRub": 200,
+        "sizeValue": 200,
+        "sizeUnit": "ml",
+        "available": false,
+        "notReadyReason": "no_store_link"
+      },
+      {
+        "productId": 7,
+        "name": "Капучино 300 мл",
+        "label": "300 мл",
+        "priceRub": 250,
+        "sizeValue": 300,
+        "sizeUnit": "ml",
+        "available": false,
+        "notReadyReason": "no_store_link"
+      }
+    ],
+    "milk": {
+      "required": true,
+      "byProductId": {
+        "6": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 1,
+              "label": "Обычное молоко",
+              "name": "Обычное молоко",
+              "priceRub": 0,
+              "isFree": true,
+              "isDefault": true,
+              "sendToReceipt": false,
+              "available": true
+            },
+            {
+              "id": 2,
+              "productId": 2,
+              "label": "Овсяное",
+              "name": "Овсяное",
+              "priceRub": 70,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": false,
+              "notReadyReason": "no_store_link"
+            },
+            {
+              "id": 3,
+              "productId": 3,
+              "label": "Кокосовое",
+              "name": "Кокосовое",
+              "priceRub": 80,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": false,
+              "notReadyReason": "no_store_link"
+            }
+          ]
+        },
+        "7": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 1,
+              "label": "Обычное молоко",
+              "name": "Обычное молоко",
+              "priceRub": 0,
+              "isFree": true,
+              "isDefault": true,
+              "sendToReceipt": false,
+              "available": true
+            },
+            {
+              "id": 2,
+              "productId": 2,
+              "label": "Овсяное",
+              "name": "Овсяное",
+              "priceRub": 70,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": false,
+              "notReadyReason": "no_store_link"
+            },
+            {
+              "id": 3,
+              "productId": 3,
+              "label": "Кокосовое",
+              "name": "Кокосовое",
+              "priceRub": 80,
+              "isFree": false,
+              "isDefault": false,
+              "sendToReceipt": true,
+              "available": false,
+              "notReadyReason": "no_store_link"
+            }
+          ]
+        }
+      }
+    },
+    "additions": {
+      "required": false,
+      "byProductId": {
+        "6": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 4,
+              "productId": 5,
+              "name": "Карамель",
+              "groupKey": "extra",
+              "priceRub": 30,
+              "required": false,
+              "maxCount": 2,
+              "isDefault": false,
+              "zeroOption": false,
+              "available": false,
+              "sendToReceipt": true,
+              "notReadyReason": "no_store_link"
+            }
+          ]
+        },
+        "7": {
+          "schemeId": 1,
+          "options": [
+            {
+              "id": 4,
+              "productId": 5,
+              "name": "Карамель",
+              "groupKey": "extra",
+              "priceRub": 30,
+              "required": false,
+              "maxCount": 2,
+              "isDefault": false,
+              "zeroOption": false,
+              "available": false,
+              "sendToReceipt": true,
+              "notReadyReason": "no_store_link"
+            }
+          ]
+        }
+      }
+    },
+    "configErrors": [
+      "links"
+    ],
+    "errors": [
+      {
+        "kind": "volume",
+        "productId": 6,
+        "name": "Капучино 200 мл",
+        "reason": "no_store_link"
+      },
+      {
+        "kind": "volume",
+        "productId": 7,
+        "name": "Капучино 300 мл",
+        "reason": "no_store_link"
+      },
+      {
+        "kind": "milk",
+        "productId": 2,
+        "name": "Овсяное",
+        "reason": "no_store_link"
+      },
+      {
+        "kind": "milk",
+        "productId": 3,
+        "name": "Кокосовое",
+        "reason": "no_store_link"
+      },
+      {
+        "kind": "addon",
+        "productId": 5,
+        "name": "Карамель",
+        "reason": "no_store_link"
+      }
+    ]
+  }
+}
