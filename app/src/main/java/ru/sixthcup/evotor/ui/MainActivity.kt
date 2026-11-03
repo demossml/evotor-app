@@ -1508,7 +1508,15 @@ class MainActivity : AppCompatActivity() {
         val variants = SheetContract.cardVariants(own, lastEnrich)
         val start = variants.firstOrNull { it.uuid == p.uuid } ?: sheetProduct(p, variants)
         val hasTops = variants.any { it.toppings.isNotEmpty() }
-        val opts = if (start.supportsMods || hasTops || !variantModel.options.isEmpty) optionsFor(start) else OptionPicker.Opts()
+        // Конфигурация с сервера — тоже источник опций: без неё в этом условии лист оставался
+        // с одними объёмами (прод: milk + 17 additions, а блоков нет).
+        val opts = if (SheetOptionsPolicy.needed(
+                configPresent = pendingConfigFor(start) != null,
+                supportsMods = start.supportsMods,
+                hasToppings = hasTops,
+                hasEvotorOptions = !variantModel.options.isEmpty,
+            )
+        ) optionsFor(start) else OptionPicker.Opts()
         // Обязательные схемы сервера: пока объём/молоко/добавки не закрыты, в чек нельзя.
         var configBlocked = ProductConfigGuard.blockers(pendingConfigFor(start), start.uuid)
         val scheme = SheetContract.scheme(variants, lastEnrich, catalogFetchOk)
@@ -1667,8 +1675,13 @@ class MainActivity : AppCompatActivity() {
             // Донор: у выбранного размера добавок может не быть, у соседнего той же карточки они есть.
             val effective = sheetProduct(selected, variants)
             Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${effective.toppings.size} own=${selected.toppings.size}")
-            val newOpts = if (effective.supportsMods || effective.toppings.isNotEmpty() || !variantModel.options.isEmpty)
-                optionsFor(effective) else OptionPicker.Opts()
+            val newOpts = if (SheetOptionsPolicy.needed(
+                    configPresent = pendingConfigFor(selected) != null,
+                    supportsMods = effective.supportsMods,
+                    hasToppings = effective.toppings.isNotEmpty(),
+                    hasEvotorOptions = !variantModel.options.isEmpty,
+                )
+            ) optionsFor(effective) else OptionPicker.Opts()
             // Схемы привязаны к объёму: у выбранного размера их может не быть — тогда блок.
             configBlocked = ProductConfigGuard.blockers(pendingConfigFor(selected), selected.uuid)
             picker.rebindOpts(selected, newOpts)
@@ -1785,7 +1798,13 @@ class MainActivity : AppCompatActivity() {
         }
         val variants = SheetContract.cardVariants(variantModel.variantsOf(drink), lastEnrich)
         val drinkCard = variants.firstOrNull { it.uuid == drink.uuid } ?: sheetProduct(drink, variants)
-        val opts = if (drinkCard.supportsMods || drinkCard.toppings.isNotEmpty() || !variantModel.options.isEmpty) optionsFor(drinkCard) else OptionPicker.Opts()
+        val opts = if (SheetOptionsPolicy.needed(
+                configPresent = pendingConfigFor(drinkCard) != null,
+                supportsMods = drinkCard.supportsMods,
+                hasToppings = drinkCard.toppings.isNotEmpty(),
+                hasEvotorOptions = !variantModel.options.isEmpty,
+            )
+        ) optionsFor(drinkCard) else OptionPicker.Opts()
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {

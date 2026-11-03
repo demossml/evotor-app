@@ -11,8 +11,11 @@ object ProductConfigGuard {
 
     /** `productId` объёма, к которому относится товар терминала. `null` — объём не опознан. */
     fun volumeProductId(cfg: ProductConfig, volumeEvotorUuid: String?): Int? = when {
+        // UUID — GUID, регистр не значим: терминал и backend могут отдать его по-разному.
         cfg.volumes.isNotEmpty() ->
-            cfg.volumes.firstOrNull { !it.evotorUuid.isNullOrBlank() && it.evotorUuid == volumeEvotorUuid }?.productId
+            cfg.volumes.firstOrNull {
+                !it.evotorUuid.isNullOrBlank() && it.evotorUuid.equals(volumeEvotorUuid, ignoreCase = true)
+            }?.productId
         else -> cfg.productId.takeIf { it > 0 }
     }
 
@@ -32,7 +35,9 @@ object ProductConfigGuard {
      * Конфигурация без схем (только объёмы) продажу не ограничивает.
      */
     fun appliesTo(cfg: ProductConfig, cardEvotorUuids: Set<String>, cardProductId: Int?): Boolean {
-        val volumeHit = cfg.volumes.any { !it.evotorUuid.isNullOrBlank() && it.evotorUuid in cardEvotorUuids }
+        val volumeHit = cfg.volumes.any { v ->
+            !v.evotorUuid.isNullOrBlank() && cardEvotorUuids.any { it.equals(v.evotorUuid, ignoreCase = true) }
+        }
         if (volumeHit) return true
         if (cfg.milk == null && cfg.additions == null) return false
         return cardProductId != null && cardProductId > 0 && cardProductId == cfg.productId
@@ -52,7 +57,9 @@ object ProductConfigGuard {
             )
         }
         // Объём помечен недоступным (нет связи с точкой / снят с продажи в админке).
-        c.volumes.firstOrNull { !it.evotorUuid.isNullOrBlank() && it.evotorUuid == volumeEvotorUuid }
+        c.volumes.firstOrNull {
+            !it.evotorUuid.isNullOrBlank() && it.evotorUuid.equals(volumeEvotorUuid, ignoreCase = true)
+        }
             ?.takeIf { !it.available }
             ?.let { return listOf(ConfigDiagnostics.unavailableText(it.notReadyReason)) }
         val out = ArrayList<String>(2)

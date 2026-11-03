@@ -36,13 +36,17 @@ data class ProductConfig(
      * Неизвестный объём — `null`: подставлять схему другого размера нельзя (аудит Q4).
      */
     fun milkForVolume(evotorUuid: String?): MilkScheme? {
-        val pid = volumes.firstOrNull { it.evotorUuid != null && it.evotorUuid == evotorUuid }?.productId ?: return null
+        val pid = volumes.firstOrNull {
+            it.evotorUuid != null && it.evotorUuid.equals(evotorUuid, ignoreCase = true)
+        }?.productId ?: return null
         val scheme = milkFor(pid) ?: return null
         return scheme.takeIf { it.options.isNotEmpty() }
     }
 
     fun additionsForVolume(evotorUuid: String?): AdditionScheme? {
-        val pid = volumes.firstOrNull { it.evotorUuid != null && it.evotorUuid == evotorUuid }?.productId ?: return null
+        val pid = volumes.firstOrNull {
+            it.evotorUuid != null && it.evotorUuid.equals(evotorUuid, ignoreCase = true)
+        }?.productId ?: return null
         val scheme = additionsFor(pid) ?: return null
         return scheme.takeIf { it.options.isNotEmpty() }
     }
