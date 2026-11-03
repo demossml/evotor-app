@@ -70,6 +70,7 @@ import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLines
 import ru.sixthcup.evotor.data.VolumeRef
+import ru.sixthcup.evotor.data.VolumeResolver
 import ru.sixthcup.evotor.data.ConfigDiagnostics
 import ru.sixthcup.evotor.data.RepeatOrder
 import ru.sixthcup.evotor.data.RepeatInterrupt
@@ -338,6 +339,18 @@ class MainActivity : AppCompatActivity() {
      * (на терминале нет доступа к logcat).
      */
     private var configFetch = ConfigDiagnostics.Fetch.none
+    /** Состояние панели отладки конфигурации в открытом листе товара. */
+    private var sheetDebug = ConfigSheetDebug.State(
+        versionName = BuildConfig.VERSION_NAME,
+        versionCode = BuildConfig.VERSION_CODE,
+    )
+    private var debugPanel: TextView? = null
+    /** Товар, чей лист сейчас открыт (для применения конфигурации без переоткрытия). */
+    private var sheetProductUuid: String? = null
+    /** Пересобрать опции уже открытого листа после прихода конфигурации. */
+    private var sheetApplyConfig: ((ProductConfig?) -> Unit)? = null
+    /** Лист этого товара кассир закрыл до ответа сервера: сами его не переоткрываем. */
+    private var sheetClosedForUuid: String? = null
     /**
      * Очередь «Повторить»: каждая позиция снова проходит путь конфигурации
      * (`openProduct`), а не копируется из прошлого чека.
@@ -1155,17 +1168,43 @@ class MainActivity : AppCompatActivity() {
                 error = null,
                 fromCache = false,
             )
+            sheetDebug = ConfigSheetDebug.State(
+                versionName = BuildConfig.VERSION_NAME,
+                versionCode = BuildConfig.VERSION_CODE,
+                phase = ConfigSheetDebug.Phase.FAILED,
+                productId = backendId,
+                storeUuid = storeUuid,
+                requested = false,
+                error = if (backendId == null) {
+                    "у товара нет productId на сервере — обновите каталог"
+                } else {
+                    "не определён storeUuid точки"
+                },
+                terminalUuid = p.uuid,
+            )
             openProductLegacy(p, "config_skipped reason=no_product_id", allowDirectAdd = false)
             return
         }
-        if (!variantModel.hasChoice(p) && pendingConfig == null) {
-            // Товар без выбора по каталогу всё равно может иметь схему на сервере — спрашиваем.
-        }
+        // Панель отладки показывает строки 1-2 ещё до ответа сервера.
+        sheetDebug = ConfigSheetDebug.State(
+            versionName = BuildConfig.VERSION_NAME,
+            versionCode = BuildConfig.VERSION_CODE,
+            phase = ConfigSheetDebug.Phase.WAITING,
+            productId = backendId,
+            storeUuid = storeUuid,
+            requested = true,
+            terminalUuid = p.uuid,
+        )
+        // Лист, который откроется в любом случае (есть выбор объёма/опций), показываем сразу:
+        // иначе «тихо ждём» и на кассе выглядит как «ничего не происходит».
+        if (variantModel.hasChoice(p)) openProductLegacy(p, "config_loading", allowDirectAdd = false)
         configLoadingUuid = p.uuid
         productsLoadingSheet = true
         val gen = ++configGen
         thread(name = "product-config") {
+            val startedAt = System.currentTimeMillis()
             val res = ProductConfigApi.fetch(backendId, storeUuid)
+            val elapsed = System.currentTimeMillis() - startedAt
             var savedAt = 0L
             val cached = if (res.config == null) {
                 ProductConfigCache.load(this, storeUuid, backendId)?.also { savedAt = it.second }
@@ -1175,6 +1214,37 @@ class MainActivity : AppCompatActivity() {
                 configLoadingUuid = null
                 productsLoadingSheet = false
                 val cfg = res.config ?: cached?.first
+                val hit = cfg?.let { VolumeResolver.resolve(it, volumeRefOf(p)) }
+                sheetDebug = sheetDebug.copy(
+                    phase = if (cfg != null || res.httpStatus in 200..299) ConfigSheetDebug.Phase.DONE
+                    else ConfigSheetDebug.Phase.FAILED,
+                    httpStatus = res.httpStatus,
+                    elapsedMs = elapsed,
+                    fromCache = res.config == null && cached != null,
+                    error = if (cfg == null) res.error ?: "конфигурация не получена (config=null)" else null,
+                    volumes = cfg?.volumes?.size ?: 0,
+                    milkOptions = cfg?.milk?.byProductId?.values?.sumOf { it.options.size },
+                    additionOptions = cfg?.additions?.byProductId?.values?.sumOf { it.options.size },
+                    configErrors = cfg?.configErrors.orEmpty(),
+                    matchBy = hit?.by?.name?.lowercase() ?: "none",
+                    matchPid = hit?.productId,
+                    configPresent = cfg != null,
+                )
+                // Лист уже открыт (мы показали его до запроса) — обновляем его на месте.
+                refreshDebugPanel()
+                val sheetOpen = sheetProductUuid == p.uuid && sheetApplyConfig != null
+                val sheetWasClosed = sheetClosedForUuid == p.uuid
+                fun deliver(why: String, allowDirectAdd: Boolean) {
+                    when {
+                        sheetOpen -> {
+                            logSheetRecall(p, why)
+                            sheetApplyConfig?.invoke(cfg)
+                        }
+                        // Кассир закрыл карточку раньше, чем пришёл ответ — не всплываем повторно.
+                        sheetWasClosed -> Log.i(TAG, "product_open ${p.uuid} $why sheet=closed_by_user")
+                        else -> openProductLegacy(p, why, allowDirectAdd)
+                    }
+                }
                 when {
                     cfg != null -> {
                         if (res.config != null) ProductConfigCache.save(this, cfg)
@@ -1194,8 +1264,7 @@ class MainActivity : AppCompatActivity() {
                             noticeKind = Kind.WARN
                             Log.i(TAG, "config_cache_used product=$backendId ageMs=${System.currentTimeMillis() - savedAt}")
                         }
-                        openProductLegacy(
-                            p,
+                        deliver(
                             "config_ok volumes=${cfg.volumes.size} milk=${cfg.milk != null} additions=${cfg.additions != null}",
                             allowDirectAdd = !cfg.hasChoices,
                         )
@@ -1211,7 +1280,7 @@ class MainActivity : AppCompatActivity() {
                             error = res.error,
                             fromCache = false,
                         )
-                        openProductLegacy(p, "config_unsupported", allowDirectAdd = false)
+                        deliver("config_unsupported", allowDirectAdd = false)
                     }
                     res.noConfiguration -> {
                         val direct = ProductConfigPolicy.silentAddAllowed(res)
@@ -1225,7 +1294,7 @@ class MainActivity : AppCompatActivity() {
                             error = null,
                             fromCache = false,
                         )
-                        openProductLegacy(p, "config_empty", allowDirectAdd = direct)
+                        deliver("config_empty", allowDirectAdd = direct)
                     }
                     else -> {
                         // Достоверной конфигурации нет: не продаём «вслепую» товар, у которого схема может быть.
@@ -1244,7 +1313,7 @@ class MainActivity : AppCompatActivity() {
                             error = res.error ?: "HTTP ${res.httpStatus}",
                             fromCache = false,
                         )
-                        openProductLegacy(p, "config_fallback_catalog", allowDirectAdd = false)
+                        deliver("config_fallback_catalog", allowDirectAdd = false)
                     }
                 }
             }
@@ -1466,6 +1535,18 @@ class MainActivity : AppCompatActivity() {
      * и сколько опций реально попало в окно. На терминале logcat недоступен, поэтому те же
      * данные дублируются текстом-подсказкой в самом окне.
      */
+    /** Лист уже открыт: пишем в лог то же, что раньше писал openProductLegacy. */
+    private fun logSheetRecall(p: CatalogProduct, why: String) {
+        Log.i(TAG, "product_open ${p.uuid} $why direct=false sheet=open")
+    }
+
+    /** Перерисовать панель отладки (если лист открыт и флаг включён). */
+    private fun refreshDebugPanel() {
+        if (!ConfigSheetDebug.DEBUG_CONFIG_SHEET) return
+        val panel = debugPanel ?: return
+        panel.text = ConfigSheetDebug.text(sheetDebug)
+    }
+
     private fun logSheet(
         where: String,
         p: CatalogProduct,
@@ -1474,8 +1555,25 @@ class MainActivity : AppCompatActivity() {
         opts: OptionPicker.Opts,
     ) {
         val ref = volumeRefOf(p)
-        val hit = cfg?.let { ProductConfigGuard.volumeProductId(it, ref) }
+        val resolved = cfg?.let { VolumeResolver.resolve(it, ref) }
+        val hit = resolved?.productId
         val uuids = cfg?.volumes?.map { "${it.productId}:${it.evotorUuid}" }.orEmpty()
+        sheetDebug = sheetDebug.copy(
+            terminalUuid = p.uuid,
+            needOpts = needOpts,
+            configPresent = cfg != null,
+            volumes = cfg?.volumes?.size ?: sheetDebug.volumes,
+            milkOptions = cfg?.milk?.byProductId?.values?.sumOf { it.options.size } ?: sheetDebug.milkOptions,
+            additionOptions = cfg?.additions?.byProductId?.values?.sumOf { it.options.size } ?: sheetDebug.additionOptions,
+            configErrors = cfg?.configErrors ?: sheetDebug.configErrors,
+            matchBy = resolved?.by?.name?.lowercase() ?: "none",
+            matchPid = hit,
+            uiMilk = opts.milk.size,
+            uiSyrup = opts.syrup.size,
+            uiSugar = opts.sugar.size,
+            uiExtra = opts.extra.size,
+        )
+        refreshDebugPanel()
         Log.i(
             "SC_SHEET",
             "$where uuid=${p.uuid} size=${p.sizeMl} name=${p.name} pid=${ref.backendProductId} " +
@@ -1671,9 +1769,27 @@ class MainActivity : AppCompatActivity() {
             }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(9) })
         }
 
+        // Панель отладки: видно состав ответа конфигурации сразу при открытии листа (без adb).
+        if (ConfigSheetDebug.DEBUG_CONFIG_SHEET) {
+            val panel = TextView(this).apply {
+                text = ConfigSheetDebug.text(sheetDebug)
+                textSize = 10f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTextColor(UiKit.MUTED)
+                setTextIsSelectable(true)
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = rounded(UiKit.SURFACE_2, 10, LINE)
+            }
+            body.addView(panel, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+            debugPanel = panel
+            refreshDebugPanel()
+        }
+
         val picker = OptionPicker(this)
         picker.bind(variants, opts, start)
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
+        sheetProductUuid = p.uuid
+        sheetClosedForUuid = null
 
         // Диагностика на экране: на терминале нет logcat, поэтому причина пустого окна
         // (нет productId, 404, нет сети, схема не назначена объёму) должна быть видна кассиру.
@@ -1716,6 +1832,17 @@ class MainActivity : AppCompatActivity() {
             qtyLabel.text = qty.toString()
         }
         picker.onChange = { paint() }
+        // Конфигурация пришла, пока лист уже открыт: пересобрать опции текущего объёма.
+        sheetApplyConfig = { cfg ->
+            val current = picker.selectedVariant ?: start
+            val effective = sheetProduct(current, variants)
+            configBlocked = ProductConfigGuard.blockers(cfg, volumeRefOf(current))
+            val fresh = optionsFor(current)
+            picker.rebindOpts(effective, fresh)
+            logSheet("item-cfg", current, cfg, needOpts = fresh.milk.isNotEmpty() ||
+                fresh.syrup.isNotEmpty() || fresh.sugar.isNotEmpty() || fresh.extra.isNotEmpty(), opts = fresh)
+            paint()
+        }
         // Смена объёма: пересчитать opts для выбранного варианта (rebind), не оставлять
         // opts от первого variant на весь sheet.
         picker.onVariantChanged = { selected ->
@@ -1824,6 +1951,10 @@ class MainActivity : AppCompatActivity() {
                 pendingConfig = null
                 configFetch = ConfigDiagnostics.Fetch.none
             }
+            debugPanel = null
+            sheetApplyConfig = null
+            sheetProductUuid = null
+            sheetClosedForUuid = p.uuid
             onRepeatSheetClosed(p)
             // Другая карточка могла закрыться раньше: даём шанс показать решение по повтору.
             scheduleRepeatInterrupt()
