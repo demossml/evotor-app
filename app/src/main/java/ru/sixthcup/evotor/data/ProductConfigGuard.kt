@@ -9,21 +9,31 @@ package ru.sixthcup.evotor.data
  */
 object ProductConfigGuard {
 
-    /** `productId` объёма, к которому относится товар терминала. `null` — объём не опознан. */
-    fun volumeProductId(cfg: ProductConfig, volumeEvotorUuid: String?): Int? = when {
-        // UUID — GUID, регистр не значим: терминал и backend могут отдать его по-разному.
-        cfg.volumes.isNotEmpty() ->
-            cfg.volumes.firstOrNull {
-                !it.evotorUuid.isNullOrBlank() && it.evotorUuid.equals(volumeEvotorUuid, ignoreCase = true)
-            }?.productId
-        else -> cfg.productId.takeIf { it > 0 }
-    }
+    /** `productId` объёма, к которому относится товар терминала (по uuid, id, размеру, имени). */
+    fun volumeProductId(cfg: ProductConfig, ref: VolumeRef): Int? =
+        VolumeResolver.resolve(cfg, ref)?.productId
+            // Конфигурация без объёмов относится к товару целиком.
+            ?: cfg.productId.takeIf { it > 0 && cfg.volumes.isEmpty() }
+
+    /** Совместимость: сопоставление только по uuid терминала. */
+    fun volumeProductId(cfg: ProductConfig, volumeEvotorUuid: String?): Int? =
+        volumeProductId(cfg, VolumeRef(evotorUuid = volumeEvotorUuid))
+
+    /** Совместимость: сопоставление только по uuid терминала. */
+    fun blockers(cfg: ProductConfig?, volumeEvotorUuid: String?): List<String> =
+        blockers(cfg, VolumeRef(evotorUuid = volumeEvotorUuid))
+
+    fun milkScheme(cfg: ProductConfig, ref: VolumeRef): MilkScheme? =
+        volumeProductId(cfg, ref)?.let { cfg.milk?.byProductId?.get(it) }
 
     fun milkScheme(cfg: ProductConfig, volumeEvotorUuid: String?): MilkScheme? =
-        volumeProductId(cfg, volumeEvotorUuid)?.let { cfg.milk?.byProductId?.get(it) }
+        milkScheme(cfg, VolumeRef(evotorUuid = volumeEvotorUuid))
+
+    fun additionScheme(cfg: ProductConfig, ref: VolumeRef): AdditionScheme? =
+        volumeProductId(cfg, ref)?.let { cfg.additions?.byProductId?.get(it) }
 
     fun additionScheme(cfg: ProductConfig, volumeEvotorUuid: String?): AdditionScheme? =
-        volumeProductId(cfg, volumeEvotorUuid)?.let { cfg.additions?.byProductId?.get(it) }
+        additionScheme(cfg, VolumeRef(evotorUuid = volumeEvotorUuid))
 
     /**
      * Относится ли конфигурация к этой карточке.
@@ -35,6 +45,7 @@ object ProductConfigGuard {
      * Конфигурация без схем (только объёмы) продажу не ограничивает.
      */
     fun appliesTo(cfg: ProductConfig, cardEvotorUuids: Set<String>, cardProductId: Int?): Boolean {
+        // Только uuid: если по нему объём не нашёлся, решает совпадение productId ниже.
         val volumeHit = cfg.volumes.any { v ->
             !v.evotorUuid.isNullOrBlank() && cardEvotorUuids.any { it.equals(v.evotorUuid, ignoreCase = true) }
         }
@@ -47,9 +58,9 @@ object ProductConfigGuard {
      * Причины, по которым позицию нельзя отдать в чек при известной конфигурации.
      * Пустой список — ограничений нет (обязательные схемы либо не заданы, либо укомплектованы).
      */
-    fun blockers(cfg: ProductConfig?, volumeEvotorUuid: String?): List<String> {
+    fun blockers(cfg: ProductConfig?, ref: VolumeRef): List<String> {
         val c = cfg ?: return emptyList()
-        val pid = volumeProductId(c, volumeEvotorUuid)
+        val pid = volumeProductId(c, ref)
         if (c.volumes.isNotEmpty() && pid == null) {
             return listOf(
                 if ("links" in c.configErrors) "Объёмы не привязаны к Эвотору на этой точке — продажа запрещена"
@@ -57,9 +68,7 @@ object ProductConfigGuard {
             )
         }
         // Объём помечен недоступным (нет связи с точкой / снят с продажи в админке).
-        c.volumes.firstOrNull {
-            !it.evotorUuid.isNullOrBlank() && it.evotorUuid.equals(volumeEvotorUuid, ignoreCase = true)
-        }
+        c.volumes.firstOrNull { it.productId == pid }
             ?.takeIf { !it.available }
             ?.let { return listOf(ConfigDiagnostics.unavailableText(it.notReadyReason)) }
         val out = ArrayList<String>(2)

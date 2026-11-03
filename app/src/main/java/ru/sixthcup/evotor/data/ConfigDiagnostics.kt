@@ -39,6 +39,12 @@ object ConfigDiagnostics {
         val hasSchemes: Boolean,
         /** `configErrors` от backend: `links` и подобные коды. */
         val configErrors: List<String> = emptyList(),
+        /** uuid товара терминала, для которого открыт лист. */
+        val terminalUuid: String? = null,
+        /** `productId` объёма, сопоставленного с товаром терминала (`null` — не сопоставлен). */
+        val volumeProductId: Int? = null,
+        /** Объёмы из ответа конфигурации: `productId:evotorUuid`. */
+        val volumeUuids: List<String> = emptyList(),
     )
 
     /**
@@ -87,9 +93,13 @@ object ConfigDiagnostics {
             view.configErrors.isNotEmpty() ->
                 "Сервер вернул конфигурацию с ошибкой: " + errorText(view.configErrors.first())
                     .orEmpty().ifBlank { view.configErrors.joinToString(", ") }
+            view.hasSchemes && !view.volumeMatched && view.volumeProductId == null ->
+                // Самый частый случай: схемы есть, но объём ответа не совпал с товаром терминала.
+                "Для этого объёма схема не назначена (объём не сопоставлен с сервером): " +
+                    "товар ${view.terminalUuid ?: "-"}, в конфигурации " +
+                    view.volumeUuids.joinToString(", ").ifBlank { "объёмов нет" }
             view.hasSchemes ->
-                if (view.volumeMatched) "Схема есть, но опции недоступны (нет товаров Эвотор)."
-                else "Для этого объёма схема не назначена (объём не сопоставлен с сервером)."
+                "Схема есть, но опции недоступны (нет товаров Эвотор), объём pid=${view.volumeProductId}."
             else ->
                 "Молоко и добавки не назначены: у товара нет схемы на сервере."
         }

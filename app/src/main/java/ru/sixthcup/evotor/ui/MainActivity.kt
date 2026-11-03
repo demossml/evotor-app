@@ -69,6 +69,7 @@ import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLines
+import ru.sixthcup.evotor.data.VolumeRef
 import ru.sixthcup.evotor.data.ConfigDiagnostics
 import ru.sixthcup.evotor.data.RepeatOrder
 import ru.sixthcup.evotor.data.RepeatInterrupt
@@ -1445,17 +1446,55 @@ class MainActivity : AppCompatActivity() {
         lastEnrich?.byUuid?.get(uuid)?.productId?.takeIf { it > 0 }
 
     /**
+     * Чем товар терминала опознаётся в ответе конфигурации: uuid, серверный id, объём, имя.
+     * Одного uuid мало — backend берёт его из связей точки ([VolumeResolver]).
+     */
+    private fun volumeRefOf(p: CatalogProduct) = VolumeRef(
+        evotorUuid = p.uuid,
+        backendProductId = productIdOf(p.uuid),
+        sizeMl = p.sizeMl,
+        name = p.name,
+    )
+
+    /**
      * Опции из серверной конфигурации: молоко — отдельный блок схемы `milk`,
      * остальное — из схемы `additions`. Цена берётся из номенклатуры Эвотор по uuid,
      * бесплатное молоко показывается без цены и в чек не идёт.
      */
-    private fun configOpts(cfg: ProductConfig, volumeEvotorUuid: String?): OptionPicker.Opts? {
-        val opts = ConfigOptsMapper.all(cfg, volumeEvotorUuid) { u ->
+    /**
+     * Одна строка `SC_SHEET` на открытие листа: видно, дошла ли конфигурация, чем опознан объём
+     * и сколько опций реально попало в окно. На терминале logcat недоступен, поэтому те же
+     * данные дублируются текстом-подсказкой в самом окне.
+     */
+    private fun logSheet(
+        where: String,
+        p: CatalogProduct,
+        cfg: ProductConfig?,
+        needOpts: Boolean,
+        opts: OptionPicker.Opts,
+    ) {
+        val ref = volumeRefOf(p)
+        val hit = cfg?.let { ProductConfigGuard.volumeProductId(it, ref) }
+        val uuids = cfg?.volumes?.map { "${it.productId}:${it.evotorUuid}" }.orEmpty()
+        Log.i(
+            "SC_SHEET",
+            "$where uuid=${p.uuid} size=${p.sizeMl} name=${p.name} pid=${ref.backendProductId} " +
+                "config=${cfg != null} http=${configFetch.httpStatus} err=${configFetch.error} " +
+                "cache=${configFetch.fromCache} need=$needOpts volumePid=$hit " +
+                "cfgVolumes=$uuids milk=${opts.milk.size} " +
+                "additions=${opts.syrup.size + opts.sugar.size + opts.extra.size} " +
+                "configMilk=${cfg?.milk != null} configAdditions=${cfg?.additions != null}",
+        )
+    }
+
+    private fun configOpts(cfg: ProductConfig, volume: VolumeRef): OptionPicker.Opts? {
+        val opts = ConfigOptsMapper.all(cfg, volume) { u ->
             products.firstOrNull { it.uuid == u }?.priceRub
         } ?: return null
         Log.i(
             TAG,
-            "config_opts volume=$volumeEvotorUuid milk=${opts.milk.size} syrup=${opts.syrup.size} " +
+            "config_opts volume=${volume.evotorUuid} pid=${volume.backendProductId} size=${volume.sizeMl} " +
+                "milk=${opts.milk.size} syrup=${opts.syrup.size} " +
                 "sugar=${opts.sugar.size} extra=${opts.extra.size} requiredMilk=${cfg.milk?.required == true}",
         )
         return opts
@@ -1465,7 +1504,7 @@ class MainActivity : AppCompatActivity() {
         val cfg = pendingConfigFor(p)
         if (cfg != null) {
             // Строго свой объём: чужую схему не подставляем (аудит Q4).
-            configOpts(cfg, p.uuid)?.let { return it }
+            configOpts(cfg, volumeRefOf(p))?.let { return it }
         }
         val evotor = variantModel.options
         // maxCount у опций из номенклатуры не задан: milk/syrup/sugar — одиночный выбор,
@@ -1510,15 +1549,17 @@ class MainActivity : AppCompatActivity() {
         val hasTops = variants.any { it.toppings.isNotEmpty() }
         // Конфигурация с сервера — тоже источник опций: без неё в этом условии лист оставался
         // с одними объёмами (прод: milk + 17 additions, а блоков нет).
-        val opts = if (SheetOptionsPolicy.needed(
-                configPresent = pendingConfigFor(start) != null,
-                supportsMods = start.supportsMods,
-                hasToppings = hasTops,
-                hasEvotorOptions = !variantModel.options.isEmpty,
-            )
-        ) optionsFor(start) else OptionPicker.Opts()
+        val cfgForSheet = pendingConfigFor(start)
+        val needOpts = SheetOptionsPolicy.needed(
+            configPresent = cfgForSheet != null,
+            supportsMods = start.supportsMods,
+            hasToppings = hasTops,
+            hasEvotorOptions = !variantModel.options.isEmpty,
+        )
+        val opts = if (needOpts) optionsFor(start) else OptionPicker.Opts()
+        logSheet("item", start, cfgForSheet, needOpts, opts)
         // Обязательные схемы сервера: пока объём/молоко/добавки не закрыты, в чек нельзя.
-        var configBlocked = ProductConfigGuard.blockers(pendingConfigFor(start), start.uuid)
+        var configBlocked = ProductConfigGuard.blockers(pendingConfigFor(start), volumeRefOf(start))
         val scheme = SheetContract.scheme(variants, lastEnrich, catalogFetchOk)
         Log.i(
             "SC_TOP",
@@ -1648,16 +1689,22 @@ class MainActivity : AppCompatActivity() {
                     ProductConfigGuard.volumeProductId(sheetCfg, start.uuid) != null,
                 hasSchemes = sheetCfg?.let { it.milk != null || it.additions != null } == true,
                 configErrors = sheetCfg?.configErrors.orEmpty(),
+                terminalUuid = start.uuid,
+                volumeProductId = sheetCfg?.let { ProductConfigGuard.volumeProductId(it, volumeRefOf(start)) },
+                volumeUuids = sheetCfg?.volumes?.map { "${it.productId}:${it.evotorUuid ?: "-"}" }.orEmpty(),
             ),
         )
         if (configHint != null) {
+            // Версия в той же строке: на терминале нет «О программе», а по скриншоту сразу видно,
+            // какая сборка установлена (иначе «после 153 всё так же» невозможно опровергнуть).
+            val hintText = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · " + configHint
             body.addView(TextView(this).apply {
-                text = configHint
+                text = hintText
                 textSize = 11.5f
                 setTextColor(UiKit.MUTED)
                 setPadding(dp(2), dp(2), dp(2), dp(8))
             }, LinearLayout.LayoutParams(MATCH, WRAP))
-            Log.i(TAG, "config_hint ${start.uuid} text=$configHint")
+            Log.i(TAG, "config_hint ${start.uuid} text=$hintText")
         }
 
         fun paint() {
@@ -1675,15 +1722,17 @@ class MainActivity : AppCompatActivity() {
             // Донор: у выбранного размера добавок может не быть, у соседнего той же карточки они есть.
             val effective = sheetProduct(selected, variants)
             Log.i("SC_TOP", "volumeChanged -> name=${selected.name} tops=${effective.toppings.size} own=${selected.toppings.size}")
-            val newOpts = if (SheetOptionsPolicy.needed(
-                    configPresent = pendingConfigFor(selected) != null,
-                    supportsMods = effective.supportsMods,
-                    hasToppings = effective.toppings.isNotEmpty(),
-                    hasEvotorOptions = !variantModel.options.isEmpty,
-                )
-            ) optionsFor(effective) else OptionPicker.Opts()
+            val cfgForVolume = pendingConfigFor(selected)
+            val needOptsVolume = SheetOptionsPolicy.needed(
+                configPresent = cfgForVolume != null,
+                supportsMods = effective.supportsMods,
+                hasToppings = effective.toppings.isNotEmpty(),
+                hasEvotorOptions = !variantModel.options.isEmpty,
+            )
+            val newOpts = if (needOptsVolume) optionsFor(effective) else OptionPicker.Opts()
+            logSheet("volume", selected, cfgForVolume, needOptsVolume, newOpts)
             // Схемы привязаны к объёму: у выбранного размера их может не быть — тогда блок.
-            configBlocked = ProductConfigGuard.blockers(pendingConfigFor(selected), selected.uuid)
+            configBlocked = ProductConfigGuard.blockers(pendingConfigFor(selected), volumeRefOf(selected))
             picker.rebindOpts(selected, newOpts)
             paint()
         }
@@ -1722,7 +1771,7 @@ class MainActivity : AppCompatActivity() {
         addBtn.setOnClickListener {
             val variant = picker.selectedVariant ?: return@setOnClickListener
             // Проверяем заново по факту нажатия: объём мог смениться, конфигурация — обновиться.
-            val blocked = ProductConfigGuard.blockers(pendingConfigFor(variant), variant.uuid) + picker.blockers()
+            val blocked = ProductConfigGuard.blockers(pendingConfigFor(variant), volumeRefOf(variant)) + picker.blockers()
             if (blocked.isNotEmpty()) {
                 Toast.makeText(this, blocked.first(), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -1764,12 +1813,17 @@ class MainActivity : AppCompatActivity() {
         styleSheet(dialog)
         // Конфигурация живёт ровно одно открытие карточки товара.
         var closedOnce = false
+        val sheetGen = configGen
         dialog.setOnDismissListener {
             if (closedOnce) return@setOnDismissListener
             closedOnce = true
             catalogSheetOpen = false
-            pendingConfig = null
-            configFetch = ConfigDiagnostics.Fetch.none
+            // Конфигурацию стираем, только если она ещё про этот лист: иначе закрытие
+            // предыдущей карточки уносило данные уже открытой следующей.
+            if (sheetGen == configGen) {
+                pendingConfig = null
+                configFetch = ConfigDiagnostics.Fetch.none
+            }
             onRepeatSheetClosed(p)
             // Другая карточка могла закрыться раньше: даём шанс показать решение по повтору.
             scheduleRepeatInterrupt()
@@ -1798,13 +1852,15 @@ class MainActivity : AppCompatActivity() {
         }
         val variants = SheetContract.cardVariants(variantModel.variantsOf(drink), lastEnrich)
         val drinkCard = variants.firstOrNull { it.uuid == drink.uuid } ?: sheetProduct(drink, variants)
-        val opts = if (SheetOptionsPolicy.needed(
-                configPresent = pendingConfigFor(drinkCard) != null,
-                supportsMods = drinkCard.supportsMods,
-                hasToppings = drinkCard.toppings.isNotEmpty(),
-                hasEvotorOptions = !variantModel.options.isEmpty,
-            )
-        ) optionsFor(drinkCard) else OptionPicker.Opts()
+        val cfgForCombo = pendingConfigFor(drinkCard)
+        val needOptsCombo = SheetOptionsPolicy.needed(
+            configPresent = cfgForCombo != null,
+            supportsMods = drinkCard.supportsMods,
+            hasToppings = drinkCard.toppings.isNotEmpty(),
+            hasEvotorOptions = !variantModel.options.isEmpty,
+        )
+        val opts = if (needOptsCombo) optionsFor(drinkCard) else OptionPicker.Opts()
+        logSheet("combo", drinkCard, cfgForCombo, needOptsCombo, opts)
 
         val dialog = BottomSheetDialog(this)
         val root = LinearLayout(this).apply {

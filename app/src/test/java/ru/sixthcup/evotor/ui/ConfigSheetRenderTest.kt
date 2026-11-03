@@ -140,6 +140,52 @@ class ConfigSheetRenderTest {
         assertEquals("MILK-OAT", oat.evotorUuid)
     }
 
+    // ГЛАВНЫЙ КЕЙС: uuid в ответе не совпадает с uuid товара на терминале.
+    // Раньше объём не находился и лист оставался с одними объёмами — теперь сопоставление
+    // идёт по productId и размеру.
+    @Test
+    fun `volume is matched by backend product id when uuids differ`() {
+        val cfg = ProductConfigApi.parse(prodJson(), 5, store).config!!
+        // Терминал отдаёт свой uuid, сервер — свой; у товара 350 мл backend id = 4.
+        val ref = ru.sixthcup.evotor.data.VolumeRef(
+            evotorUuid = "TERMINAL-UUID-350", backendProductId = 4, sizeMl = null, name = "Капучино",
+        )
+        assertEquals(4, ProductConfigGuard.volumeProductId(cfg, ref))
+        val opts = ConfigOptsMapper.all(cfg, ref, priceOf)!!
+        assertEquals(2, opts.milk.size)
+        assertEquals(17, opts.syrup.size + opts.sugar.size + opts.extra.size)
+    }
+
+    @Test
+    fun `volume is matched by size when uuid and product id are unknown`() {
+        val cfg = ProductConfigApi.parse(prodJson(), 5, store).config!!
+        val ref = ru.sixthcup.evotor.data.VolumeRef(
+            evotorUuid = "ZZZ", backendProductId = null, sizeMl = 400, name = "Капучино 400 мл",
+        )
+        assertEquals(5, ProductConfigGuard.volumeProductId(cfg, ref))
+        assertEquals(2, ConfigOptsMapper.all(cfg, ref, priceOf)!!.milk.size)
+    }
+
+    @Test
+    fun `unmatched volume is reported with both uuids on screen`() {
+        val cfg = ProductConfigApi.parse(prodJson(), 5, store).config!!
+        val ref = ru.sixthcup.evotor.data.VolumeRef(evotorUuid = "OTHER", backendProductId = 999, sizeMl = null, name = "Другой")
+        assertNull(ProductConfigGuard.volumeProductId(cfg, ref))
+        val text = ru.sixthcup.evotor.data.ConfigDiagnostics.hint(
+            ru.sixthcup.evotor.data.ConfigDiagnostics.Fetch(5, store, true, 200, false, null, false),
+            ru.sixthcup.evotor.data.ConfigDiagnostics.View(
+                milkOptions = 0, additionOptions = 0, catalogToppings = 0,
+                volumeMatched = false, hasSchemes = true, configErrors = emptyList(),
+                terminalUuid = "OTHER",
+                volumeProductId = null,
+                volumeUuids = cfg.volumes.map { "${it.productId}:${it.evotorUuid ?: "-"}" },
+            ),
+        )
+        assertNotNull(text)
+        assertTrue(text!!, text.contains("OTHER"))
+        assertTrue(text, text.contains("5:VOL-400"))
+    }
+
     @Test
     fun `config with links error blocks the sale with its own text`() {
         val json = prodJson().replace("\"configErrors\":[]", "\"configErrors\":[\"links\"]")

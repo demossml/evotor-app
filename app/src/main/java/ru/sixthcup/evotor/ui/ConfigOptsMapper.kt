@@ -3,6 +3,7 @@ package ru.sixthcup.evotor.ui
 import ru.sixthcup.evotor.data.ProductConfig
 import ru.sixthcup.evotor.data.ProductConfigGuard
 import ru.sixthcup.evotor.data.ToppingRules
+import ru.sixthcup.evotor.data.VolumeRef
 import java.math.BigDecimal
 
 /**
@@ -18,10 +19,10 @@ object ConfigOptsMapper {
 
     fun milk(
         cfg: ProductConfig,
-        volumeEvotorUuid: String?,
+        volume: VolumeRef,
         priceOf: (String) -> BigDecimal? = { null },
     ): List<OptionPicker.Opt> {
-        val scheme = ProductConfigGuard.milkScheme(cfg, volumeEvotorUuid) ?: return emptyList()
+        val scheme = ProductConfigGuard.milkScheme(cfg, volume) ?: return emptyList()
         val required = cfg.milk?.required == true
         return scheme.options.map { o ->
             val onTerminal = o.evotorUuid?.let { priceOf(it) != null } ?: false
@@ -43,10 +44,10 @@ object ConfigOptsMapper {
 
     fun additions(
         cfg: ProductConfig,
-        volumeEvotorUuid: String?,
+        volume: VolumeRef,
         priceOf: (String) -> BigDecimal? = { null },
     ): List<OptionPicker.Opt> {
-        val scheme = ProductConfigGuard.additionScheme(cfg, volumeEvotorUuid) ?: return emptyList()
+        val scheme = ProductConfigGuard.additionScheme(cfg, volume) ?: return emptyList()
         return scheme.options.map { o ->
             val onTerminal = o.evotorUuid?.let { priceOf(it) != null } ?: false
             OptionPicker.Opt(
@@ -65,14 +66,25 @@ object ConfigOptsMapper {
         }
     }
 
+    /** Совместимость: сопоставление объёма только по uuid. */
+    fun milk(cfg: ProductConfig, volumeEvotorUuid: String?, priceOf: (String) -> BigDecimal? = { null }): List<OptionPicker.Opt> =
+        milk(cfg, VolumeRef(evotorUuid = volumeEvotorUuid), priceOf)
+
+    fun additions(cfg: ProductConfig, volumeEvotorUuid: String?, priceOf: (String) -> BigDecimal? = { null }): List<OptionPicker.Opt> =
+        additions(cfg, VolumeRef(evotorUuid = volumeEvotorUuid), priceOf)
+
+    /** Совместимость: сопоставление объёма только по uuid. */
+    fun all(cfg: ProductConfig, volumeEvotorUuid: String?, priceOf: (String) -> BigDecimal? = { null }): OptionPicker.Opts? =
+        all(cfg, VolumeRef(evotorUuid = volumeEvotorUuid), priceOf)
+
     /** Все группы окна или `null`, если схем для объёма нет (работаем по каталогу). */
     fun all(
         cfg: ProductConfig,
-        volumeEvotorUuid: String?,
+        volume: VolumeRef,
         priceOf: (String) -> BigDecimal? = { null },
     ): OptionPicker.Opts? {
-        val milk = milk(cfg, volumeEvotorUuid, priceOf)
-        val additions = additions(cfg, volumeEvotorUuid, priceOf)
+        val milk = milk(cfg, volume, priceOf)
+        val additions = additions(cfg, volume, priceOf)
         if (milk.isEmpty() && additions.isEmpty()) return null
         fun group(key: String) = additions.filter { it.key.startsWith("c:a:") && keyOf(cfg, it.key) == key }
         return OptionPicker.Opts(
