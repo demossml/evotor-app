@@ -351,6 +351,10 @@ class MainActivity : AppCompatActivity() {
     private var sheetApplyConfig: ((ProductConfig?) -> Unit)? = null
     /** Лист этого товара кассир закрыл до ответа сервера: сами его не переоткрываем. */
     private var sheetClosedForUuid: String? = null
+    /** Открытый лист товара: нужен, чтобы пересобрать его после ответа конфигурации. */
+    private var itemSheetDialog: BottomSheetDialog? = null
+    /** Отладочная строка 8: что реально лежит в picker открытого листа. */
+    private var sheetPickerDebug: (() -> String)? = null
     /**
      * Очередь «Повторить»: каждая позиция снова проходит путь конфигурации
      * (`openProduct`), а не копируется из прошлого чека.
@@ -1236,9 +1240,12 @@ class MainActivity : AppCompatActivity() {
                 val sheetWasClosed = sheetClosedForUuid == p.uuid
                 fun deliver(why: String, allowDirectAdd: Boolean) {
                     when {
+                        // Лист уже открыт (показан до запроса): пересобираем его целиком.
+                        // Патч на месте (rebind) не гарантировал секции: picker мог остаться
+                        // с опциями, которых на экране не было (скрин 155: opts 2/7/10, видно только объём).
                         sheetOpen -> {
                             logSheetRecall(p, why)
-                            sheetApplyConfig?.invoke(cfg)
+                            rebuildItemSheet(p)
                         }
                         // Кассир закрыл карточку раньше, чем пришёл ответ — не всплываем повторно.
                         sheetWasClosed -> Log.i(TAG, "product_open ${p.uuid} $why sheet=closed_by_user")
@@ -1535,6 +1542,26 @@ class MainActivity : AppCompatActivity() {
      * и сколько опций реально попало в окно. На терминале logcat недоступен, поэтому те же
      * данные дублируются текстом-подсказкой в самом окне.
      */
+    /**
+     * Пересобрать открытый лист с уже полученной конфигурацией.
+     * Дешевле и надёжнее, чем точечно обновлять picker: разметка строится из финального состояния.
+     */
+    private fun rebuildItemSheet(p: CatalogProduct) {
+        val dialog = itemSheetDialog
+        if (dialog == null) {
+            openProductLegacy(p, "config_rebuilt reason=no_sheet", allowDirectAdd = false)
+            return
+        }
+        // Снимаем ссылку ДО закрытия: dismiss-листенер по идентичности поймёт, что это наша инициатива.
+        itemSheetDialog = null
+        try {
+            dialog.dismiss()
+        } catch (t: Throwable) {
+            Log.w(TAG, "sheet_rebuild_dismiss", t)
+        }
+        showItemSheet(p)
+    }
+
     /** Лист уже открыт: пишем в лог то же, что раньше писал openProductLegacy. */
     private fun logSheetRecall(p: CatalogProduct, why: String) {
         Log.i(TAG, "product_open ${p.uuid} $why direct=false sheet=open")
@@ -1544,7 +1571,8 @@ class MainActivity : AppCompatActivity() {
     private fun refreshDebugPanel() {
         if (!ConfigSheetDebug.DEBUG_CONFIG_SHEET) return
         val panel = debugPanel ?: return
-        panel.text = ConfigSheetDebug.text(sheetDebug)
+        val extra = sheetPickerDebug?.invoke()
+        panel.text = ConfigSheetDebug.text(sheetDebug.copy(extra = extra))
     }
 
     private fun logSheet(
@@ -1789,6 +1817,15 @@ class MainActivity : AppCompatActivity() {
         picker.bind(variants, opts, start)
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
         sheetProductUuid = p.uuid
+        // Доказательство «что в picker сейчас»: picker.currentOpts, а не локальная переменная.
+        sheetPickerDebug = {
+            val cur = picker.currentOpts
+            val shown = SheetSections.headers(
+                picker.variantCount, cur.milk.size, cur.syrup.size, cur.sugar.size, cur.extra.size,
+            )
+            "Picker: milk=${cur.milk.size} syrup=${cur.syrup.size} sugar=${cur.sugar.size} " +
+                "extra=${cur.extra.size} sections=[${shown.joinToString(",")}]"
+        }
         sheetClosedForUuid = null
 
         // Диагностика на экране: на терминале нет logcat, поэтому причина пустого окна
@@ -1941,9 +1978,14 @@ class MainActivity : AppCompatActivity() {
         // Конфигурация живёт ровно одно открытие карточки товара.
         var closedOnce = false
         val sheetGen = configGen
+        itemSheetDialog = dialog
         dialog.setOnDismissListener {
             if (closedOnce) return@setOnDismissListener
             closedOnce = true
+            val current = itemSheetDialog === dialog
+            if (current) itemSheetDialog = null
+            // Не наш текущий лист: это закрытие при пересборке после ответа конфигурации.
+            if (!current) return@setOnDismissListener
             catalogSheetOpen = false
             // Конфигурацию стираем, только если она ещё про этот лист: иначе закрытие
             // предыдущей карточки уносило данные уже открытой следующей.
@@ -1953,6 +1995,7 @@ class MainActivity : AppCompatActivity() {
             }
             debugPanel = null
             sheetApplyConfig = null
+            sheetPickerDebug = null
             sheetProductUuid = null
             sheetClosedForUuid = p.uuid
             onRepeatSheetClosed(p)

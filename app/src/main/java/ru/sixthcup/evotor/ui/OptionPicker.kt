@@ -238,11 +238,24 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         selectedKeys(),
     )
 
+    /** Что реально лежит в picker сейчас — для отладочной панели (не догадки). */
+    val currentOpts: Opts get() = opts
+
+    val variantCount: Int get() = variants.size
+
     private fun render() {
         removeAllViews()
         val variantValue = variant
+        // Условия отрисовки секций — из общего [SheetSections], иначе UI и тесты расходятся.
+        val sections = SheetSections.headers(
+            variantCount = variants.size,
+            milkCount = opts.milk.size,
+            syrupCount = opts.syrup.size,
+            sugarCount = opts.sugar.size,
+            extraCount = opts.extra.size,
+        )
 
-        if (variants.size > 1) {
+        if (SheetSections.VOLUME in sections) {
             header("Объём", "обязательно")
             grid(variants.map { v ->
                 cell(
@@ -263,7 +276,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
                 }
             }, 3)
         }
-        if (opts.milk.isNotEmpty()) {
+        if (SheetSections.MILK in sections) {
             header("Молоко", "включено")
             grid(opts.milk.map { o ->
                 cell(o.label, o.price, milk?.key == o.key, o.sellable, false) {
@@ -272,7 +285,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
                 }
             }, 2)
         }
-        if (opts.syrup.isNotEmpty()) {
+        if (SheetSections.SYRUP in sections) {
             header("Сироп", "по желанию")
             grid(opts.syrup.map { o ->
                 cell(o.label, o.price, syrup?.key == o.key, o.sellable, false) {
@@ -281,7 +294,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
                 }
             }, 2)
         }
-        if (opts.sugar.isNotEmpty()) {
+        if (SheetSections.SUGAR in sections) {
             header("Сахар", "в порции")
             grid(opts.sugar.map { o ->
                 cell(o.label, o.price.takeIf { it.signum() > 0 }, sugar?.key == o.key, o.sellable, false) {
@@ -290,7 +303,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
                 }
             }, 3)
         }
-        if (opts.extra.isNotEmpty()) {
+        if (SheetSections.EXTRA in sections) {
             val rules = opts.extra.map { it.rule() }
             val max = ToppingRules.groupLimit(rules)
             val full = max > 0 && extras.size >= max

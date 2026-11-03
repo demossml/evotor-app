@@ -45,6 +45,8 @@ object ConfigSheetDebug {
         val uiExtra: Int = 0,
         val needOpts: Boolean = false,
         val configPresent: Boolean = false,
+        /** Строка 8: состояние самого picker (пустая — не печатается). */
+        val extra: String? = null,
     ) {
         val uiAdditions: Int get() = uiSyrup + uiSugar + uiExtra
     }
@@ -104,6 +106,7 @@ object ConfigSheetDebug {
         out.add("6. UI opts: milk=${s.uiMilk} syrup=${s.uiSyrup} sugar=${s.uiSugar} extra=${s.uiExtra}")
         out.add("7. Policy needOpts=${s.needOpts} configPresent=${s.configPresent}")
 
+        if (!s.extra.isNullOrBlank()) out.add("8. ${s.extra}")
         if (s.error != null && s.phase != Phase.FAILED) out.add("ERROR: ${s.error}")
         return out
     }

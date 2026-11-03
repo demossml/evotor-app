@@ -99,6 +99,17 @@ class ConfigSheetDebugTest {
         assertTrue(lines[1].length < 80)
     }
 
+    // Строка 8 показывает состояние самого picker — по ней видно, дошли ли опции до UI.
+    @Test
+    fun `picker state is printed as the eighth line`() {
+        val lines = ConfigSheetDebug.lines(
+            state().copy(extra = "Picker: milk=2 syrup=7 sugar=0 extra=10 sections=[Объём,Молоко,Сироп,Добавки]"),
+        )
+        assertEquals(8, lines.size)
+        assertTrue(lines[7], lines[7].startsWith("8. Picker:"))
+        assertTrue(lines[7], lines[7].contains("milk=2"))
+    }
+
     @Test
     fun `from cache is visible`() {
         val s = state().copy(fromCache = true)
