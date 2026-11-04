@@ -25,6 +25,12 @@ import java.math.BigDecimal
  */
 class OptionPicker(context: Context) : LinearLayout(context) {
 
+    init {
+        // Секции Объём/Молоко/Сироп/… — одна под другой, не в ряд.
+        // У LinearLayout по умолчанию HORIZONTAL: без этого строки уезжали вправо.
+        orientation = LinearLayout.VERTICAL
+    }
+
     /** Опция: товар Эвотор (`evotorUuid != null`) или схема из catalog API. */
     data class Opt(
         val key: String,

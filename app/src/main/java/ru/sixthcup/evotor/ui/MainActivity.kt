@@ -1234,8 +1234,8 @@ class MainActivity : AppCompatActivity() {
                     matchPid = hit?.productId,
                     configPresent = cfg != null,
                 )
-                // Лист уже открыт (мы показали его до запроса) — обновляем его на месте.
-                refreshDebugPanel()
+                // Панель обновляем только внутри листа (после bind и новой лямбды строки 8):
+                // ранний refresh успевал прочитать picker прошлого листа — парадокс строк 6 vs 8.
                 val sheetOpen = sheetProductUuid == p.uuid && sheetApplyConfig != null
                 val sheetWasClosed = sheetClosedForUuid == p.uuid
                 fun deliver(why: String, allowDirectAdd: Boolean) {
@@ -1554,6 +1554,8 @@ class MainActivity : AppCompatActivity() {
         }
         // Снимаем ссылку ДО закрытия: dismiss-листенер по идентичности поймёт, что это наша инициатива.
         itemSheetDialog = null
+        // Старая лямбда читала прошлый picker: до новой привязки она не должна пережить пересборку.
+        sheetPickerDebug = null
         try {
             dialog.dismiss()
         } catch (t: Throwable) {
@@ -1810,7 +1812,7 @@ class MainActivity : AppCompatActivity() {
             }
             body.addView(panel, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
             debugPanel = panel
-            refreshDebugPanel()
+            // Refresh — только после picker.bind и новой лямбды (иначе строка 8 читает прошлый picker).
         }
 
         val picker = OptionPicker(this)
@@ -1826,6 +1828,7 @@ class MainActivity : AppCompatActivity() {
             "Picker: milk=${cur.milk.size} syrup=${cur.syrup.size} sugar=${cur.sugar.size} " +
                 "extra=${cur.extra.size} sections=[${shown.joinToString(",")}]"
         }
+        refreshDebugPanel()
         sheetClosedForUuid = null
 
         // Диагностика на экране: на терминале нет logcat, поэтому причина пустого окна
