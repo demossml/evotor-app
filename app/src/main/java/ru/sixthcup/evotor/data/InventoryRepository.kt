@@ -85,6 +85,7 @@ data class Topping(
      * Явный флаг сервера (`sendToReceipt`); нет поля — решает `zeroOption` и наличие uuid.
      */
     val sendToReceipt: Boolean = true,
+    val fromMilkScheme: Boolean = false,
 )
 
 data class UpsellItem(

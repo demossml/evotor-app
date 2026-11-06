@@ -60,6 +60,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             zeroOption = zeroOption,
             available = available,
             sendToReceipt = sendToReceipt,
+            fromMilkScheme = key.startsWith("c:m:"),
         )
 
         /** Правила те же, что проверяет валидатор чека: платная опция без uuid недоступна. */

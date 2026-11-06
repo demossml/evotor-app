@@ -18,6 +18,7 @@ data class ReceiptIssue(
  * если схему добавок изменили в админке (опция пропала / стала available=false / получила
  * другой evotorUuid), позицию не отправляем, показываем сообщение и обновляем каталог.
  * Удалённый в Эвоторе товар (404 по uuid) — тот же путь: сообщение + обновление каталога.
+ * Молоко из схемы молока ([CartLine.fromMilkScheme]) с добавками каталога не сверяется: другое пространство id.
  */
 object ReceiptValidator {
 
@@ -37,6 +38,7 @@ object ReceiptValidator {
                 out.add(issue(line, "product_not_found", "Товар удалён или недоступен в Эвоторе на этой точке."))
                 continue
             }
+            if (line.fromMilkScheme) continue
             val optionId = line.optionId ?: continue
             val topping = toppingsById[optionId]
             if (topping == null) {

@@ -23,6 +23,7 @@ data class CartLine(
      * Нужен, чтобы перед «В чек» сверить опцию с последним каталогом (наличие, available, evotorUuid).
      */
     val optionId: Int? = null,
+    val fromMilkScheme: Boolean = false,
 ) {
     fun lineTotal(): BigDecimal = priceRub.multiply(quantity)
 }
@@ -116,7 +117,8 @@ object Cart {
                 .put("n", l.name).put("p", l.priceRub.toPlainString())
                 .put("q", l.quantity.toPlainString()).put("r", l.recipe ?: JSONObject.NULL).put("f", l.freeEligible)
                 .put("cg", l.comboGroupId ?: JSONObject.NULL).put("ci", l.comboId ?: JSONObject.NULL)
-                .put("oi", l.optionId ?: JSONObject.NULL))
+                .put("oi", l.optionId ?: JSONObject.NULL)
+                .put("ms", l.fromMilkScheme))
         }
     }
 
@@ -128,6 +130,7 @@ object Cart {
             comboGroupId = if (o.isNull("cg")) null else o.getString("cg"),
             comboId = if (o.isNull("ci")) null else o.getString("ci"),
             optionId = if (o.isNull("oi")) null else o.optInt("oi").takeIf { it > 0 },
+            fromMilkScheme = o.optBoolean("ms", false),
         )
     } catch (_: Throwable) { null }
 

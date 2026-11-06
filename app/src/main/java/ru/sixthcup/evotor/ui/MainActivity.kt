@@ -2339,6 +2339,7 @@ class MainActivity : AppCompatActivity() {
                         comboGroupId = groupId,
                         comboId = combo.id,
                         optionId = o.id,
+                        fromMilkScheme = o.key.startsWith("c:m:"),
                     ),
                 )
             }

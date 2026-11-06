@@ -399,3 +399,11 @@ Backend реализовал `GET /api/devices/products/:productId/configuration
 - `ProductConfigGuard`: `configErrors` содержит `links` → «Объёмы не привязаны к Эвотору на этой точке — продажа запрещена»; недоступный объём → причина через `ConfigDiagnostics.unavailableText`.
 - Тест контракта: `net/ProductConfigContractTest` + `test/resources/product-configuration-fixture.json` (копия backend-фикстуры).
 - Нулевое молоко/`sendToReceipt=false` не создаёт Position (`DrinkConfig.receiptLines`).
+
+
+## Валидатор чека и молоко (5.2.32, versionCode 158)
+- `id` платного молока в конфигурации — это `milk_scheme_variants.id`; `id` добавок — id опций схемы добавок. Пространства пересекаются.
+- Опции с ключом `c:m:<id>` (`OptionPicker.Opt`) превращаются в `Topping.fromMilkScheme = true`, затем в `CartLine.fromMilkScheme` (хранится в корзине под ключом `ms`; старые корзины читаются как `false`).
+- `ReceiptValidator` для таких строк проверяет только наличие товара на точке (`product_not_found`) и не ищет `optionId` среди добавок каталога — раньше это давало «Добавка изменилась в админке» на любом платном молоке.
+- Актуальность по терминалу проверяет `sendReceipt` (поиск uuid на терминале до открытия чека).
+- Добавки валидируются как прежде.

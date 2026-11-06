@@ -32,11 +32,12 @@ class ReceiptValidatorTest {
         available = available,
     )
 
-    private fun line(uuid: String, optionId: Int? = null) = CartLine(
+    private fun line(uuid: String, optionId: Int? = null, fromMilkScheme: Boolean = false) = CartLine(
         productUuid = uuid,
         name = "line-$uuid",
         priceRub = BigDecimal("50.00"),
         optionId = optionId,
+        fromMilkScheme = fromMilkScheme,
     )
 
     @Test
@@ -89,5 +90,37 @@ class ReceiptValidatorTest {
     fun `synthetic cart line is never sent`() {
         val issues = ReceiptValidator.validate(listOf(line("mod:1")), emptyList())
         assertEquals("no_evotor_product", issues.first().reason)
+    }
+
+    @Test
+    fun `paid milk line is not matched against catalog addons even when ids collide`() {
+        // id молока (7) совпал с id чужой добавки с другим uuid — раньше это давало option_changed.
+        val alien = topping(7, "syrup-uuid")
+        val products = listOf(product("drink-uuid", listOf(alien)), product("coconut-uuid", hide = true), product("syrup-uuid", hide = true))
+        val issues = ReceiptValidator.validate(listOf(line("drink-uuid"), line("coconut-uuid", 7, fromMilkScheme = true)), products)
+        assertTrue(issues.isEmpty())
+    }
+
+    @Test
+    fun `paid milk line passes when no addon has its id`() {
+        // раньше — option_removed: в каталоге добавок id молока нет вообще.
+        val products = listOf(product("drink-uuid"), product("coconut-uuid", hide = true))
+        val issues = ReceiptValidator.validate(listOf(line("drink-uuid"), line("coconut-uuid", 99, fromMilkScheme = true)), products)
+        assertTrue(issues.isEmpty())
+    }
+
+    @Test
+    fun `paid milk line still blocked when its product is gone from the point`() {
+        val products = listOf(product("drink-uuid"))
+        val issues = ReceiptValidator.validate(listOf(line("coconut-uuid", 7, fromMilkScheme = true)), products)
+        assertEquals("product_not_found", issues.first().reason)
+    }
+
+    @Test
+    fun `addon line without milk flag is still validated against catalog`() {
+        val moved = topping(7, "new-top-uuid")
+        val products = listOf(product("drink-uuid", listOf(moved)), product("old-top-uuid", hide = true))
+        val issues = ReceiptValidator.validate(listOf(line("old-top-uuid", 7, fromMilkScheme = false)), products)
+        assertEquals("option_changed", issues.first().reason)
     }
 }

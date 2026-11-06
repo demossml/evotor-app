@@ -40,6 +40,7 @@ object CartLines {
                     priceRub = line.priceRub,
                     quantity = quantity,
                     optionId = line.optionId,
+                    fromMilkScheme = line.fromMilkScheme,
                 )
             }
         }

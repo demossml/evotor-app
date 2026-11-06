@@ -29,6 +29,7 @@ object DrinkConfig {
         /** `Topping.id`, если позиция пришла из схемы каталога. */
         val optionId: Int?,
         val role: Role,
+        val fromMilkScheme: Boolean = false,
     ) {
         val goesToReceipt: Boolean get() = uuid.isNotBlank()
     }
@@ -65,6 +66,7 @@ object DrinkConfig {
                     priceRub = t.priceRub,
                     optionId = t.id,
                     role = if (isMilk(t)) Role.MILK else Role.ADDON,
+                    fromMilkScheme = t.fromMilkScheme,
                 ),
             )
         }
@@ -94,6 +96,7 @@ object DrinkConfig {
                     zeroOption = it.isFree,
                     available = it.available,
                     sendToReceipt = it.sendToReceipt,
+                    fromMilkScheme = true,
                 ),
             )
         }
