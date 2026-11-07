@@ -94,6 +94,7 @@ import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.MenuTabs
 import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.data.PreorderPullSession
+import ru.sixthcup.evotor.data.PreorderQueue
 import ru.sixthcup.evotor.net.OrderApi
 import ru.sixthcup.evotor.data.ReceiptIssue
 import ru.sixthcup.evotor.data.ReceiptValidator
@@ -3933,8 +3934,58 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Кнопка «Заказы» в шапке: список активных предзаказов гостя. */
+    private var ordersChipView: TextView? = null
+    private var activeOrders: List<ru.sixthcup.evotor.net.OrderApi.ActiveRow> = emptyList()
+    /** Опрос очереди предзаказов: только пока экран на переднем плане. */
+    private val ordersPoll = object : Runnable {
+        override fun run() {
+            refreshActiveOrders(silent = true)
+            handler.postDelayed(this, ORDERS_POLL_MS)
+        }
+    }
+
+    private fun startOrdersPoll() {
+        handler.removeCallbacks(ordersPoll)
+        handler.post(ordersPoll)
+    }
+
+    private fun stopOrdersPoll() {
+        handler.removeCallbacks(ordersPoll)
+    }
+
+    private fun refreshActiveOrders(silent: Boolean) {
+        thread(name = "orders-active") {
+            val r = OrderApi.active()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                when (r) {
+                    is OrderApi.Result.Ok -> {
+                        activeOrders = r.value
+                        paintOrdersChip()
+                    }
+                    is OrderApi.Result.Err -> {
+                        if (!silent) {
+                            notice = PreorderQueue.errorText(r.error)
+                            noticeKind = Kind.WARN
+                            safeRender()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Баннер очереди: пока заказов нет — обычная кнопка «Заказы». */
+    private fun paintOrdersChip() {
+        val chip = ordersChipView ?: return
+        val banner = PreorderQueue.bannerText(activeOrders)
+        chip.text = if (banner != null) "● $banner" else "Заказы"
+        chip.setTextColor(if (banner != null) UiKit.BRAND else INK)
+    }
+
     private fun ordersChip(): View = TextView(this).apply {
-        text = "Заказы"
+        ordersChipView = this
+        text = if (PreorderQueue.bannerText(activeOrders) != null) "● ${PreorderQueue.bannerText(activeOrders)}" else "Заказы"
         textSize = 10.5f
         weight(Fonts.SEMIBOLD)
         setTextColor(INK)
@@ -5467,6 +5518,8 @@ class MainActivity : AppCompatActivity() {
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(scanReceiver, f, RECEIVER_NOT_EXPORTED)
             else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(scanReceiver, f)
         } catch (_: Throwable) {}
+        // Очередь предзаказов: первый запрос сразу, дальше раз в 10 с до onPause.
+        startOrdersPoll()
         // Drain scan that arrived while we were paused / before register.
         ScannerHub.poll()?.let { code -> handler.post { if (!isFinishing && !isDestroyed) handleScannedCode(code) } }
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).
@@ -5521,6 +5574,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         // Экран не виден — сервер больше не опрашиваем (опрос возобновится в onResume).
         stopCardPoll()
+        stopOrdersPoll()
         try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}
         super.onPause()
     }
@@ -5548,6 +5602,8 @@ class MainActivity : AppCompatActivity() {
          * другую карточку (тогда диалог не показываем), либо экран успокоится.
          */
         const val REPEAT_INTERRUPT_DELAY_MS = 300L
+        /** Опрос очереди предзаказов на главном экране (промпт 2.1: каждые 10 с). */
+        const val ORDERS_POLL_MS = 10_000L
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         val BRAND = UiKit.BRAND

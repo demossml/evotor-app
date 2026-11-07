@@ -20,6 +20,8 @@ object OrderApi {
         val name: String,
         val priceEstimate: Int,
         val sendToReceipt: Boolean,
+        /** UUID товара-опции в номенклатуре точки; без него опцию в чек не положить. */
+        val evotorUuid: String? = null,
     )
 
     data class Item(
@@ -41,6 +43,11 @@ object OrderApi {
         val status: String,
         val createdAt: String,
         val expiresAt: String,
+        /** Готовность по расчёту backend; `null` — «уточняем». */
+        val etaReadyAt: String? = null,
+        val etaMinutes: Int? = null,
+        /** Время сервера: ETA считается от него, а не от часов терминала. */
+        val serverNow: String? = null,
         val estimateTotal: Int,
         val currency: String,
         val cardId: String?,
@@ -55,6 +62,8 @@ object OrderApi {
         val createdAt: String,
         val estimateTotal: Int,
         val itemsCount: Int,
+        val etaReadyAt: String? = null,
+        val serverNow: String? = null,
     )
 
     sealed class Result<out T> {
@@ -87,6 +96,8 @@ object OrderApi {
                             createdAt = r.optString("createdAt"),
                             estimateTotal = r.optInt("estimateTotal"),
                             itemsCount = r.optInt("itemsCount"),
+                            etaReadyAt = r.optString("etaReadyAt").trim().ifEmpty { null },
+                            serverNow = r.optString("serverNow").trim().ifEmpty { null },
                         ),
                     )
                 }
@@ -122,6 +133,7 @@ object OrderApi {
                                 name = m.optString("name"),
                                 priceEstimate = m.optInt("priceEstimate"),
                                 sendToReceipt = m.optBoolean("sendToReceipt"),
+                                evotorUuid = m.optString("evotorUuid").trim().ifEmpty { null },
                             ),
                         )
                     }
@@ -152,6 +164,9 @@ object OrderApi {
             status = o.getString("status"),
             createdAt = o.optString("createdAt"),
             expiresAt = o.optString("expiresAt"),
+            etaReadyAt = o.optString("etaReadyAt").trim().ifEmpty { null },
+            etaMinutes = if (o.has("etaMinutes") && !o.isNull("etaMinutes")) o.optInt("etaMinutes") else null,
+            serverNow = o.optString("serverNow").trim().ifEmpty { null },
             estimateTotal = o.optInt("estimateTotal"),
             currency = o.optString("currency", "RUB"),
             cardId = o.optString("cardId").ifBlank { null },

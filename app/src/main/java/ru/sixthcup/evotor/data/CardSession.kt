@@ -126,8 +126,10 @@ object CardSession {
         cashbackKopecks: Long,
         queue: QueueNumber? = null,
         voucherId: Int? = null,
+        /** Предзаказ, подтянутый в этот чек (см. [PreorderPullSession]). */
+        preorderId: String? = null,
     ): JSONObject {
-        val sc = sc(info, freeApplied, cashbackKopecks, queue, voucherId)
+        val sc = sc(info, freeApplied, cashbackKopecks, queue, voucherId, preorderId)
         // Плоский ключ нужен текущему парсеру: если appId не совпал с EVOTOR_APP_ID на backend,
         // льгота не потеряется. Оба значения одинаковые — двойного списания нет.
         return JSONObject()
@@ -144,6 +146,12 @@ object CardSession {
         queue: QueueNumber? = null,
         /** Выбранный ваучер; пишется только при живом резерве — как и остальные льготы. */
         voucherId: Int? = null,
+        /**
+         * Предзаказ, состав которого подтянут в этот чек. Пишется отдельным ключом `preorder`:
+         * `ord` уже занят связкой с публичным номером очереди (`bindQueueNumber` на backend),
+         * перезапись сломала бы привязку номера к чеку.
+         */
+        preorderId: String? = null,
     ): JSONObject {
         val c = scValue(info)
         // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
@@ -167,6 +175,7 @@ object CardSession {
         if (QueueNumber.isUsable(queue)) {
             o.put("ord", queue!!.orderId).put("qn", queue.publicNumber)
         }
+        preorderId?.trim()?.takeIf { it.isNotEmpty() && it.length <= 64 }?.let { o.put("preorder", it) }
         return o
     }
 

@@ -20,6 +20,7 @@ import ru.sixthcup.evotor.data.ChoicePrintStore
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.FiscalLines
+import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.VoucherCalc
 
 /**
@@ -161,7 +162,14 @@ object SellLauncher {
                     "receipt_discount free=${extrasFree} cb=$extrasCb voucher=$extrasVoucher " +
                         "voucherRub=${calc.voucher.toPlainString()} total=${calc.total.toPlainString()}",
                 )
-                SetExtra(CardSession.extras(card, extrasFree > 0, extrasCb, voucherId = extrasVoucher.takeIf { it > 0 }))
+                SetExtra(
+                    CardSession.extras(
+                        card, extrasFree > 0, extrasCb,
+                        voucherId = extrasVoucher.takeIf { it > 0 },
+                        // Предзаказ, состав которого лежит в этом чеке: backend свяжет SELL с заказом.
+                        preorderId = PreorderPullSession.orderId(),
+                    ),
+                )
             } else null
 
             val positionsTotal = Cart.all().sumOf { line -> line.lineTotal() }

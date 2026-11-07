@@ -60,7 +60,7 @@ class PreorderPullTest {
         assertTrue(plan.lines.isEmpty())
         assertFalse(plan.hasAnything)
         assertEquals(listOf("Напиток без UUID"), plan.missingUuid)
-        assertTrue(PreorderPull.notice(plan).contains("Не добавлено"))
+        assertTrue(PreorderPull.notice(plan).contains("Ни одна позиция не добавлена"))
         assertTrue(PreorderPull.notice(plan).contains("Напиток без UUID"))
     }
 
@@ -81,7 +81,7 @@ class PreorderPullTest {
         assertEquals(1, plan.added)
         assertEquals(1, plan.missingUuid.size)
         assertEquals(1, plan.notFound.size)
-        assertTrue(PreorderPull.notice(plan).startsWith("В чеке: 1 поз."))
+        assertTrue(PreorderPull.notice(plan).startsWith("Добавлено 1 поз."))
     }
 
     @Test
@@ -116,6 +116,57 @@ class PreorderPullTest {
     fun `no config, no volume, no modifiers give null recipe`() {
         val bare = item("l1", "U1", config = "").copy(volumeLabel = null)
         assertNull(PreorderPull.recipeOf(bare))
+    }
+
+    // Промпт 2.4: платная опция с uuid — отдельная позиция, цена из номенклатуры.
+    @Test
+    fun `paid modifier with uuid becomes its own position`() {
+        val mods = listOf(
+            OrderApi.Modifier("milk", "2", "Кокосовое молоко", 0, sendToReceipt = true, evotorUuid = "U2"),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", qty = 2, mods = mods)), catalog)
+        assertEquals(2, plan.added)
+        assertEquals(1, plan.itemLines)
+        val mod = plan.lines.single { it.isModifier }
+        assertEquals("U2", mod.productUuid)
+        assertEquals(BigDecimal("150"), mod.priceRub)
+        assertEquals("pre:o1:l1:m:2", mod.cartKey)
+        assertEquals("Капучино 250 мл", mod.recipe)
+        // Итог диалога: 2×250 + 2×150.
+        assertEquals(0, BigDecimal("800").compareTo(plan.totalRub))
+    }
+
+    @Test
+    fun `free modifier without uuid is only a warning`() {
+        val mods = listOf(
+            OrderApi.Modifier("milk", "1", "Обычное молоко", 0, sendToReceipt = false, evotorUuid = null),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog)
+        assertEquals("позиция добавляется, опция — нет", 1, plan.added)
+        assertTrue(plan.modifierNoUuid.isEmpty())
+    }
+
+    @Test
+    fun `paid modifier without uuid warns but keeps the drink`() {
+        val mods = listOf(
+            OrderApi.Modifier("syrup", "3", "Ванильный сироп", 0, sendToReceipt = true, evotorUuid = null),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog)
+        assertEquals(1, plan.added)
+        assertEquals(1, plan.modifierNoUuid.size)
+        assertTrue(PreorderPull.notice(plan).contains("добавьте вручную"))
+        // Без uuid опция остаётся текстом в рецепте.
+        assertTrue(plan.lines.single().recipe!!.contains("Ванильный сироп"))
+    }
+
+    @Test
+    fun `modifier missing in the terminal is reported`() {
+        val mods = listOf(
+            OrderApi.Modifier("syrup", "4", "Сироп лаванда", 0, sendToReceipt = true, evotorUuid = "GONE"),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog)
+        assertEquals(1, plan.added)
+        assertEquals(listOf("Сироп лаванда"), plan.notFound)
     }
 
     @Test
