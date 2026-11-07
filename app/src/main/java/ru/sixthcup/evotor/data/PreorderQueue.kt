@@ -146,6 +146,7 @@ object PreorderQueue {
         "already_paid" -> "Заказ уже оплачен"
         "rejected" -> "Заказ отклонён или отменён"
         "invalid_transition" -> "Статус уже изменился — обновите заказ"
+        "benefit_conflict" -> "Бонус гостя уже применён в другом чеке"
         "bad_request" -> "Некорректный запрос"
         "network" -> "Нет связи с сервером"
         else -> when (httpStatus) {
@@ -167,4 +168,57 @@ object PreorderQueue {
         if (left <= 0) return 0
         return (left / 60_000).toInt()
     }
+
+    /** Подпись вида бонуса, если backend не прислал заголовок. */
+    fun benefitKindLabel(kind: String?): String = when (kind?.trim()?.lowercase()) {
+        "gift" -> "Подарок"
+        "voucher" -> "Ваучер"
+        "cashback" -> "Кэшбэк"
+        else -> "Бонус"
+    }
+
+    /**
+     * Деньги заказа для панели: оценка гостя, бонус и итог.
+     *
+     * Бонус рисуем только когда backend прислал и `benefit`, и `quoteTotal`: без итога строка
+     * «−300 ₽» повисла бы без пары, а APK сам скидку не считает (правило 1.7.1).
+     */
+    data class Money(
+        val estimateRub: Int,
+        val benefitTitle: String? = null,
+        val benefitRub: Int = 0,
+        val totalRub: Int,
+    ) {
+        val hasBenefit: Boolean get() = benefitTitle != null
+
+        /** Строка панели: `Бонус: <title> −300 ₽`. */
+        val benefitLine: String?
+            get() = benefitTitle?.let { if (benefitRub > 0) "Бонус: $it −$benefitRub ₽" else "Бонус: $it" }
+
+        /** Компактный итог: `Оценка гостя: 650 ₽ · бонус «Подарок» −300 ₽ · итог 350 ₽`. */
+        val summary: String
+            get() = buildString {
+                append("Оценка гостя: $estimateRub ₽")
+                if (benefitTitle != null) {
+                    append(" · бонус «$benefitTitle»")
+                    if (benefitRub > 0) append(" −$benefitRub ₽")
+                    append(" · итог $totalRub ₽")
+                }
+            }
+    }
+
+    fun money(
+        estimateTotal: Int,
+        benefit: OrderApi.Benefit?,
+        benefitTotal: Int? = 0,
+        quoteTotal: Int? = null,
+    ): Money {
+        if (benefit == null || quoteTotal == null) return Money(estimateTotal, totalRub = estimateTotal)
+        val amount = if (benefit.amountRub > 0) benefit.amountRub else (benefitTotal ?: 0).coerceAtLeast(0)
+        val title = benefit.title.trim().ifBlank { benefitKindLabel(benefit.kind) }
+        return Money(estimateTotal, title, amount, quoteTotal)
+    }
+
+    /** Итог без разбора бонуса — нужен списку заказов. */
+    fun totalRub(estimateTotal: Int, quoteTotal: Int?): Int = quoteTotal ?: estimateTotal
 }

@@ -174,4 +174,45 @@ class PreorderPullTest {
         val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", qty = 0)), catalog)
         assertEquals(0, BigDecimal.ONE.compareTo(plan.lines.single().quantity))
     }
+
+    // Контракт v2: `choice` (корица без цены) не становится позицией чека никогда.
+    @Test
+    fun `choice modifier never goes into the receipt`() {
+        val mods = listOf(
+            OrderApi.Modifier(
+                group = "choice", id = "9", name = "Корица", priceEstimate = 0,
+                sendToReceipt = true, evotorUuid = "U2", groupKey = "choice",
+            ),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog)
+        assertEquals("только напиток", 1, plan.added)
+        assertTrue(plan.lines.none { it.isModifier })
+        assertTrue("выбор печатается отдельно, не предупреждаем", plan.modifierNoUuid.isEmpty())
+        assertFalse(PreorderPull.recipeOf(item("l1", "U1", config = "250 мл · корица", mods = mods))!!.contains("Корица"))
+    }
+
+    @Test
+    fun `receipt modifiers are grouped for the dialog`() {
+        val mods = listOf(
+            OrderApi.Modifier("milk", "2", "Кокосовое", 0, true, "U2", "milk"),
+            OrderApi.Modifier("syrup", "3", "Ваниль", 0, true, "U1", "syrup"),
+            OrderApi.Modifier("extra", "4", "Корица", 0, true, "U1", "choice"),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog)
+        assertEquals(3, plan.added)
+        assertEquals(
+            "молоко: Кокосовое; сироп: Ваниль",
+            PreorderPull.groupedModifiers(plan.receiptModifiers),
+        )
+        assertTrue(PreorderPull.notice(plan).contains("Опции: молоко: Кокосовое; сироп: Ваниль"))
+    }
+
+    @Test
+    fun `config text is printed as the backend sent it`() {
+        val config = "300 мл · Кокосовое · С корицей · Ваниль"
+        val recipe = PreorderPull.recipeOf(
+            item("l1", "U1", config = config, mods = emptyList()).copy(volumeLabel = "300 мл"),
+        )
+        assertEquals(config, recipe)
+    }
 }

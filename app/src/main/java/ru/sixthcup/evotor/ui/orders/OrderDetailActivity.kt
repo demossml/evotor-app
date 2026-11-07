@@ -35,6 +35,8 @@ class OrderDetailActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var order: OrderApi.Order? = null
     private var busy = false
+    /** `409 benefit_conflict`: бонус гостя уже занят другим чеком — «В чек» запрещён до администратора. */
+    private var pullBlocked = false
 
     private lateinit var title: TextView
     private lateinit var statusView: TextView
@@ -121,11 +123,13 @@ class OrderDetailActivity : AppCompatActivity() {
                     is OrderApi.Result.Ok -> bind(result.value)
                     is OrderApi.Result.Err -> {
                         Log.w(TAG, "resolve_failed err=${result.error}")
+                        if (result.error == "benefit_conflict") pullBlocked = true
                         if (order == null) {
                             showFatal(result.error, result.message)
                         } else {
                             // Автообновление: заказ мог уйти в paid/expired — просто показываем статус.
                             Toast.makeText(this, PreorderQueue.errorText(result.error), Toast.LENGTH_SHORT).show()
+                            if (pullBlocked) renderButtons(order!!)
                         }
                     }
                 }
@@ -164,9 +168,21 @@ class OrderDetailActivity : AppCompatActivity() {
                 .joinToString("") { m -> "\n  + ${m.name}" }
             head + cfg + mods
         }
-        estimateView.text = "Оценка гостя: ${o.estimateTotal} ₽\nФинальная цена — по номенклатуре Эвотора"
+        estimateView.text = run {
+            val money = PreorderQueue.money(o.estimateTotal, o.benefit, o.benefitTotal, o.quoteTotal)
+            if (!money.hasBenefit) {
+                return@run "Оценка гостя: ${money.estimateRub} ₽\nФинальная цена — по номенклатуре Эвотора"
+            }
+            buildString {
+                append("Оценка гостя: ${money.estimateRub} ₽")
+                append("\n${money.benefitLine}")
+                append("\nИтог: ${money.totalRub} ₽")
+                append("\nИтог подтверждает касса")
+            }
+        }
         val warns = o.warnings + o.items.filter { it.evotorProductUuid.isNullOrBlank() }
-            .map { "${it.name} — нет UUID на точке" }
+            .map { "${it.name} — нет UUID на точке" } +
+            (if (pullBlocked) listOf("Бонус гостя уже применён в другом чеке — позовите администратора") else emptyList())
         warningsView.text = warns.joinToString("\n")
         warningsView.visibility = if (warns.isEmpty()) TextView.GONE else TextView.VISIBLE
         renderButtons(o)
@@ -187,7 +203,7 @@ class OrderDetailActivity : AppCompatActivity() {
                     .apply { topMargin = 8 },
             )
         }
-        if (PreorderQueue.Action.PULL in actions) {
+        if (PreorderQueue.Action.PULL in actions && !pullBlocked) {
             buttons.addView(
                 actionButton("В чек", primary = PreorderQueue.nextStatus(o.status) == null) { onPull() },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -277,6 +293,10 @@ class OrderDetailActivity : AppCompatActivity() {
     private fun onPull() {
         val o = order ?: return
         if (busy) return
+        if (pullBlocked) {
+            Toast.makeText(this, PreorderQueue.errorText("benefit_conflict"), Toast.LENGTH_LONG).show()
+            return
+        }
         busy = true
         buttons.isEnabled = false
         Thread {

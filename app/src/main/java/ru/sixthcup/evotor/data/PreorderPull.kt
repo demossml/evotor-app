@@ -17,6 +17,15 @@ import java.math.BigDecimal
  */
 object PreorderPull {
 
+    /** Опция-выбор без цены (корица): печатается отдельно и **никогда** не становится позицией чека. */
+    const val GROUP_CHOICE = "choice"
+
+    /** Позиция-опция, которая уйдёт отдельной строкой (для группировки в диалоге). */
+    data class ReceiptModifier(val groupKey: String?, val name: String)
+
+    fun isChoice(m: OrderApi.Modifier): Boolean =
+        m.groupKey?.trim()?.equals(GROUP_CHOICE, ignoreCase = true) == true
+
     data class Line(
         val productUuid: String,
         val name: String,
@@ -40,6 +49,8 @@ object PreorderPull {
         val notFound: List<String>,
         /** Платные опции без UUID: предупреждение, но основная позиция разрешена. */
         val modifierNoUuid: List<String>,
+        /** Опции, добавленные отдельными позициями: только для группировки в диалоге. */
+        val receiptModifiers: List<ReceiptModifier> = emptyList(),
     ) {
         val added: Int get() = lines.size
         val itemLines: Int get() = lines.count { !it.isModifier }
@@ -57,6 +68,7 @@ object PreorderPull {
         val missing = ArrayList<String>(0)
         val notFound = ArrayList<String>(0)
         val modifierNoUuid = ArrayList<String>(0)
+        val receiptMods = ArrayList<ReceiptModifier>(0)
 
         items.forEachIndexed { index, item ->
             val uuid = item.evotorProductUuid?.trim().orEmpty()
@@ -85,6 +97,7 @@ object PreorderPull {
             // Платные опции — отдельными позициями по своему uuid Эвотор.
             item.modifiers.forEachIndexed { mi, m ->
                 if (!m.sendToReceipt) return@forEachIndexed
+                if (isChoice(m)) return@forEachIndexed
                 val mUuid = m.evotorUuid?.trim().orEmpty()
                 if (mUuid.isEmpty()) {
                     modifierNoUuid.add("${item.name}: ${m.name}")
@@ -109,9 +122,10 @@ object PreorderPull {
                         isModifier = true,
                     ),
                 )
+                receiptMods.add(ReceiptModifier(m.groupKey, m.name))
             }
         }
-        return Plan(orderId, lines, missing, notFound, modifierNoUuid)
+        return Plan(orderId, lines, missing, notFound, modifierNoUuid, receiptMods)
     }
 
     /** Текст для строки чека: конфигурация заказа + печатаемые модификаторы без uuid. */
@@ -123,9 +137,28 @@ object PreorderPull {
         }
         // В рецепт попадают только опции, которые не ушли отдельной позицией.
         item.modifiers
-            .filter { it.sendToReceipt && it.name.isNotBlank() && it.evotorUuid.isNullOrBlank() }
+            .filter { it.sendToReceipt && !isChoice(it) && it.name.isNotBlank() && it.evotorUuid.isNullOrBlank() }
             .forEach { m -> if (parts.none { it.contains(m.name, ignoreCase = true) }) parts.add(m.name) }
         return parts.joinToString(" · ").takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Группировка опций для диалога «В чек»: `groupKey` — только оформление, в чек не уходит.
+     * `choice` здесь не встречается: такие опции в чек не добавляются никогда.
+     */
+    fun groupedModifiers(list: List<ReceiptModifier>): String {
+        if (list.isEmpty()) return ""
+        fun label(key: String?) = when (key?.trim()?.lowercase()) {
+            "milk" -> "молоко"
+            "addon", "extra" -> "добавки"
+            "syrup" -> "сироп"
+            else -> "опции"
+        }
+        val order = listOf("молоко", "сироп", "добавки", "опции")
+        return list.groupBy { label(it.groupKey) }
+            .toList()
+            .sortedBy { (group, _) -> order.indexOf(group).let { if (it < 0) order.size else it } }
+            .joinToString("; ") { (group, items) -> "$group: ${items.joinToString(", ") { it.name }}" }
     }
 
     /** Сообщение кассиру по результату попытки (диалог подтверждения). */
@@ -134,6 +167,9 @@ object PreorderPull {
             append("Добавлено ${plan.added} поз. Сумма по кассе: ${rub(plan.totalRub)} ₽")
         } else {
             append("Ни одна позиция не добавлена")
+        }
+        if (plan.receiptModifiers.isNotEmpty()) {
+            append(". Опции: ${groupedModifiers(plan.receiptModifiers)}")
         }
         if (plan.missingUuid.isNotEmpty()) {
             append(". Нет UUID на точке: ${plan.missingUuid.joinToString(", ")}")

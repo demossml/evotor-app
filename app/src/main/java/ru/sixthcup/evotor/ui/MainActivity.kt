@@ -4160,10 +4160,23 @@ class MainActivity : AppCompatActivity() {
                     PreorderPullSession.clear()
                     Log.i(TAG, "preorder_paid order=$orderId status=${r.value.status}")
                 }
-                is OrderApi.Result.Err -> Log.w(
-                    TAG,
-                    "preorder_paid_failed order=$orderId err=${r.error} msg=${r.message}",
-                )
+                is OrderApi.Result.Err -> {
+                    Log.w(
+                        TAG,
+                        "preorder_paid_failed order=$orderId err=${r.error} msg=${r.message}",
+                    )
+                    if (r.error == "benefit_conflict") {
+                        // Бонус гостя занят другим чеком: повтор не поможет, нужен администратор.
+                        PreorderPullSession.clear()
+                        runOnUiThread {
+                            if (isFinishing || isDestroyed) return@runOnUiThread
+                            notice = PreorderQueue.errorText(r.error)
+                            noticeKind = Kind.WARN
+                            safeRender()
+                        }
+                        refreshActiveOrders(silent = true)
+                    }
+                }
             }
         }
     }

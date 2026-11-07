@@ -22,6 +22,18 @@ object OrderApi {
         val sendToReceipt: Boolean,
         /** UUID товара-опции в номенклатуре точки; без него опцию в чек не положить. */
         val evotorUuid: String? = null,
+        /** `milk` / `addon` / `choice` — только группировка в диалоге, в чек не уходит. */
+        val groupKey: String? = null,
+    )
+
+    /**
+     * Льгота гостя, уже применённая backend'ом к заказу (подарок / ваучер / кэшбэк).
+     * APK её не считает: в чек уходит только id заказа, скидку закрывает сервер.
+     */
+    data class Benefit(
+        val kind: String,
+        val title: String,
+        val amountRub: Int,
     )
 
     data class Item(
@@ -53,6 +65,11 @@ object OrderApi {
         val cardId: String?,
         val items: List<Item>,
         val warnings: List<String>,
+        /** Бонус гостя; `null` — строка бонуса не рисуется. */
+        val benefit: Benefit? = null,
+        val benefitTotal: Int = 0,
+        /** Итог с учётом бонуса; `null` — показываем `estimateTotal` без строки бонуса. */
+        val quoteTotal: Int? = null,
     )
 
     data class ActiveRow(
@@ -96,8 +113,8 @@ object OrderApi {
                             createdAt = r.optString("createdAt"),
                             estimateTotal = r.optInt("estimateTotal"),
                             itemsCount = r.optInt("itemsCount"),
-                            etaReadyAt = r.optString("etaReadyAt").trim().ifEmpty { null },
-                            serverNow = r.optString("serverNow").trim().ifEmpty { null },
+                            etaReadyAt = r.optNullableString("etaReadyAt"),
+                            serverNow = r.optNullableString("serverNow"),
                         ),
                     )
                 }
@@ -117,7 +134,14 @@ object OrderApi {
             parseOrder(o.getJSONObject("order"))
         }
 
-    private fun parseOrder(o: JSONObject): Order {
+    /**
+     * Строка или `null`. `optString` на Android превращает JSON-`null` в текст `"null"`,
+     * поэтому проверяем явно: контракт разрешает отсутствующие и `null`-поля.
+     */
+    internal fun JSONObject.optNullableString(key: String): String? =
+        if (!has(key) || isNull(key)) null else optString(key).trim().ifEmpty { null }
+
+    internal fun parseOrder(o: JSONObject): Order {
         val itemsArr = o.optJSONArray("items") ?: JSONArray()
         val items = buildList {
             for (i in 0 until itemsArr.length()) {
@@ -133,7 +157,8 @@ object OrderApi {
                                 name = m.optString("name"),
                                 priceEstimate = m.optInt("priceEstimate"),
                                 sendToReceipt = m.optBoolean("sendToReceipt"),
-                                evotorUuid = m.optString("evotorUuid").trim().ifEmpty { null },
+                                evotorUuid = m.optNullableString("evotorUuid"),
+                                groupKey = m.optNullableString("groupKey"),
                             ),
                         )
                     }
@@ -142,10 +167,10 @@ object OrderApi {
                     Item(
                         lineId = it.optString("lineId"),
                         productId = it.optString("productId"),
-                        evotorProductUuid = it.optString("evotorProductUuid").ifBlank { null },
+                        evotorProductUuid = it.optNullableString("evotorProductUuid"),
                         name = it.optString("name"),
                         quantity = it.optInt("quantity", 1),
-                        volumeLabel = it.optString("volumeLabel").ifBlank { null },
+                        volumeLabel = it.optNullableString("volumeLabel"),
                         configText = it.optString("configText"),
                         unitPriceEstimate = it.optInt("unitPriceEstimate"),
                         modifiers = mods,
@@ -157,6 +182,14 @@ object OrderApi {
         val warnings = buildList {
             for (i in 0 until warningsArr.length()) add(warningsArr.getString(i))
         }
+        val benefitObj = o.optJSONObject("benefit")
+        val benefit = benefitObj?.let {
+            Benefit(
+                kind = it.optString("kind").trim(),
+                title = it.optString("title").trim(),
+                amountRub = it.optInt("amountRub"),
+            )
+        }
         return Order(
             id = o.getString("id"),
             shortCode = o.getString("shortCode"),
@@ -164,14 +197,17 @@ object OrderApi {
             status = o.getString("status"),
             createdAt = o.optString("createdAt"),
             expiresAt = o.optString("expiresAt"),
-            etaReadyAt = o.optString("etaReadyAt").trim().ifEmpty { null },
+            etaReadyAt = o.optNullableString("etaReadyAt"),
             etaMinutes = if (o.has("etaMinutes") && !o.isNull("etaMinutes")) o.optInt("etaMinutes") else null,
-            serverNow = o.optString("serverNow").trim().ifEmpty { null },
+            serverNow = o.optNullableString("serverNow"),
             estimateTotal = o.optInt("estimateTotal"),
             currency = o.optString("currency", "RUB"),
-            cardId = o.optString("cardId").ifBlank { null },
+            cardId = o.optNullableString("cardId"),
             items = items,
             warnings = warnings,
+            benefit = benefit,
+            benefitTotal = o.optInt("benefitTotal"),
+            quoteTotal = if (o.has("quoteTotal") && !o.isNull("quoteTotal")) o.optInt("quoteTotal") else null,
         )
     }
 
