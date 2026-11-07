@@ -93,6 +93,8 @@ import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.MenuTabs
 import ru.sixthcup.evotor.data.PendingPayment
+import ru.sixthcup.evotor.data.PreorderPullSession
+import ru.sixthcup.evotor.net.OrderApi
 import ru.sixthcup.evotor.data.ReceiptIssue
 import ru.sixthcup.evotor.data.ReceiptValidator
 import ru.sixthcup.evotor.net.DeviceHeaders
@@ -4096,6 +4098,25 @@ class MainActivity : AppCompatActivity() {
      * Заказ ждёт оплаты: состав фиксируется сейчас, номер выдаётся только после подтверждения.
      * Локально на терминале, backend не участвует.
      */
+    /**
+     * Предзаказ оплачен: сообщаем backend. Ошибка сети не откатывает фискальный чек —
+     * оплата уже прошла, markPaid можно повторить вручную/повторной попыткой.
+     */
+    private fun markPreorderPaid(orderId: String) {
+        thread(name = "preorder-paid") {
+            when (val r = OrderApi.markPaid(orderId)) {
+                is OrderApi.Result.Ok -> {
+                    PreorderPullSession.clear()
+                    Log.i(TAG, "preorder_paid order=$orderId status=${r.value.status}")
+                }
+                is OrderApi.Result.Err -> Log.w(
+                    TAG,
+                    "preorder_paid_failed order=$orderId err=${r.error} msg=${r.message}",
+                )
+            }
+        }
+    }
+
     private fun markPendingOrder() {
         try {
             val lines = Cart.all()
@@ -5459,7 +5480,12 @@ class MainActivity : AppCompatActivity() {
             when (sellOpen) {
                 false -> {
                     // Чек закрыт (оплата завершена или чек аннулирован после оплаты) → очередь, корзина чистая.
+                    // Предзаказ, подтянутый в этот чек, помечаем оплаченным — один раз на успешную продажу.
+                    val pulledOrder = PreorderPullSession.orderId()
+                    val pulledInCart = pulledOrder != null &&
+                        Cart.all().any { it.cartKey.startsWith("pre:$pulledOrder:") }
                     val done = confirmPendingOrder()
+                    if (pulledInCart) markPreorderPaid(pulledOrder!!)
                     Cart.clear()
                     // Чек закрыт: выбор льгот больше не нужен (чистим здесь, а не в сервисе скидки).
                     CheckoutChoice.clear(this)

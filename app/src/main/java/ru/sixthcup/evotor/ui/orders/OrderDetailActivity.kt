@@ -10,6 +10,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import android.util.Log
+import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.CartLine
+import ru.sixthcup.evotor.data.InventoryRepository
+import ru.sixthcup.evotor.data.PreorderPull
+import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.net.OrderApi
 
 /**
@@ -162,23 +168,57 @@ class OrderDetailActivity : AppCompatActivity() {
 
     private fun onPull() {
         val o = order ?: return
-        // Integration point: map evotorProductUuid → createPosition in MainActivity / InventoryRepository.
-        // This delivery logs lines; host app must call existing receipt API.
-        val missing = o.items.filter { it.evotorProductUuid.isNullOrBlank() }.map { it.name }
-        val ok = o.items.filter { !it.evotorProductUuid.isNullOrBlank() }
-        Toast.makeText(
-            this,
-            "К подтягиванию: ${ok.size}. Без UUID: ${missing.joinToString()}",
-            Toast.LENGTH_LONG,
-        ).show()
-        // Persist last pull request for MainActivity to consume if desired
-        getSharedPreferences("preorder", MODE_PRIVATE)
-            .edit()
-            .putString("pull_order_id", o.id)
-            .apply()
+        if (busy) return
+        busy = true
+        btnPull.isEnabled = false
+        // Номенклатура и корзина — как в ручном пути: тот же InventoryRepository и тот же Cart.
+        Thread {
+            val catalog = try {
+                InventoryRepository.load(this)
+            } catch (t: Throwable) {
+                Log.w(TAG, "pull_catalog_failed", t)
+                emptyList()
+            }
+            val byUuid = catalog.associateBy { it.uuid }
+            val already = Cart.all().map { it.cartKey }.toSet()
+            val plan = PreorderPull.plan(o.id, o.items, byUuid, already)
+            // Cart — синглтон процесса: строки сразу видны на кассовом экране после finish().
+            plan.lines.forEach { l ->
+                Cart.add(
+                    CartLine(
+                        productUuid = l.productUuid,
+                        name = l.name,
+                        priceRub = l.priceRub,
+                        quantity = l.quantity,
+                        recipe = l.recipe,
+                        freeEligible = l.freeEligible,
+                        cartKey = l.cartKey,
+                    ),
+                )
+            }
+            handler.post {
+                busy = false
+                if (plan.hasAnything) {
+                    // Связь с чеком: после успешной продажи вызовем markPaid (MainActivity, onResume).
+                    PreorderPullSession.set(
+                        o.id,
+                        o.shortCode,
+                        plan.lines.map { PreorderPullSession.Item(it.productUuid, it.name, it.quantity.toInt()) },
+                    )
+                    Log.i(TAG, "pull_ok order=${o.id} lines=${plan.added} skipped=${plan.missingUuid.size + plan.notFound.size}")
+                    Toast.makeText(this, PreorderPull.notice(plan), Toast.LENGTH_LONG).show()
+                    finish()
+                } else {
+                    Log.w(TAG, "pull_empty order=${o.id} missing=${plan.missingUuid.size} notFound=${plan.notFound.size}")
+                    btnPull.isEnabled = true
+                    Toast.makeText(this, PreorderPull.notice(plan), Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     companion object {
+        private const val TAG = "OrderDetail"
         const val EXTRA_OID = "oid"
         const val EXTRA_CODE = "code"
     }

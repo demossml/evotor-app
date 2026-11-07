@@ -3,6 +3,7 @@ package ru.sixthcup.evotor
 import android.app.Application
 import android.os.StrictMode
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.ui.ThumbLoader
 
 class SixthCupApp : Application() {
@@ -12,6 +13,8 @@ class SixthCupApp : Application() {
         // Корзина должна быть доступна DiscountIntegrationService даже если процесс
         // пересоздан на экране оплаты (MainActivity ещё не onCreate).
         Cart.attach(this)
+        // Связь «подтянутый предзаказ → чек»: нужна и в сервисе после перезапуска процесса.
+        PreorderPullSession.attach(this)
         ThumbLoader.init(this)
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build())
