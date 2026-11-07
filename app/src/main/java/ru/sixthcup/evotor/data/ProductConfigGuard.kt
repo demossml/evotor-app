@@ -29,6 +29,10 @@ object ProductConfigGuard {
     fun milkScheme(cfg: ProductConfig, volumeEvotorUuid: String?): MilkScheme? =
         milkScheme(cfg, VolumeRef(evotorUuid = volumeEvotorUuid))
 
+    /** Схема обязательного выбора строго для этого объёма; `null` — не назначена. */
+    fun choiceScheme(cfg: ProductConfig, ref: VolumeRef): ChoiceScheme? =
+        volumeProductId(cfg, ref)?.let { cfg.choice?.byProductId?.get(it) }?.takeIf { it.active }
+
     fun additionScheme(cfg: ProductConfig, ref: VolumeRef): AdditionScheme? =
         volumeProductId(cfg, ref)?.let { cfg.additions?.byProductId?.get(it) }
 
@@ -50,7 +54,7 @@ object ProductConfigGuard {
             !v.evotorUuid.isNullOrBlank() && cardEvotorUuids.any { it.equals(v.evotorUuid, ignoreCase = true) }
         }
         if (volumeHit) return true
-        if (cfg.milk == null && cfg.additions == null) return false
+        if (cfg.milk == null && cfg.additions == null && cfg.choice == null) return false
         return cardProductId != null && cardProductId > 0 && cardProductId == cfg.productId
     }
 
@@ -80,6 +84,10 @@ object ProductConfigGuard {
                     out.add("Нет схемы молока для объёма — продажа запрещена")
                 scheme.options.none { it.available } -> out.add("Молоко недоступно — продажа запрещена")
             }
+        }
+        // Обязательный выбор без цены: повреждённая схема блокирует продажу; объём без схемы — нет.
+        pid?.let { c.choice?.byProductId?.get(it) }?.takeIf { it.active && it.invalid }?.let {
+            out.add("Выбор «${it.title.ifBlank { "без названия" }}» настроен неверно — продажа запрещена")
         }
         val additions = c.additions
         if (additions != null) {

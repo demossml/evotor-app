@@ -22,7 +22,7 @@ object ProductConfigCache {
     }
 
     fun save(ctx: Context, config: ProductConfig) {
-        if (config.volumes.isEmpty() && config.milk == null && config.additions == null) return
+        if (config.volumes.isEmpty() && config.milk == null && config.additions == null && config.choice == null) return
         try {
             file(ctx, config.storeUuid, config.productId).writeText(toJson(config).toString())
         } catch (e: Throwable) {
@@ -141,6 +141,23 @@ object ProductConfigCache {
                 )
             }
             cfg.put("additions", JSONObject().put("required", a.required).put("byProductId", byProduct))
+        }
+
+        c.choice?.let { ch ->
+            val byProduct = JSONObject()
+            ch.byProductId.forEach { (pid, scheme) ->
+                val options = JSONArray()
+                scheme.options.forEach { o ->
+                    options.put(JSONObject().put("id", o.id).put("label", o.label).put("isDefault", o.isDefault))
+                }
+                val entry = JSONObject()
+                    .put("schemeId", scheme.schemeId ?: JSONObject.NULL)
+                    .put("title", scheme.title)
+                    .put("options", options)
+                if (scheme.invalid) entry.put("error", "invalid_scheme")
+                byProduct.put(pid.toString(), entry)
+            }
+            cfg.put("choices", JSONObject().put("required", ch.required).put("byProductId", byProduct))
         }
 
         return JSONObject().put("savedAt", System.currentTimeMillis()).put("config", cfg)

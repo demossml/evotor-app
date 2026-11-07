@@ -1,0 +1,350 @@
+{
+ "cappuccino": {
+  "ok": true,
+  "schemaVersion": 1,
+  "storeUuid": "store-config-fixture",
+  "productId": 4,
+  "generatedAt": 0,
+  "volumes": [
+   {
+    "productId": 4,
+    "evotorUuid": "CAPP-A-250 мл",
+    "name": "Капучино 250 мл",
+    "label": "250 мл",
+    "sizeValue": null,
+    "sizeUnit": null,
+    "priceRub": 250,
+    "available": true
+   },
+   {
+    "productId": 5,
+    "evotorUuid": "CAPP-A-350 мл",
+    "name": "Капучино 350 мл",
+    "label": "350 мл",
+    "sizeValue": null,
+    "sizeUnit": null,
+    "priceRub": 300,
+    "available": true
+   },
+   {
+    "productId": 6,
+    "evotorUuid": "CAPP-A-450 мл",
+    "name": "Капучино 450 мл",
+    "label": "450 мл",
+    "sizeValue": null,
+    "sizeUnit": null,
+    "priceRub": 350,
+    "available": true
+   }
+  ],
+  "milk": {
+   "required": true,
+   "byProductId": {
+    "4": {
+     "schemeId": 1,
+     "options": [
+      {
+       "id": 1,
+       "productId": null,
+       "label": "Обычное молоко",
+       "evotorUuid": null,
+       "isDefault": true,
+       "isFree": true,
+       "sendToReceipt": false,
+       "sortOrder": 0,
+       "available": true,
+       "notReadyReason": null
+      },
+      {
+       "id": 2,
+       "productId": 1,
+       "label": "Овсяное молоко",
+       "evotorUuid": "OAT-A-UUID",
+       "isDefault": false,
+       "isFree": false,
+       "sendToReceipt": true,
+       "sortOrder": 1,
+       "available": true,
+       "notReadyReason": null
+      },
+      {
+       "id": 3,
+       "productId": 2,
+       "label": "Кокосовое молоко",
+       "evotorUuid": "COCONUT-A-UUID",
+       "isDefault": false,
+       "isFree": false,
+       "sendToReceipt": true,
+       "sortOrder": 2,
+       "available": true,
+       "notReadyReason": null
+      }
+     ]
+    },
+    "5": {
+     "schemeId": 1,
+     "options": [
+      {
+       "id": 1,
+       "productId": null,
+       "label": "Обычное молоко",
+       "evotorUuid": null,
+       "isDefault": true,
+       "isFree": true,
+       "sendToReceipt": false,
+       "sortOrder": 0,
+       "available": true,
+       "notReadyReason": null
+      },
+      {
+       "id": 2,
+       "productId": 1,
+       "label": "Овсяное молоко",
+       "evotorUuid": "OAT-A-UUID",
+       "isDefault": false,
+       "isFree": false,
+       "sendToReceipt": true,
+       "sortOrder": 1,
+       "available": true,
+       "notReadyReason": null
+      },
+      {
+       "id": 3,
+       "productId": 2,
+       "label": "Кокосовое молоко",
+       "evotorUuid": "COCONUT-A-UUID",
+       "isDefault": false,
+       "isFree": false,
+       "sendToReceipt": true,
+       "sortOrder": 2,
+       "available": true,
+       "notReadyReason": null
+      }
+     ]
+    },
+    "6": {
+     "schemeId": 1,
+     "options": [
+      {
+       "id": 1,
+       "productId": null,
+       "label": "Обычное молоко",
+       "evotorUuid": null,
+       "isDefault": true,
+       "isFree": true,
+       "sendToReceipt": false,
+       "sortOrder": 0,
+       "available": true,
+       "notReadyReason": null
+      },
+      {
+       "id": 2,
+       "productId": 1,
+       "label": "Овсяное молоко",
+       "evotorUuid": "OAT-A-UUID",
+       "isDefault": false,
+       "isFree": false,
+       "sendToReceipt": true,
+       "sortOrder": 1,
+       "available": true,
+       "notReadyReason": null
+      },
+      {
+       "id": 3,
+       "productId": 2,
+       "label": "Кокосовое молоко",
+       "evotorUuid": "COCONUT-A-UUID",
+       "isDefault": false,
+       "isFree": false,
+       "sendToReceipt": true,
+       "sortOrder": 2,
+       "available": true,
+       "notReadyReason": null
+      }
+     ]
+    }
+   }
+  },
+  "choices": {
+   "required": true,
+   "byProductId": {
+    "4": {
+     "schemeId": 1,
+     "title": "Корица",
+     "options": [
+      {
+       "id": 1,
+       "label": "С корицей",
+       "isDefault": false
+      },
+      {
+       "id": 2,
+       "label": "Без корицы",
+       "isDefault": false
+      }
+     ]
+    },
+    "5": {
+     "schemeId": 1,
+     "title": "Корица",
+     "options": [
+      {
+       "id": 1,
+       "label": "С корицей",
+       "isDefault": false
+      },
+      {
+       "id": 2,
+       "label": "Без корицы",
+       "isDefault": false
+      }
+     ]
+    },
+    "6": {
+     "schemeId": 1,
+     "title": "Корица",
+     "options": [
+      {
+       "id": 1,
+       "label": "С корицей",
+       "isDefault": false
+      },
+      {
+       "id": 2,
+       "label": "Без корицы",
+       "isDefault": false
+      }
+     ]
+    }
+   }
+  },
+  "additions": {
+   "required": false,
+   "byProductId": {
+    "4": {
+     "schemeId": 1,
+     "options": [
+      {
+       "id": 1,
+       "productId": null,
+       "name": "Без сиропа",
+       "groupKey": "syrup",
+       "evotorUuid": null,
+       "priceRub": 0,
+       "required": false,
+       "maxCount": 1,
+       "isDefault": true,
+       "zeroOption": true,
+       "available": true,
+       "sendToReceipt": false
+      },
+      {
+       "id": 2,
+       "productId": 3,
+       "name": "Ванильный сироп",
+       "groupKey": "syrup",
+       "evotorUuid": "VANILLA-A-UUID",
+       "priceRub": 50,
+       "required": false,
+       "maxCount": 1,
+       "isDefault": false,
+       "zeroOption": false,
+       "available": true,
+       "sendToReceipt": true
+      }
+     ]
+    },
+    "5": {
+     "schemeId": 1,
+     "options": [
+      {
+       "id": 1,
+       "productId": null,
+       "name": "Без сиропа",
+       "groupKey": "syrup",
+       "evotorUuid": null,
+       "priceRub": 0,
+       "required": false,
+       "maxCount": 1,
+       "isDefault": true,
+       "zeroOption": true,
+       "available": true,
+       "sendToReceipt": false
+      },
+      {
+       "id": 2,
+       "productId": 3,
+       "name": "Ванильный сироп",
+       "groupKey": "syrup",
+       "evotorUuid": "VANILLA-A-UUID",
+       "priceRub": 50,
+       "required": false,
+       "maxCount": 1,
+       "isDefault": false,
+       "zeroOption": false,
+       "available": true,
+       "sendToReceipt": true
+      }
+     ]
+    },
+    "6": {
+     "schemeId": 1,
+     "options": [
+      {
+       "id": 1,
+       "productId": null,
+       "name": "Без сиропа",
+       "groupKey": "syrup",
+       "evotorUuid": null,
+       "priceRub": 0,
+       "required": false,
+       "maxCount": 1,
+       "isDefault": true,
+       "zeroOption": true,
+       "available": true,
+       "sendToReceipt": false
+      },
+      {
+       "id": 2,
+       "productId": 3,
+       "name": "Ванильный сироп",
+       "groupKey": "syrup",
+       "evotorUuid": "VANILLA-A-UUID",
+       "priceRub": 50,
+       "required": false,
+       "maxCount": 1,
+       "isDefault": false,
+       "zeroOption": false,
+       "available": true,
+       "sendToReceipt": true
+      }
+     ]
+    }
+   }
+  },
+  "configErrors": []
+ },
+ "espresso": {
+  "ok": true,
+  "schemaVersion": 1,
+  "storeUuid": "store-config-fixture",
+  "productId": 1,
+  "generatedAt": 0,
+  "volumes": [
+   {
+    "productId": 7,
+    "evotorUuid": "ESPRESSO-A-UUID",
+    "name": "Эспрессо",
+    "label": null,
+    "sizeValue": null,
+    "sizeUnit": null,
+    "priceRub": 150,
+    "available": true
+   }
+  ],
+  "milk": null,
+  "choices": null,
+  "additions": null,
+  "configErrors": []
+ }
+}

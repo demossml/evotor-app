@@ -17,6 +17,8 @@ data class ProductConfig(
     val milk: MilkConfig? = null,
     /** `null` — ни одному объёму схема добавок не назначена. */
     val additions: AdditionsConfig? = null,
+    /** `null` — ни одному объёму схема обязательного выбора (корица) не назначена. */
+    val choice: ChoiceConfig? = null,
     /**
      * Коды проблем от backend (`configErrors`): например `links` — объёмы не привязаны
      * к товарам Эвотор этой точки. Показываем кассиру, чтобы причина была видна без логов.
@@ -25,11 +27,13 @@ data class ProductConfig(
 ) {
     /** Есть ли что выбирать кассиру. Пустая конфигурация = обычное добавление товара. */
     val hasChoices: Boolean
-        get() = volumes.size > 1 || milk != null || additions != null
+        get() = volumes.size > 1 || milk != null || additions != null || choice != null
 
     fun milkFor(productId: Int): MilkScheme? = milk?.byProductId?.get(productId)
 
     fun additionsFor(productId: Int): AdditionScheme? = additions?.byProductId?.get(productId)
+
+    fun choiceFor(productId: Int): ChoiceScheme? = choice?.byProductId?.get(productId)
 
     /**
      * Схема молока строго для объёма с этим Evotor UUID.
@@ -115,3 +119,34 @@ data class AdditionOption(
     val receiptLine: Boolean
         get() = available && !zeroOption && sendToReceipt && !evotorUuid.isNullOrBlank()
 }
+
+/**
+ * Обязательный выбор без цены («с корицей / без корицы»).
+ *
+ * Не товар Эвотор и не добавка: в чек отдельной позицией не идёт, сумму не меняет.
+ * Выбор запоминается в строке корзины и печатается на чеке через PrintExtra.
+ */
+data class ChoiceConfig(
+    val required: Boolean,
+    val byProductId: Map<Int, ChoiceScheme>,
+)
+
+/**
+ * [schemeId] `null` — у этого объёма схемы нет (блока нет, продажу не ограничиваем).
+ * [invalid] — сервер пометил схему повреждённой (`invalid_scheme`): продавать нельзя.
+ */
+data class ChoiceScheme(
+    val schemeId: Int?,
+    val title: String,
+    val options: List<ChoiceOption>,
+    val invalid: Boolean = false,
+) {
+    /** Есть ли что показывать кассиру. */
+    val active: Boolean get() = schemeId != null
+}
+
+data class ChoiceOption(
+    val id: Int,
+    val label: String,
+    val isDefault: Boolean,
+)

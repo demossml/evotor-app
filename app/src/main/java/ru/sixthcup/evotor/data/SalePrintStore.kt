@@ -84,9 +84,11 @@ object SalePrintStore {
 
 /** Итоговый текст на чеке: номер заказа + блок лояльности. */
 object ReceiptPrintText {
-    fun lines(queue: QueueNumber?, loyalty: SalePrintLoyalty?): List<String> {
+    fun lines(queue: QueueNumber?, loyalty: SalePrintLoyalty?, choice: List<ChoicePrintEntry> = emptyList()): List<String> {
         val out = ArrayList<String>(4)
         if (QueueNumber.isUsable(queue)) out += QueueNumber.printTextFor(queue!!.publicNumber)
+        // Выбор для бариста — сразу под номером заказа, до блока лояльности.
+        out += ChoicePrint.lines(choice)
         loyalty?.lines()?.let { out += it }
         return out
     }

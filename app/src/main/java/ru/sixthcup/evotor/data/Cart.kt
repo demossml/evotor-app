@@ -24,6 +24,12 @@ data class CartLine(
      */
     val optionId: Int? = null,
     val fromMilkScheme: Boolean = false,
+    /**
+     * Обязательный выбор без цены («с корицей»): не позиция чека, не добавка и не часть суммы.
+     * Печатается на чеке строкой PrintExtra, см. [ChoicePrint].
+     */
+    val choiceLabel: String? = null,
+    val choiceTitle: String? = null,
 ) {
     fun lineTotal(): BigDecimal = priceRub.multiply(quantity)
 }
@@ -111,18 +117,19 @@ object Cart {
         }
     }
 
-    private fun encode(list: List<CartLine>): JSONArray = JSONArray().apply {
+    internal fun encode(list: List<CartLine>): JSONArray = JSONArray().apply {
         list.forEach { l ->
             put(JSONObject().put("u", l.productUuid).put("k", l.cartKey.ifBlank { l.productUuid })
                 .put("n", l.name).put("p", l.priceRub.toPlainString())
                 .put("q", l.quantity.toPlainString()).put("r", l.recipe ?: JSONObject.NULL).put("f", l.freeEligible)
                 .put("cg", l.comboGroupId ?: JSONObject.NULL).put("ci", l.comboId ?: JSONObject.NULL)
                 .put("oi", l.optionId ?: JSONObject.NULL)
-                .put("ms", l.fromMilkScheme))
+                .put("ms", l.fromMilkScheme)
+                .put("ch", l.choiceLabel ?: JSONObject.NULL).put("ct", l.choiceTitle ?: JSONObject.NULL))
         }
     }
 
-    private fun decode(o: JSONObject): CartLine? = try {
+    internal fun decode(o: JSONObject): CartLine? = try {
         CartLine(
             productUuid = o.getString("u"), name = o.getString("n"), priceRub = BigDecimal(o.getString("p")),
             quantity = BigDecimal(o.getString("q")), recipe = if (o.isNull("r")) null else o.getString("r"),
@@ -131,6 +138,8 @@ object Cart {
             comboId = if (o.isNull("ci")) null else o.getString("ci"),
             optionId = if (o.isNull("oi")) null else o.optInt("oi").takeIf { it > 0 },
             fromMilkScheme = o.optBoolean("ms", false),
+            choiceLabel = if (o.isNull("ch")) null else o.optString("ch").takeIf { it.isNotBlank() },
+            choiceTitle = if (o.isNull("ct")) null else o.optString("ct").takeIf { it.isNotBlank() },
         )
     } catch (_: Throwable) { null }
 

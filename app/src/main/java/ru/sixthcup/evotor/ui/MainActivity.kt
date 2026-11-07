@@ -60,6 +60,7 @@ import ru.sixthcup.evotor.data.CardRefresh
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.SalePrintStore
+import ru.sixthcup.evotor.data.ChoicePrintStore
 import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.net.ShiftApi
 import ru.sixthcup.evotor.data.OrderQueueStore
@@ -1525,6 +1526,10 @@ class MainActivity : AppCompatActivity() {
      * Чем товар терминала опознаётся в ответе конфигурации: uuid, серверный id, объём, имя.
      * Одного uuid мало — backend берёт его из связей точки ([VolumeResolver]).
      */
+    /** Схема обязательного выбора (корица) для объёма; `null` — не назначена или конфигурации нет. */
+    private fun choiceSchemeFor(p: CatalogProduct): ru.sixthcup.evotor.data.ChoiceScheme? =
+        pendingConfigFor(p)?.let { ProductConfigGuard.choiceScheme(it, volumeRefOf(p)) }
+
     private fun volumeRefOf(p: CatalogProduct) = VolumeRef(
         evotorUuid = p.uuid,
         backendProductId = productIdOf(p.uuid),
@@ -1816,6 +1821,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         val picker = OptionPicker(this)
+        // Обязательный выбор без цены: схема объёма из конфигурации (не из каталога).
+        picker.choiceProvider = ::choiceSchemeFor
         picker.bind(variants, opts, start)
         body.addView(picker, LinearLayout.LayoutParams(MATCH, WRAP))
         sheetProductUuid = p.uuid
@@ -1959,7 +1966,10 @@ class MainActivity : AppCompatActivity() {
                 // Объём — сам товар; платное молоко и платные добавки — отдельные позиции.
                 // Обычное молоко (zeroOption) и опции с sendToReceipt=false в чек не идут.
                 // Сборка строк — [CartLines] (её же проверяют тесты).
-                val lines = CartLines.of(variant, picker.chosenToppings(), picker.modsText(), picker.signature(), qty)
+                val lines = CartLines.of(
+                    variant, picker.chosenToppings(), picker.modsText(), picker.signature(), qty,
+                    choiceTitle = picker.choiceTitle(), choiceLabel = picker.selectedChoice()?.label,
+                )
                 lines.forEach { Cart.add(it) }
                 Log.i(
                     TAG,
@@ -2195,6 +2205,7 @@ class MainActivity : AppCompatActivity() {
         val foodPrice = combo.foodPriceRub
 
         val picker = OptionPicker(this)
+        picker.choiceProvider = ::choiceSchemeFor
         // При редактировании подставляем уже выбранный в чеке объём.
         val editingDrink = editingGroupId?.let { gid ->
             val uuids = variants.map { it.uuid }.toSet()
@@ -2312,6 +2323,8 @@ class MainActivity : AppCompatActivity() {
                     cartKey = "$groupId#drink",
                     comboGroupId = groupId,
                     comboId = combo.id,
+                    choiceLabel = picker.selectedChoice()?.label,
+                    choiceTitle = picker.choiceTitle(),
                 ),
             )
             Cart.add(
@@ -3951,7 +3964,10 @@ class MainActivity : AppCompatActivity() {
             safeRender()
             return
         }
-        val issues = ReceiptValidator.validate(Cart.all(), products)
+        val issues = ReceiptValidator.validate(Cart.all(), products) { line ->
+            // Строка напитка, у которого активна схема выбора, обязана нести выбор.
+            products.firstOrNull { it.uuid == line.productUuid }?.let { choiceSchemeFor(it) } != null
+        }
         if (issues.isNotEmpty()) {
             showReceiptIssues(issues)
             return
@@ -4003,6 +4019,7 @@ class MainActivity : AppCompatActivity() {
                     // Чек не открывался: зарезервированный номер не должен «сгореть» на непродаже.
                     QueueNumberStore.clear(this)
                     SalePrintStore.clear(this)
+                    ChoicePrintStore.clear(this)
                     Log.i(TAG, "receipt_blocked_before_send number_cleared")
                 }
                 if (outcome.catalogRefresh) loadProducts(userInitiated = true)
@@ -4021,6 +4038,7 @@ class MainActivity : AppCompatActivity() {
     private fun requestQueueNumberBlocking() {
         QueueNumberStore.clear(this)
         SalePrintStore.clear(this)
+        ChoicePrintStore.clear(this)
         val ready = java.util.concurrent.CountDownLatch(1)
         val fetched = java.util.concurrent.atomic.AtomicReference<QueueNumber?>()
         thread(name = "queue-number") {

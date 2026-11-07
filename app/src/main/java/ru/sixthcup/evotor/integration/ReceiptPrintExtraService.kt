@@ -14,6 +14,7 @@ import ru.evotor.framework.receipt.PrintGroup
 import ru.evotor.framework.receipt.Receipt
 import ru.evotor.framework.receipt.ReceiptApi
 import ru.evotor.framework.receipt.print_extras.PrintExtraPlacePrintGroupTop
+import ru.sixthcup.evotor.data.ChoicePrintStore
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.ReceiptPrintText
@@ -62,7 +63,8 @@ class ReceiptPrintExtraService : IntegrationService() {
     private fun buildResult(): PrintExtraRequiredEventResult {
         val number = QueueNumberStore.peek(this)
         val loyalty = SalePrintStore.peek(this)
-        val lines = ReceiptPrintText.lines(number, loyalty)
+        val choice = ChoicePrintStore.peek(this)
+        val lines = ReceiptPrintText.lines(number, loyalty, choice)
         if (lines.isEmpty()) {
             Log.i(TAG, "print_extra_skip nothing_to_print")
             return PrintExtraRequiredEventResult(emptyList())
@@ -71,11 +73,12 @@ class ReceiptPrintExtraService : IntegrationService() {
             TAG,
             "print_extra order=${number?.orderId?.take(8) ?: "-"} number=${number?.publicNumber ?: "-"} " +
                 "loyaltyCard=${loyalty?.cardFound ?: false} reward=${loyalty?.rewardApplied ?: false} " +
-                "lines=${lines.size}",
+                "choiceLines=${choice.size} lines=${lines.size}",
         )
         // Данные одноразовые: печатаем ровно один раз и освобождаем под следующую продажу.
         QueueNumberStore.clear(this)
         SalePrintStore.clear(this)
+        ChoicePrintStore.clear(this)
         val place = PrintExtraPlacePrintGroupTop(printGroupId())
         val printables = lines.map { PrintableText(it) as IPrintable }.toTypedArray()
         return PrintExtraRequiredEventResult(listOf(SetPrintExtra(place, printables)))

@@ -37,4 +37,15 @@ class SheetSectionsTest {
     fun `sugar gets its own section`() {
         assertEquals(listOf("Объём", "Сахар"), SheetSections.headers(3, 0, 0, 3, 0))
     }
+
+    @Test
+    fun `choice section sits between milk and syrup and appears alone`() {
+        assertEquals(listOf("Объём", "Молоко", "Выбор", "Сироп"), SheetSections.headers(2, 2, 1, 0, 0, choiceCount = 1))
+        assertEquals(listOf("Выбор"), SheetSections.headers(1, 0, 0, 0, 0, choiceCount = 1))
+    }
+
+    @Test
+    fun `without choice the sections are unchanged`() {
+        assertEquals(listOf("Объём", "Молоко"), SheetSections.headers(2, 2, 0, 0, 0, choiceCount = 0))
+    }
 }

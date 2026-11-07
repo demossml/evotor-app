@@ -9,6 +9,8 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import ru.sixthcup.evotor.data.CatalogProduct
+import ru.sixthcup.evotor.data.ChoiceOption
+import ru.sixthcup.evotor.data.ChoiceScheme
 import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.OptionRule
 import ru.sixthcup.evotor.data.Topping
@@ -98,6 +100,14 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     private var sugar: Opt? = null
     private val extras = LinkedHashMap<String, Opt>()
 
+    /**
+     * Схема обязательного выбора для выбранного объёма (корица). Не [Opt]: не товар и не добавка,
+     * цены нет, в чек отдельной строкой не идёт — запоминается в строке корзины.
+     */
+    var choiceProvider: ((CatalogProduct) -> ChoiceScheme?)? = null
+    private var choiceScheme: ChoiceScheme? = null
+    private var choice: ChoiceOption? = null
+
     private var defMilk: Opt? = null
     private var defSyrup: Opt? = null
     private var defSugar: Opt? = null
@@ -118,6 +128,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         opts: Opts,
         initial: CatalogProduct? = null,
         preselect: Set<String> = emptySet(),
+        preselectChoice: String? = null,
     ) {
         this.variants = variants.ifEmpty { listOfNotNull(initial) }
         this.opts = opts
@@ -134,7 +145,21 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         extras.clear()
         opts.extra.filter { it.key in preselect && it.sellable }.forEach { extras[it.key] = it }
         selectRequiredExtras(opts.extra)
+        refreshChoice(preselectChoice)
         render()
+    }
+
+    /**
+     * Схема выбора берётся у текущего объёма. Выбранный вариант сохраняется при смене объёма,
+     * если подпись есть и в новой схеме; иначе — вариант по умолчанию или «не выбрано».
+     */
+    private fun refreshChoice(wantLabel: String? = choice?.label) {
+        val scheme = variant?.let { choiceProvider?.invoke(it) }?.takeIf { it.active }
+        choiceScheme = scheme
+        choice = scheme?.options?.let { list ->
+            list.firstOrNull { wantLabel != null && it.label.equals(wantLabel, ignoreCase = true) }
+                ?: list.firstOrNull { it.isDefault }
+        }
     }
 
     /**
@@ -173,6 +198,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         extras.clear()
         extras.putAll(kept)
         selectRequiredExtras(newOpts.extra)
+        refreshChoice()
         render()
     }
 
@@ -195,6 +221,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         syrup?.takeIf { it.key != defSyrup?.key }?.let { parts.add(it.label.lowercase()) }
         sugar?.takeIf { it.key != defSugar?.key }?.let { parts.add("сахар " + it.label.lowercase()) }
         extras.values.forEach { parts.add(it.label.lowercase()) }
+        choice?.let { parts.add(it.label.lowercase()) }
         return parts.joinToString(" · ")
     }
 
@@ -206,8 +233,14 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         syrup?.takeIf { it.key != defSyrup?.key }?.let { sb.append("|s:").append(it.key) }
         sugar?.takeIf { it.key != defSugar?.key }?.let { sb.append("|g:").append(it.key) }
         extras.keys.sorted().forEach { sb.append("|e:").append(it) }
+        // Разный выбор — разные строки корзины: иначе «с корицей» и «без» склеятся в одну.
+        choice?.let { sb.append("|ch:").append(it.id) }
         return sb.toString()
     }
+
+    /** Выбранный вариант без цены и заголовок блока — для строки корзины и печати. */
+    fun selectedChoice(): ChoiceOption? = choice
+    fun choiceTitle(): String? = choiceScheme?.title?.takeIf { it.isNotBlank() }
 
     /** Выбранные опции с товаром Эвотор — отдельные строки чека (zero-option без uuid не входят). */
     fun chosen(): List<Opt> =
@@ -235,7 +268,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
      * Почему текущий выбор нельзя отдать в чек (пустой список — можно).
      * Обязательная группа без доступных опций тоже блокирует позицию.
      */
-    fun blockers(): List<String> = ToppingRules.blockers(
+    fun blockers(): List<String> = choiceBlockers() + ToppingRules.blockers(
         listOf(
             "Молоко" to opts.milk.map { it.rule() },
             "Сироп" to opts.syrup.map { it.rule() },
@@ -244,6 +277,17 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         ),
         selectedKeys(),
     )
+
+    /** Обязательный выбор без цены: не выбран — продавать нельзя. */
+    private fun choiceBlockers(): List<String> {
+        val s = choiceScheme ?: return emptyList()
+        val title = s.title.ifBlank { "вариант" }
+        return when {
+            s.invalid -> listOf("Выбор «$title» настроен неверно — продажа запрещена")
+            choice == null -> listOf("Выберите: $title")
+            else -> emptyList()
+        }
+    }
 
     /** Что реально лежит в picker сейчас — для отладочной панели (не догадки). */
     val currentOpts: Opts get() = opts
@@ -260,6 +304,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             syrupCount = opts.syrup.size,
             sugarCount = opts.sugar.size,
             extraCount = opts.extra.size,
+            choiceCount = if (choiceScheme != null) 1 else 0,
         )
 
         if (SheetSections.VOLUME in sections) {
@@ -291,6 +336,18 @@ class OptionPicker(context: Context) : LinearLayout(context) {
                     render(); onChange?.invoke()
                 }
             }, 2)
+        }
+        if (SheetSections.CHOICE in sections) {
+            val s = choiceScheme
+            if (s != null) {
+                header(s.title.ifBlank { "Выбор" }, "обязательно")
+                grid(s.options.map { o ->
+                    cell(o.label, null, choice?.id == o.id, !s.invalid, false) {
+                        choice = o
+                        render(); onChange?.invoke()
+                    }
+                }, 2)
+            }
         }
         if (SheetSections.SYRUP in sections) {
             header("Сироп", "по желанию")

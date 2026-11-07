@@ -63,7 +63,8 @@ object RepeatOrder {
                         )
                         // Одна плитка = один товар: повторный размер той же карточки не дублируем.
                         !seen.add(product.uuid) -> Unit
-                        noConfigConfirmed(uuid) -> restore.add(line)
+                        // Строка с выбором (корица) не восстанавливается: выбор делается заново.
+                        noConfigConfirmed(uuid) && line.choiceLabel == null -> restore.add(line)
                         else -> needsChoice.add(product)
                     }
                 }

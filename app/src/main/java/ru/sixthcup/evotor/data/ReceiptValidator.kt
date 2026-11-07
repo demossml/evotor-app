@@ -22,7 +22,15 @@ data class ReceiptIssue(
  */
 object ReceiptValidator {
 
-    fun validate(lines: List<CartLine>, products: List<CatalogProduct>): List<ReceiptIssue> {
+    /**
+     * @param requiresChoice нужен ли строке обязательный выбор без цены (по конфигурации товара):
+     * строка без выбора — `choice_missing`, её нельзя отправлять в чек, иначе бариста не узнает вариант.
+     */
+    fun validate(
+        lines: List<CartLine>,
+        products: List<CatalogProduct>,
+        requiresChoice: (CartLine) -> Boolean = { false },
+    ): List<ReceiptIssue> {
         if (lines.isEmpty()) return emptyList()
         val byUuid = products.associateBy { it.uuid }
         val toppingsById = HashMap<Int, Topping>()
@@ -36,6 +44,10 @@ object ReceiptValidator {
             }
             if (byUuid[line.productUuid] == null) {
                 out.add(issue(line, "product_not_found", "Товар удалён или недоступен в Эвоторе на этой точке."))
+                continue
+            }
+            if (line.optionId == null && !line.fromMilkScheme && requiresChoice(line) && line.choiceLabel.isNullOrBlank()) {
+                out.add(issue(line, "choice_missing", "Не выбран обязательный вариант — выберите и добавьте заново."))
                 continue
             }
             if (line.fromMilkScheme) continue

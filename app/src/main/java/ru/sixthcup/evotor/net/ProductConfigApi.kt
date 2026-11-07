@@ -6,6 +6,9 @@ import ru.sixthcup.evotor.BuildConfig
 import ru.sixthcup.evotor.data.AdditionOption
 import ru.sixthcup.evotor.data.AdditionScheme
 import ru.sixthcup.evotor.data.AdditionsConfig
+import ru.sixthcup.evotor.data.ChoiceConfig
+import ru.sixthcup.evotor.data.ChoiceOption
+import ru.sixthcup.evotor.data.ChoiceScheme
 import ru.sixthcup.evotor.data.MilkOption
 import ru.sixthcup.evotor.data.MilkScheme
 import ru.sixthcup.evotor.data.MilkConfig
@@ -145,9 +148,10 @@ object ProductConfigApi {
                                 volumes = parseVolumes(root.optJSONArray("volumes")),
                                 milk = parseMilk(root.optJSONObject("milk")),
                                 additions = parseAdditions(root.optJSONObject("additions")),
+                                choice = parseChoice(root.optJSONObject("choices")),
                                 configErrors = parseConfigErrors(root.optJSONArray("configErrors")),
                             )
-                            val empty = config.volumes.size <= 1 && config.milk == null && config.additions == null
+                            val empty = config.volumes.size <= 1 && config.milk == null && config.additions == null && config.choice == null
                             Log.i(
                                 TAG,
                                 "config_ok product=$productId volumes=${config.volumes.size} " +
@@ -244,6 +248,46 @@ object ProductConfigApi {
                     notReadyReason = strOrNull(o, "notReadyReason"),
                 ),
             )
+        }
+        return out
+    }
+
+    /**
+     * `choices: null | {required, byProductId:{pid:{schemeId|null,title,options[],error?}}}`.
+     * Объёмы без схемы (`schemeId=null`) остаются в карте пустыми: блока нет, продажа не ограничена.
+     * Если ни у одного объёма схемы нет, выбор считаем неназначенным (`null`).
+     */
+    private fun parseChoice(o: JSONObject?): ChoiceConfig? {
+        if (o == null || o == JSONObject.NULL) return null
+        val byProduct = linkedMapOf<Int, ChoiceScheme>()
+        val map = o.optJSONObject("byProductId") ?: JSONObject()
+        for (key in map.keys()) {
+            val pid = key.toIntOrNull() ?: continue
+            val scheme = map.optJSONObject(key) ?: continue
+            val schemeId = if (scheme.has("schemeId") && !scheme.isNull("schemeId")) scheme.optInt("schemeId") else null
+            val options = parseChoiceOptions(scheme.optJSONArray("options"))
+            val invalid = strOrNull(scheme, "error") == "invalid_scheme" ||
+                (schemeId != null && options.size < 2)
+            byProduct[pid] = ChoiceScheme(
+                schemeId = schemeId,
+                title = strOrNull(scheme, "title").orEmpty(),
+                options = options,
+                invalid = invalid,
+            )
+        }
+        if (byProduct.values.none { it.schemeId != null }) return null
+        return ChoiceConfig(required = o.optBoolean("required", true), byProductId = byProduct)
+    }
+
+    private fun parseChoiceOptions(a: org.json.JSONArray?): List<ChoiceOption> {
+        if (a == null) return emptyList()
+        val out = ArrayList<ChoiceOption>(a.length())
+        for (i in 0 until a.length()) {
+            val o = a.optJSONObject(i) ?: continue
+            val id = o.optInt("id", 0)
+            val label = strOrNull(o, "label") ?: continue
+            if (id <= 0) continue
+            out.add(ChoiceOption(id = id, label = label, isDefault = o.optBoolean("isDefault", false)))
         }
         return out
     }

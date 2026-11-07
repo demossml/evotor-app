@@ -13,6 +13,8 @@ object SheetSections {
     const val SYRUP = "Сироп"
     const val SUGAR = "Сахар"
     const val EXTRA = "Добавки"
+    /** Заголовок блока выбора берётся из схемы (`title`), здесь только признак секции. */
+    const val CHOICE = "Выбор"
 
     fun headers(
         variantCount: Int,
@@ -20,10 +22,13 @@ object SheetSections {
         syrupCount: Int,
         sugarCount: Int,
         extraCount: Int,
+        choiceCount: Int = 0,
     ): List<String> {
         val out = ArrayList<String>(5)
         if (variantCount > 1) out.add(VOLUME)
         if (milkCount > 0) out.add(MILK)
+        // Выбор без цены — между молоком и сиропом/добавками.
+        if (choiceCount > 0) out.add(CHOICE)
         if (syrupCount > 0) out.add(SYRUP)
         if (sugarCount > 0) out.add(SUGAR)
         if (extraCount > 0) out.add(EXTRA)

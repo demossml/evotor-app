@@ -15,6 +15,8 @@ import ru.sixthcup.evotor.data.CardSession
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CheckoutChoice
 import ru.sixthcup.evotor.data.Choice
+import ru.sixthcup.evotor.data.ChoicePrint
+import ru.sixthcup.evotor.data.ChoicePrintStore
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.FiscalLines
@@ -165,6 +167,10 @@ object SellLauncher {
             val positionsTotal = Cart.all().sumOf { line -> line.lineTotal() }
             val hasToppings = lines.any { it.optionId != null }
 
+            // Выбор без цены (корица): печатается PrintExtra, в позиции чека не входит. Сохраняем
+            // до открытия чека — PrintExtra срабатывает уже после оплаты.
+            ChoicePrintStore.save(activity, ChoicePrint.entriesFrom(lines))
+
             OpenSellReceiptCommand(positionAdds, setExtra).process(
                 activity,
                 IntegrationManagerCallback { future ->
@@ -192,12 +198,14 @@ object SellLauncher {
                             onDone(Outcome(true, "Чек открыт"))
                         } else {
                             CheckoutChoice.clear(activity)
+                            ChoicePrintStore.clear(activity)
                             val msg = result?.error?.message ?: "Не удалось открыть чек"
                             Log.e("SellLauncher", "receipt_rejected $msg")
                             onDone(Outcome(false, msg))
                         }
                     } catch (e: Exception) {
                         CheckoutChoice.clear(activity)
+                        ChoicePrintStore.clear(activity)
                         Log.e("SellLauncher", "integration", e)
                         Log.e("SellLauncher", "receipt_error ${e.javaClass.simpleName}")
                         onDone(Outcome(false, e.message ?: "Integration error"))
@@ -206,6 +214,7 @@ object SellLauncher {
             )
         } catch (e: Throwable) {
             CheckoutChoice.clear(activity)
+            ChoicePrintStore.clear(activity)
             Log.e("SellLauncher", "openSellReceipt", e)
             Log.e("SellLauncher", "receipt_build_failed ${e.javaClass.simpleName}")
             onDone(Outcome(false, e.message ?: "OpenSellReceiptCommand failed"))

@@ -18,6 +18,9 @@ object CartLines {
         recipe: String?,
         signature: String,
         qty: Int = 1,
+        /** Выбор без цены: только в основную строку напитка, отдельных позиций не создаёт. */
+        choiceTitle: String? = null,
+        choiceLabel: String? = null,
     ): List<CartLine> {
         val key = signature.ifBlank { variant.uuid }
         val quantity = BigDecimal.valueOf(qty.coerceAtLeast(1).toLong())
@@ -31,6 +34,8 @@ object CartLines {
                     recipe = recipe,
                     freeEligible = variant.freeEligible,
                     cartKey = key,
+                    choiceLabel = choiceLabel,
+                    choiceTitle = choiceTitle,
                 )
             } else {
                 // Опция без cartKey: одинаковые добавки у разных напитков дают одну строку с количеством.

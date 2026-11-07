@@ -66,6 +66,15 @@ object ConfigOptsMapper {
         }
     }
 
+    /**
+     * Схема обязательного выбора для объёма. Не опция Эвотор: ни цены, ни uuid, ни `Topping`;
+     * `null` — не назначена. Ключ варианта в UI — `c:ch:<id>` (отдельное пространство id).
+     */
+    fun choice(cfg: ProductConfig, volume: VolumeRef): ru.sixthcup.evotor.data.ChoiceScheme? =
+        ProductConfigGuard.choiceScheme(cfg, volume)
+
+    fun choiceKey(optionId: Int): String = "c:ch:$optionId"
+
     /** Совместимость: сопоставление объёма только по uuid. */
     fun milk(cfg: ProductConfig, volumeEvotorUuid: String?, priceOf: (String) -> BigDecimal? = { null }): List<OptionPicker.Opt> =
         milk(cfg, VolumeRef(evotorUuid = volumeEvotorUuid), priceOf)
