@@ -70,6 +70,7 @@ import ru.sixthcup.evotor.data.FoodRules
 import ru.sixthcup.evotor.data.Names
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLines
+import ru.sixthcup.evotor.data.OrderScanRouter
 import ru.sixthcup.evotor.data.VolumeRef
 import ru.sixthcup.evotor.data.VolumeResolver
 import ru.sixthcup.evotor.data.ConfigDiagnostics
@@ -219,6 +220,16 @@ class MainActivity : AppCompatActivity() {
     private fun handleScannedCode(code: String) {
         val trimmed = code.trim()
         if (trimmed.isEmpty()) return
+        // Предзаказ гостя (ord1.<payload>.<signature>) — свой экран. loyalty-ветка ниже не меняется.
+        if (OrderScanRouter.isOrderQr(trimmed)) {
+            val i = Intent(this, ru.sixthcup.evotor.ui.orders.OrderDetailActivity::class.java)
+            OrderScanRouter.extractOid(trimmed)?.takeIf { it.isNotBlank() }?.let {
+                i.putExtra(ru.sixthcup.evotor.ui.orders.OrderDetailActivity.EXTRA_OID, it)
+            }
+            Log.i(TAG, "order_qr_scan oid=${OrderScanRouter.extractOid(trimmed) != null}")
+            startActivity(i)
+            return
+        }
         if (resolving) {
             // Do not drop silently — apply when resolve finishes.
             ScannerHub.offer(trimmed)
@@ -2713,6 +2724,8 @@ class MainActivity : AppCompatActivity() {
         lockup.addView(brandCol, LinearLayout.LayoutParams(WRAP, WRAP))
 
         head.addView(lockup, LinearLayout.LayoutParams(0, WRAP, 1f))
+        // Вход в предзаказы гостя: минимальная кнопка в шапке, без изменений витрины.
+        head.addView(ordersChip(), LinearLayout.LayoutParams(WRAP, dp(34)).apply { leftMargin = dp(8) })
         queueIndicator()?.let { head.addView(it, LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(8) }) }
         head.addView(guestChip(card, clickable = true), LinearLayout.LayoutParams(WRAP, dp(48)).apply { leftMargin = dp(10) })
         return head
@@ -3915,6 +3928,30 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
+    }
+
+    /** Кнопка «Заказы» в шапке: список активных предзаказов гостя. */
+    private fun ordersChip(): View = TextView(this).apply {
+        text = "Заказы"
+        textSize = 10.5f
+        weight(Fonts.SEMIBOLD)
+        setTextColor(INK)
+        gravity = Gravity.CENTER
+        setPadding(dp(12), 0, dp(12), 0)
+        background = rounded(WHITE, 10, LINE)
+        isClickable = true
+        isFocusable = true
+        contentDescription = "Активные заказы гостя"
+        setOnClickListener {
+            try {
+                startActivity(Intent(this@MainActivity, ru.sixthcup.evotor.ui.orders.OrdersListActivity::class.java))
+            } catch (t: Throwable) {
+                Log.e(TAG, "orders_open_failed", t)
+                notice = "Не удалось открыть заказы"
+                noticeKind = Kind.ERROR
+                safeRender()
+            }
+        }
     }
 
     /**

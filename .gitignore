@@ -27,3 +27,8 @@ dist/
 *.keystore
 .env
 .env.*
+
+# локальные бэкапы перед накатом (PROMPT-2)
+.preorder-backup/
+.dist/
+dist/
