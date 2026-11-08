@@ -92,6 +92,26 @@ class PreorderPullTest {
         assertEquals(1, first.added)
         assertEquals(0, second.added)
         assertFalse(second.hasAnything)
+        // Повтор — не «ничего не добавлено»: позиция уже в корзине, кассир должен это видеть.
+        assertEquals(listOf("Капучино 250 мл"), second.alreadyPresent)
+        assertTrue(PreorderPull.notice(second).contains("уже в чеке"))
+        assertFalse(PreorderPull.notice(second).contains("Ни одна позиция не добавлена"))
+    }
+
+    @Test
+    fun `mixed repeat adds the new line and reports the present one`() {
+        val first = PreorderPull.plan("o1", listOf(item("l1", "U1")), catalog)
+        val second = PreorderPull.plan(
+            "o1",
+            listOf(item("l1", "U1"), item("l2", "U2", name = "Круассан")),
+            catalog,
+            alreadyInCart = first.lines.map { it.cartKey }.toSet(),
+        )
+        assertEquals(1, second.added)
+        assertEquals(listOf("Капучино 250 мл"), second.alreadyPresent)
+        val text = PreorderPull.notice(second)
+        assertTrue(text.startsWith("Добавлено 1 поз."))
+        assertTrue(text.contains("Уже в чеке: Капучино 250 мл"))
     }
 
     @Test

@@ -336,8 +336,35 @@ class OrderDetailActivity : AppCompatActivity() {
             handler.post {
                 busy = false
                 buttons.isEnabled = true
+                if (!plan.hasAnything && plan.alreadyPresent.isNotEmpty()) {
+                    // Повторное «В чек»: состав уже в корзине — ведём кассира к оплате, не пугаем.
+                    Log.i(TAG, "pull_already_in_cart order=${o.id.take(8)} count=${plan.alreadyPresent.size}")
+                    PreorderPullSession.set(
+                        o.id,
+                        o.shortCode,
+                        o.items.mapNotNull { i ->
+                            i.evotorProductUuid?.trim()?.takeIf { it.isNotEmpty() }
+                                ?.let { PreorderPullSession.Item(it, i.name, i.quantity.coerceAtLeast(1)) }
+                        },
+                        OrderBenefit.from(o),
+                    )
+                    AlertDialog.Builder(this)
+                        .setTitle("Позиции уже в чеке")
+                        .setMessage(PreorderPull.notice(plan) + "\n\nМожно переходить к оплате.")
+                        .setPositiveButton("К кассе") { _, _ ->
+                            setResult(Activity.RESULT_OK)
+                            finish()
+                        }
+                        .setCancelable(false)
+                        .show()
+                    return@post
+                }
                 if (!plan.hasAnything) {
-                    Log.w(TAG, "pull_empty order=${o.id} missing=${plan.missingUuid.size} notFound=${plan.notFound.size}")
+                    Log.w(
+                        TAG,
+                        "pull_empty order=${o.id.take(8)} missing=${plan.missingUuid.size} " +
+                            "notFound=${plan.notFound.size} already=${plan.alreadyPresent.size}",
+                    )
                     AlertDialog.Builder(this)
                         .setTitle("Позиции не добавлены")
                         .setMessage(PreorderPull.notice(plan))

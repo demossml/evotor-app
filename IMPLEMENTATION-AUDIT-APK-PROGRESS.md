@@ -111,3 +111,9 @@
 APK 166 / 5.3.7-orders-auth: `dist/sixthcup-evotor-5.3.7-orders-auth-vc166.apk`,
 sha256 `80d7887c69e5448565d0bd0dc88b504e447323d43325f7244daa49371a9a12b8`,
 тесты 587 pass / 0 fail.
+
+| `«В чек»` → «Ни одна позиция не добавлена» без причин | повторное «В чек»: строки уже в корзине, а старый диалог считал это пустым результатом | APK 167: `Plan.alreadyPresent`, диалог «Позиции уже в чеке» + «К кассе»; лог `pull_already_in_cart` |
+
+APK 167 / 5.3.8-orders-pull: `dist/sixthcup-evotor-5.3.8-orders-pull-vc167.apk`,
+sha256 `faede8708df07d03dcab6a30943c6df3a9a0c86b4cd6b394ce7dc17037ee3a7f`,
+тесты 588 pass / 0 fail.

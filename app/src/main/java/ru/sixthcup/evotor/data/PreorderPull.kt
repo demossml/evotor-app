@@ -69,6 +69,8 @@ object PreorderPull {
         val modifierNoUuid: List<String>,
         /** Опции, добавленные отдельными позициями: только для группировки в диалоге. */
         val receiptModifiers: List<ReceiptModifier> = emptyList(),
+        /** Позиции, которые уже лежат в корзине с прошлого «В чек» (повтор не дублирует). */
+        val alreadyPresent: List<String> = emptyList(),
     ) {
         val added: Int get() = lines.size
         val itemLines: Int get() = lines.count { !it.isModifier }
@@ -87,6 +89,7 @@ object PreorderPull {
         val notFound = ArrayList<String>(0)
         val modifierNoUuid = ArrayList<String>(0)
         val receiptMods = ArrayList<ReceiptModifier>(0)
+        val alreadyPresent = ArrayList<String>(0)
 
         items.forEachIndexed { index, item ->
             val uuid = item.evotorProductUuid?.trim().orEmpty()
@@ -100,7 +103,10 @@ object PreorderPull {
                 return@forEachIndexed
             }
             val baseKey = "pre:$orderId:${item.lineId.ifBlank { index.toString() }}"
-            if (baseKey in alreadyInCart) return@forEachIndexed
+            if (baseKey in alreadyInCart) {
+                alreadyPresent.add(item.name)
+                return@forEachIndexed
+            }
             val choice = choiceOf(item)
             lines.add(
                 Line(
@@ -146,7 +152,7 @@ object PreorderPull {
                 receiptMods.add(ReceiptModifier(m.groupKey, m.name))
             }
         }
-        return Plan(orderId, lines, missing, notFound, modifierNoUuid, receiptMods)
+        return Plan(orderId, lines, missing, notFound, modifierNoUuid, receiptMods, alreadyPresent)
     }
 
     /** Текст для строки чека: конфигурация заказа + печатаемые модификаторы без uuid. */
@@ -184,10 +190,16 @@ object PreorderPull {
 
     /** Сообщение кассиру по результату попытки (диалог подтверждения). */
     fun notice(plan: Plan): String = buildString {
-        if (plan.hasAnything) {
-            append("Добавлено ${plan.added} поз. Сумма по кассе: ${rub(plan.totalRub)} ₽")
-        } else {
-            append("Ни одна позиция не добавлена")
+        when {
+            plan.hasAnything ->
+                append("Добавлено ${plan.added} поз. Сумма по кассе: ${rub(plan.totalRub)} ₽")
+            // Повторное «В чек»: состав уже в корзине, это не ошибка.
+            plan.alreadyPresent.isNotEmpty() ->
+                append("Позиции уже в чеке: ${plan.alreadyPresent.joinToString(", ")}")
+            else -> append("Ни одна позиция не добавлена")
+        }
+        if (plan.hasAnything && plan.alreadyPresent.isNotEmpty()) {
+            append(". Уже в чеке: ${plan.alreadyPresent.joinToString(", ")}")
         }
         if (plan.receiptModifiers.isNotEmpty()) {
             append(". Опции: ${groupedModifiers(plan.receiptModifiers)}")
