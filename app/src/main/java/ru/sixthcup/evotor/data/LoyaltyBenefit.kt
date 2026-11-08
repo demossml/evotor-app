@@ -19,15 +19,20 @@ data class Benefits(
     val voucherTitle: String?,
     /** Сработал фискальный пол 1 ₽: чек не может стать нулевым. */
     val floorApplied: Boolean = false,
+    /** Скидка льготы предзаказа: карточные free/voucher/cashback при этом нулевые. */
+    val orderBenefit: BigDecimal = BigDecimal.ZERO,
+    val orderBenefitTitle: String? = null,
 ) {
     val hasAny: Boolean get() = total.signum() > 0
     val hasGift: Boolean get() = free.signum() > 0
     val hasVoucher: Boolean get() = voucher.signum() > 0
     val hasCashback: Boolean get() = cashback.signum() > 0
+    val hasOrderBenefit: Boolean get() = orderBenefit.signum() > 0
 
     /** Короткая подпись для полосы корзины: «подарок −180 ₽ · ваучер −60 ₽». */
     fun shortLabel(): String? {
         val parts = ArrayList<String>(3)
+        if (hasOrderBenefit) parts.add("бонус заказа −${money(orderBenefit)}")
         if (hasGift) parts.add("подарок −${money(free)}")
         if (hasVoucher) parts.add("ваучер −${money(voucher)}")
         if (hasCashback) parts.add("кэшбэк −${money(cashback)}")
@@ -37,6 +42,10 @@ data class Benefits(
     /** Строки для блока льгот в корзине и в листе перед оплатой. */
     fun lines(): List<String> {
         val out = ArrayList<String>(3)
+        if (hasOrderBenefit) {
+            out.add((orderBenefitTitle?.takeIf { it.isNotBlank() }?.let { "Бонус заказа «$it»" } ?: "Бонус заказа") +
+                " −${money(orderBenefit)}" + if (floorApplied) " (в чеке 1 ₽)" else "")
+        }
         if (hasGift) out.add("Подарок −${money(free)}" + if (floorApplied) " (в чеке 1 ₽)" else "")
         if (hasVoucher) out.add((voucherTitle?.let { "Ваучер «$it»" } ?: "Ваучер") + " −${money(voucher)}")
         if (hasCashback) out.add("Кэшбэк −${money(cashback)}")
@@ -47,7 +56,10 @@ data class Benefits(
         v.setScale(2, RoundingMode.DOWN).stripTrailingZeros().toPlainString() + " ₽"
 
     companion object {
-        val NONE = Benefits(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, null)
+        val NONE = Benefits(
+            BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, null,
+            orderBenefit = BigDecimal.ZERO,
+        )
     }
 }
 
@@ -62,7 +74,29 @@ object LoyaltyPreview {
         gross: BigDecimal,
         eligible: List<BigDecimal>,
         nowSec: Long,
+        /**
+         * Льгота предзаказа (из `PreorderPullSession`). Если задана — она единственное правило,
+         * карточные подарок/ваучер/кэшбэк в этот чек не идут.
+         */
+        orderBenefit: OrderBenefit? = null,
     ): Benefits {
+        if (orderBenefit != null && orderBenefit.hasAmount && gross.signum() > 0) {
+            val split = FiscalCalc.split(gross, eligible, card, choice, nowSec, orderBenefit.amountRub)
+            val total = BigDecimal(split.totalDiscountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
+            val payable = BigDecimal((DiscountCalc.kopecks(gross) - split.totalDiscountKopecks).coerceAtLeast(0))
+                .divide(BigDecimal(100), 2, RoundingMode.DOWN)
+            return Benefits(
+                free = BigDecimal.ZERO,
+                voucher = BigDecimal.ZERO,
+                cashback = BigDecimal.ZERO,
+                total = total,
+                payable = payable,
+                voucherTitle = null,
+                floorApplied = split.floorApplied,
+                orderBenefit = total,
+                orderBenefitTitle = orderBenefit.title.takeIf { it.isNotBlank() },
+            )
+        }
         if (card == null || card.code.isEmpty()) return Benefits.NONE.copy(payable = gross.max(BigDecimal.ZERO))
         val reserved = DiscountCalc.reserved(card, nowSec)
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }

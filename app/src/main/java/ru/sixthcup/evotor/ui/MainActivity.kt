@@ -59,6 +59,7 @@ import ru.sixthcup.evotor.data.VoucherCalc
 import ru.sixthcup.evotor.data.CardRefresh
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
+import ru.sixthcup.evotor.data.SaleConfirmStore
 import ru.sixthcup.evotor.data.SalePrintStore
 import ru.sixthcup.evotor.data.ChoicePrintStore
 import ru.sixthcup.evotor.data.CardSession
@@ -93,6 +94,8 @@ import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.MenuTabs
 import ru.sixthcup.evotor.data.PendingPayment
+import ru.sixthcup.evotor.data.OrderBenefit
+import ru.sixthcup.evotor.data.PreorderPaid
 import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.PreorderQueue
 import ru.sixthcup.evotor.net.OrderApi
@@ -2474,7 +2477,15 @@ class MainActivity : AppCompatActivity() {
     private fun currentBenefits(): Benefits = LoyaltyPreview.of(
         CardSession.get(this), currentChoice(), Cart.gross(),
         Cart.giftEligibleLines().map { it.priceRub }, nowSec(),
+        activeOrderBenefit(),
     )
+
+    /** Льгота предзаказа действует, пока её состав реально лежит в корзине. */
+    private fun activeOrderBenefit(): OrderBenefit? {
+        val id = PreorderPullSession.orderId() ?: return null
+        if (Cart.all().none { it.cartKey.startsWith("pre:$id:") }) return null
+        return PreorderPullSession.benefit()
+    }
 
     /** Отвязка карты: следующая привязка снова получит окно льготы. */
     private fun forgetCard() {
@@ -4151,30 +4162,48 @@ class MainActivity : AppCompatActivity() {
      */
     /**
      * Предзаказ оплачен: сообщаем backend. Ошибка сети не откатывает фискальный чек —
-     * оплата уже прошла, markPaid можно повторить вручную/повторной попыткой.
+     * оплата уже прошла, поэтому сеть/5xx повторяем ограниченно ([PreorderPaid]),
+     * а 4xx не повторяем: там ответ уже финальный.
      */
     private fun markPreorderPaid(orderId: String) {
         thread(name = "preorder-paid") {
-            when (val r = OrderApi.markPaid(orderId)) {
-                is OrderApi.Result.Ok -> {
-                    PreorderPullSession.clear()
-                    Log.i(TAG, "preorder_paid order=$orderId status=${r.value.status}")
-                }
-                is OrderApi.Result.Err -> {
-                    Log.w(
-                        TAG,
-                        "preorder_paid_failed order=$orderId err=${r.error} msg=${r.message}",
-                    )
-                    if (r.error == "benefit_conflict") {
-                        // Бонус гостя занят другим чеком: повтор не поможет, нужен администратор.
+            var attempt = 1
+            while (true) {
+                when (val r = OrderApi.markPaid(orderId)) {
+                    is OrderApi.Result.Ok -> {
                         PreorderPullSession.clear()
-                        runOnUiThread {
-                            if (isFinishing || isDestroyed) return@runOnUiThread
-                            notice = PreorderQueue.errorText(r.error)
-                            noticeKind = Kind.WARN
-                            safeRender()
+                        SaleConfirmStore.clear(this)
+                        Log.i(TAG, "preorder_paid order=$orderId status=${r.value.status} attempt=$attempt")
+                        return@thread
+                    }
+                    is OrderApi.Result.Err -> {
+                        if (r.error == "benefit_conflict") {
+                            // Бонус гостя занят другим чеком: повтор не поможет, нужен администратор.
+                            Log.w(TAG, "preorder_paid_conflict order=$orderId attempt=$attempt")
+                            PreorderPullSession.clear()
+                            SaleConfirmStore.clear(this)
+                            runOnUiThread {
+                                if (isFinishing || isDestroyed) return@runOnUiThread
+                                notice = PreorderQueue.errorText(r.error)
+                                noticeKind = Kind.WARN
+                                safeRender()
+                            }
+                            refreshActiveOrders(silent = true)
+                            return@thread
                         }
-                        refreshActiveOrders(silent = true)
+                        val retry = PreorderPaid.retryable(r.error) && attempt < PreorderPaid.MAX_ATTEMPTS
+                        Log.w(
+                            TAG,
+                            "preorder_paid_failed order=$orderId err=${r.error} attempt=$attempt " +
+                                "retry=$retry msg=${r.message}",
+                        )
+                        if (!retry) return@thread
+                        try {
+                            Thread.sleep(PreorderPaid.delayMs(attempt))
+                        } catch (_: InterruptedException) {
+                            return@thread
+                        }
+                        attempt++
                     }
                 }
             }
@@ -5551,7 +5580,25 @@ class MainActivity : AppCompatActivity() {
                     val pulledInCart = pulledOrder != null &&
                         Cart.all().any { it.cartKey.startsWith("pre:$pulledOrder:") }
                     val done = confirmPendingOrder()
-                    if (pulledInCart) markPreorderPaid(pulledOrder!!)
+                    if (pulledInCart && pulledOrder != null) {
+                        // paid — только если чек реально напечатан: аннул/отмена печати не дают.
+                        val printed = SaleConfirmStore.printedFor(this, pulledOrder)
+                        if (PreorderPaid.shouldMarkSalePaid(printed, pulledOrder)) {
+                            markPreorderPaid(pulledOrder)
+                        } else {
+                            Log.w(
+                                TAG,
+                                "preorder_paid_skipped order=${pulledOrder.take(8)} reason=no_print_signal",
+                            )
+                            PreorderPullSession.clear()
+                        }
+                        SaleConfirmStore.clear(this)
+                    } else if (pulledOrder != null) {
+                        // Состав предзаказа больше не в чеке — связь устарела, не тащим её дальше.
+                        Log.i(TAG, "preorder_session_dropped order=${pulledOrder.take(8)}")
+                        PreorderPullSession.clear()
+                        SaleConfirmStore.clear(this)
+                    }
                     Cart.clear()
                     // Чек закрыт: выбор льгот больше не нужен (чистим здесь, а не в сервисе скидки).
                     CheckoutChoice.clear(this)

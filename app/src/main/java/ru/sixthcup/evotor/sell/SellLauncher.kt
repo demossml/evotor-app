@@ -21,7 +21,9 @@ import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.FiscalLines
 import ru.sixthcup.evotor.data.PreorderPullSession
+import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.VoucherCalc
+import java.math.BigDecimal
 
 /**
  * Передача собранных позиций в Эвотор. APK — не касса: суммы, налоги и оплату считает POS.
@@ -64,10 +66,15 @@ object SellLauncher {
         try {
             val positionAdds = ArrayList<PositionAdd>(lines.size + 2)
             // Льгота уходит в чек ценами позиций: receiptDiscount срабатывает не на всех прошивках.
+            // Предзаказ: если его состав действительно в корзине, заказ несёт своё правило льготы.
+            val preorderId = PreorderPullSession.orderId()
+            val preorderInCart = preorderId != null && lines.any { it.cartKey.startsWith("pre:$preorderId:") }
+            val orderBenefit = if (preorderInCart) PreorderPullSession.benefit() else null
             val split = FiscalCalc.split(
                 Cart.gross(), Cart.giftEligibleLines().map { it.priceRub },
                 CardSession.get(activity), Choice.normalize(freeApplied, spendCashback, cashbackKopecks, voucherId),
                 System.currentTimeMillis() / 1000,
+                orderBenefitRub = orderBenefit?.amountRub ?: BigDecimal.ZERO,
             )
             val fiscalLines = FiscalLines.build(lines, split)
             if (split.positionDiscountKopecks > 0) {
@@ -132,45 +139,72 @@ object SellLauncher {
                 return
             }
             val card = CardSession.get(activity)
+            val queue = QueueNumberStore.peek(activity)
             // Решение кассира фиксируем до открытия чека: модель сама снимает «ваучер + кэшбэк».
             CheckoutChoice.save(activity, freeApplied, spendCashback, cashbackKopecks, voucherId)
             // Единый контракт extras: { appId: { sc: {v:2,c,op,free,cb,ts,kind} } } + плоский sc.
             var extrasFree = 0
             var extrasCb = 0L
-            var extrasHasOp = false
+            var extrasHasOp = card?.reservationId != null
             var extrasVoucher = 0
-            val setExtra = if (card != null && card.code.isNotEmpty()) {
-                val reserved = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
-                val eligible = Cart.giftEligibleLines().map { it.priceRub }
-                val voucher = card.vouchers.firstOrNull { it.id == voucherId }
-                val calc = DiscountCalc.compute(
-                    Cart.gross(), eligible, reserved, freeApplied, card.freeAvailable,
-                    if (spendCashback) cashbackKopecks else 0L, card.cashbackKopecks,
-                    voucher = voucher,
-                    voucherAllowed = VoucherCalc.allowedTogether(
-                        voucher,
-                        DiscountCalc.freeApplies(reserved, freeApplied, card.freeAvailable, eligible),
-                    ),
-                )
-                extrasFree = if (calc.free.signum() > 0) 1 else 0
-                extrasCb = DiscountCalc.kopecks(calc.cashback)
-                extrasHasOp = card.reservationId != null
-                // Ваучер уходит только если он реально даёт скидку (резерв есть, stackable соблюдён).
-                extrasVoucher = if (calc.voucher.signum() > 0) voucher?.id ?: 0 else 0
-                Log.i(
-                    "SellLauncher",
-                    "receipt_discount free=${extrasFree} cb=$extrasCb voucher=$extrasVoucher " +
-                        "voucherRub=${calc.voucher.toPlainString()} total=${calc.total.toPlainString()}",
-                )
-                SetExtra(
+            val setExtra = when {
+                // Льгота предзаказа — единственное правило чека: карточные free/cb/ваучер не шлём.
+                orderBenefit != null -> {
+                    Log.i(
+                        "SellLauncher",
+                        "order_benefit order=${preorderId?.take(8)} kind=${orderBenefit.kind} " +
+                            "rub=${orderBenefit.amountRub.toPlainString()} card=${card != null}",
+                    )
+                    SetExtra(
+                        CardSession.extras(
+                            card, freeApplied = false, cashbackKopecks = 0L, queue = queue,
+                            voucherId = null,
+                            // Предзаказ, состав которого лежит в этом чеке: backend свяжет SELL с заказом.
+                            preorderId = preorderId,
+                        ),
+                    )
+                }
+                card != null && card.code.isNotEmpty() -> {
+                    val reserved = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
+                    val eligible = Cart.giftEligibleLines().map { it.priceRub }
+                    val voucher = card.vouchers.firstOrNull { it.id == voucherId }
+                    val calc = DiscountCalc.compute(
+                        Cart.gross(), eligible, reserved, freeApplied, card.freeAvailable,
+                        if (spendCashback) cashbackKopecks else 0L, card.cashbackKopecks,
+                        voucher = voucher,
+                        voucherAllowed = VoucherCalc.allowedTogether(
+                            voucher,
+                            DiscountCalc.freeApplies(reserved, freeApplied, card.freeAvailable, eligible),
+                        ),
+                    )
+                    extrasFree = if (calc.free.signum() > 0) 1 else 0
+                    extrasCb = DiscountCalc.kopecks(calc.cashback)
+                    extrasHasOp = card.reservationId != null
+                    // Ваучер уходит только если он реально даёт скидку (резерв есть, stackable соблюдён).
+                    extrasVoucher = if (calc.voucher.signum() > 0) voucher?.id ?: 0 else 0
+                    Log.i(
+                        "SellLauncher",
+                        "receipt_discount free=${extrasFree} cb=$extrasCb voucher=$extrasVoucher " +
+                            "voucherRub=${calc.voucher.toPlainString()} total=${calc.total.toPlainString()}",
+                    )
+                    SetExtra(
+                        CardSession.extras(
+                            card, extrasFree > 0, extrasCb,
+                            queue = queue,
+                            voucherId = extrasVoucher.takeIf { it > 0 },
+                            preorderId = preorderId,
+                        ),
+                    )
+                }
+                // Карты нет, но состав предзаказа в чеке: backend должен получить sc.preorder.
+                preorderId != null -> SetExtra(
                     CardSession.extras(
-                        card, extrasFree > 0, extrasCb,
-                        voucherId = extrasVoucher.takeIf { it > 0 },
-                        // Предзаказ, состав которого лежит в этом чеке: backend свяжет SELL с заказом.
-                        preorderId = PreorderPullSession.orderId(),
+                        info = null, freeApplied = false, cashbackKopecks = 0L,
+                        queue = queue, voucherId = null, preorderId = preorderId,
                     ),
                 )
-            } else null
+                else -> null
+            }
 
             val positionsTotal = Cart.all().sumOf { line -> line.lineTotal() }
             val hasToppings = lines.any { it.optionId != null }

@@ -33,8 +33,14 @@ object FiscalCalc {
         card: CardInfo?,
         choice: Choice,
         nowSec: Long,
+        /**
+         * Скидка льготы предзаказа (рубли). Больше нуля — это **единственное** правило чека:
+         * карточные подарок/ваучер/кэшбэк не применяются, иначе спишут дважды.
+         */
+        orderBenefitRub: BigDecimal = BigDecimal.ZERO,
     ): FiscalSplit {
         val grossKopecks = DiscountCalc.kopecks(gross).coerceAtLeast(0L)
+        if (orderBenefitRub.signum() > 0) return orderBenefitSplit(grossKopecks, orderBenefitRub)
         if (card == null || card.code.isEmpty()) {
             return FiscalSplit(0L, 0L, giftApplied = false, voucherId = null, floorApplied = false)
         }
@@ -85,6 +91,27 @@ object FiscalCalc {
             giftApplied = giftApplied,
             voucherId = if (voucherApplied) voucher?.id else null,
             floorApplied = floor,
+        )
+    }
+
+    /**
+     * Льгота предзаказа одной суммой: уходит ценами позиций (этот механизм срабатывает на всех
+     * прошивках), карточные правила при этом не считаются. Пол 1 ₽ держим как у подарочных правил.
+     */
+    private fun orderBenefitSplit(grossKopecks: Long, benefitRub: BigDecimal): FiscalSplit {
+        if (grossKopecks < DiscountCalc.GIFT_FISCAL_MIN_KOPECKS) {
+            // Чек дешевле рубля не раздуваем и не обнуляем: скидки нет.
+            return FiscalSplit(0L, 0L, giftApplied = false, voucherId = null, floorApplied = false)
+        }
+        val maxDiscount = grossKopecks - DiscountCalc.GIFT_FISCAL_MIN_KOPECKS
+        val requested = DiscountCalc.kopecks(benefitRub).coerceAtLeast(0L)
+        val discount = requested.coerceAtMost(maxDiscount)
+        return FiscalSplit(
+            positionDiscountKopecks = discount,
+            receiptDiscountKopecks = 0L,
+            giftApplied = false,
+            voucherId = null,
+            floorApplied = requested > discount,
         )
     }
 }

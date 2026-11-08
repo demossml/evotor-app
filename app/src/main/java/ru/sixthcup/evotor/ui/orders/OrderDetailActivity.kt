@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.InventoryRepository
+import ru.sixthcup.evotor.data.OrderBenefit
 import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.PreorderPull
 import ru.sixthcup.evotor.data.PreorderQueue
@@ -322,6 +323,13 @@ class OrderDetailActivity : AppCompatActivity() {
                     ),
                 )
             }
+            // Опции без UUID не попадают в чек отдельной позицией — кассир увидит их в диалоге.
+            if (plan.modifierNoUuid.isNotEmpty()) {
+                Log.w(
+                    TAG,
+                    "pull_modifier_no_uuid order=${o.id.take(8)} count=${plan.modifierNoUuid.size}",
+                )
+            }
             handler.post {
                 busy = false
                 buttons.isEnabled = true
@@ -338,6 +346,8 @@ class OrderDetailActivity : AppCompatActivity() {
                     o.id,
                     o.shortCode,
                     plan.lines.map { PreorderPullSession.Item(it.productUuid, it.name, it.quantity.toInt()) },
+                    // Льгота заказа едет в чек вместе с составом: касса снимет её и напишет sc.preorder.
+                    OrderBenefit.from(o),
                 )
                 Log.i(TAG, "pull_ok order=${o.id} lines=${plan.added} mods=${plan.lines.count { it.isModifier }}")
                 AlertDialog.Builder(this)

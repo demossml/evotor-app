@@ -244,4 +244,35 @@ class CardSessionExtrasTest {
         assertEquals(7, flat.getInt("voucherId"))
         assertEquals(flat.toString(), nested.toString())
     }
+    // ── канон предзаказа (P0-3): preorder != ord ─────────────────────────────────────────────
+
+    @Test
+    fun `preorder id never takes the queue key`() {
+        val q = QueueNumber(orderId = "queue-123", publicNumber = "47")
+        val sc = CardSession.sc(card(), freeApplied = false, cashbackKopecks = 0, queue = q, preorderId = "order-uuid")
+        assertEquals("queue-123", sc.getString("ord"))
+        assertEquals("47", sc.getString("qn"))
+        assertEquals("order-uuid", sc.getString("preorder"))
+    }
+
+    @Test
+    fun `no card still writes preorder and queue`() {
+        val q = QueueNumber(orderId = "queue-123", publicNumber = "47")
+        val sc = CardSession.sc(null, freeApplied = false, cashbackKopecks = 0, queue = q, preorderId = "order-uuid")
+        assertEquals("order-uuid", sc.getString("preorder"))
+        assertEquals("queue-123", sc.getString("ord"))
+        assertFalse("без карты нет c", sc.has("c"))
+        assertFalse("без карты нет free", sc.has("free"))
+        assertFalse("без карты нет cb", sc.has("cb"))
+        assertFalse("без карты нет op", sc.has("op"))
+    }
+
+    @Test
+    fun `order benefit sends no card claims`() {
+        // SellLauncher при активной льготе заказа передаёт free=false и cb=0.
+        val sc = CardSession.sc(card(), freeApplied = false, cashbackKopecks = 0, preorderId = "order-uuid")
+        assertEquals(0, sc.getInt("free"))
+        assertEquals(0L, sc.getLong("cb"))
+        assertEquals("order-uuid", sc.getString("preorder"))
+    }
 }

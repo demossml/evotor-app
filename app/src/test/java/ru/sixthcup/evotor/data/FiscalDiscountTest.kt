@@ -1,6 +1,7 @@
 package ru.sixthcup.evotor.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -151,4 +152,37 @@ class FiscalDiscountTest {
     }
 
     private fun BigDecimal.toKopecks() = DiscountCalc.kopecks(this)
+    // ── льгота предзаказа (P0-3) ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun `order benefit replaces card rules instead of stacking`() {
+        // У карты есть подарок, но у заказа — своё правило: применяем только его.
+        val s = FiscalCalc.split(d("650"), listOf(d("250")), card(), choice(free = true), now, orderBenefitRub = d("300"))
+        assertEquals(30000L, s.positionDiscountKopecks)
+        assertEquals(0L, s.receiptDiscountKopecks)
+        assertFalse("подарок карты не должен включиться", s.giftApplied)
+        assertNull(s.voucherId)
+    }
+
+    @Test
+    fun `order benefit works without a card`() {
+        val s = FiscalCalc.split(d("650"), emptyList(), null, choice(), now, orderBenefitRub = d("300"))
+        assertEquals(30000L, s.positionDiscountKopecks)
+        assertEquals(0L, s.receiptDiscountKopecks)
+        assertFalse(s.floorApplied)
+    }
+
+    @Test
+    fun `order benefit never zeroes the receipt`() {
+        val s = FiscalCalc.split(d("300"), emptyList(), null, choice(), now, orderBenefitRub = d("300"))
+        assertEquals(29900L, s.positionDiscountKopecks)
+        assertTrue(s.floorApplied)
+    }
+
+    @Test
+    fun `order benefit smaller than gross keeps the rest payable`() {
+        val s = FiscalCalc.split(d("650"), emptyList(), null, choice(), now, orderBenefitRub = d("100.50"))
+        assertEquals(10050L, s.positionDiscountKopecks)
+        assertEquals(54950L, 65000L - s.totalDiscountKopecks)
+    }
 }

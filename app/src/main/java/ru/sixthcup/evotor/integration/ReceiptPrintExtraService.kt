@@ -15,9 +15,11 @@ import ru.evotor.framework.receipt.Receipt
 import ru.evotor.framework.receipt.ReceiptApi
 import ru.evotor.framework.receipt.print_extras.PrintExtraPlacePrintGroupTop
 import ru.sixthcup.evotor.data.ChoicePrintStore
+import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.QueueNumber
 import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.ReceiptPrintText
+import ru.sixthcup.evotor.data.SaleConfirmStore
 import ru.sixthcup.evotor.data.SalePrintStore
 
 /**
@@ -43,6 +45,16 @@ class ReceiptPrintExtraService : IntegrationService() {
                 event: PrintExtraRequiredEvent,
                 callback: ActionProcessor.Callback,
             ) {
+                // Печать чека продажи = фискализация прошла. Отмечаем до любых ошибок extra:
+                // это сигнал для mark-paid (аннулированный чек не печатается).
+                try {
+                    SaleConfirmStore.markPrinted(
+                        this@ReceiptPrintExtraService,
+                        PreorderPullSession.orderId(),
+                    )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "sale_confirm_failed", t)
+                }
                 // Ошибка внутри PrintExtra не должна влиять на печать фискального чека:
                 // в любом случае отдаём валидный результат (пустой — если печатать нечего).
                 val result = try {

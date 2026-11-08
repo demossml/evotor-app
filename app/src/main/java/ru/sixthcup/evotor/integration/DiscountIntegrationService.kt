@@ -17,6 +17,7 @@ import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.SalePrintLoyalty
 import ru.sixthcup.evotor.data.SalePrintStore
@@ -38,6 +39,42 @@ class DiscountIntegrationService : IntegrationService() {
             override fun call(action: String, event: ReceiptDiscountEvent, callback: Callback) {
                 try {
                     val info = CardSession.get(applicationContext)
+                    // Сессия предзаказа действует только пока её состав реально в корзине:
+                    // иначе устаревший id/льгота испортили бы следующий чек.
+                    val cartKeys = Cart.all().map { it.cartKey }
+                    val preorderId = PreorderPullSession.orderId()
+                        ?.takeIf { id -> cartKeys.any { it.startsWith("pre:$id:") } }
+                    // Льгота заказа уже сидит в ценах позиций (SellLauncher). Карточные правила
+                    // в этот чек не добавляем — иначе спишутся два правила сразу.
+                    val orderBenefit = if (preorderId != null) PreorderPullSession.benefit() else null
+                    if (orderBenefit != null) {
+                        val combo = comboDiscountForReceipt()
+                        Log.i(
+                            "DiscountIntegration",
+                            "order_benefit order=${preorderId?.take(8)} kind=${orderBenefit.kind} " +
+                                "rub=${orderBenefit.amountRub.toPlainString()} combo=${combo.toPlainString()}",
+                        )
+                        if (combo.signum() > 0) {
+                            callback.onResult(
+                                ReceiptDiscountEventResult(
+                                    combo,
+                                    SetExtra(
+                                        CardSession.extras(
+                                            info, freeApplied = false, cashbackKopecks = 0L,
+                                            queue = QueueNumberStore.peek(applicationContext),
+                                            voucherId = null, preorderId = preorderId,
+                                        ),
+                                    ),
+                                    emptyList(),
+                                    null,
+                                ),
+                            )
+                        } else {
+                            // extras уже записаны при открытии чека (SellLauncher) — не перетираем.
+                            callback.skip()
+                        }
+                        return
+                    }
                     if (info == null || info.code.isEmpty()) {
                         Log.i("DiscountIntegration", "loyalty_discount_skip reason=no_card")
                         // Без карты гостя остаётся только выгода комбо — она не требует резерва.
@@ -45,12 +82,23 @@ class DiscountIntegrationService : IntegrationService() {
                         if (comboOnly.signum() > 0) {
                             val grossNoCard = receiptUnitPrices().fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                             if (grossNoCard.signum() > 0) {
+                                // Связь с предзаказом/очередью должна попасть в sc и без карты.
+                                val extra = preorderId?.let {
+                                    SetExtra(
+                                        CardSession.extras(
+                                            null, freeApplied = false, cashbackKopecks = 0L,
+                                            queue = QueueNumberStore.peek(applicationContext),
+                                            voucherId = null, preorderId = it,
+                                        ),
+                                    )
+                                }
                                 callback.onResult(
-                                    ReceiptDiscountEventResult(comboOnly.min(grossNoCard), null, emptyList(), null),
+                                    ReceiptDiscountEventResult(comboOnly.min(grossNoCard), extra, emptyList(), null),
                                 )
                                 return
                             }
                         }
+                        // Без скидки extras не трогаем: их уже записал SellLauncher (preorder/qn).
                         callback.skip()
                         return
                     }
@@ -142,6 +190,8 @@ class DiscountIntegrationService : IntegrationService() {
                                 cbKopecks,
                                 QueueNumberStore.peek(applicationContext),
                                 voucherId = if (voucherApplied) chosenVoucher?.id else null,
+                                // Иначе этот SetExtra затирал бы sc.preorder, записанный при открытии чека.
+                                preorderId = preorderId,
                             ),
                         ),
                             emptyList(),
@@ -225,6 +275,15 @@ class DiscountIntegrationService : IntegrationService() {
         } catch (t: Throwable) {
             Log.w("DiscountIntegration", "print_snapshot_failed", t)
         }
+    }
+
+    /** Комбо на весь чек (рубли), но не больше суммы чека. */
+    private fun comboDiscountForReceipt(): BigDecimal {
+        val combo = CheckoutChoice.comboRub(applicationContext)
+        if (combo.signum() <= 0) return BigDecimal.ZERO
+        val gross = receiptUnitPrices().fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
+            .takeIf { it.signum() > 0 } ?: Cart.gross()
+        return combo.min(gross.max(BigDecimal.ZERO))
     }
 
     private fun receiptUnitPrices(): List<Pair<BigDecimal, BigDecimal>> {

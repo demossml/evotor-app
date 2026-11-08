@@ -124,4 +124,29 @@ class LoyaltyBenefitTest {
         assertEquals(d("1.00"), b.payable)
         assertEquals(true, b.floorApplied)
     }
+    // ── льгота предзаказа (P0-3) ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun `order benefit sets the payable and replaces card rows`() {
+        val b = LoyaltyPreview.of(
+            card(), choice(free = true), d("650"), listOf(d("250")), now,
+            OrderBenefit("gift", "Подарок: Капучино 300 мл", d("300")),
+        )
+        assertEquals(d("300.00"), b.orderBenefit)
+        assertEquals(d("350.00"), b.payable)
+        assertFalse("карточный подарок не суммируется", b.hasGift)
+        assertEquals("бонус заказа −300 ₽", b.shortLabel())
+        assertTrue(b.lines().single().contains("Подарок: Капучино 300 мл"))
+    }
+
+    @Test
+    fun `order benefit applies without a card`() {
+        val b = LoyaltyPreview.of(
+            null, choice(), d("650"), emptyList(), now,
+            OrderBenefit("cashback", "Кэшбэк", d("100")),
+        )
+        assertEquals(d("550.00"), b.payable)
+        assertTrue(b.hasOrderBenefit)
+        assertTrue(b.hasAny)
+    }
 }

@@ -121,7 +121,8 @@ object CardSession {
      * `cb` — копейки, `ts` — unix ms.
      */
     fun extras(
-        info: CardInfo,
+        /** `null` — карты нет: в чек уходят только `preorder`/`qn` (льгота заказа). */
+        info: CardInfo?,
         freeApplied: Boolean,
         cashbackKopecks: Long,
         queue: QueueNumber? = null,
@@ -139,7 +140,7 @@ object CardSession {
 
     /** extras.sc written into the receipt. The backend re-checks everything when it reads the SELL. */
     fun sc(
-        info: CardInfo,
+        info: CardInfo?,
         freeApplied: Boolean,
         cashbackKopecks: Long,
         /** Публичный номер заказа: связывает чек с записью queue_numbers (см. QueueNumber). */
@@ -153,23 +154,26 @@ object CardSession {
          */
         preorderId: String? = null,
     ): JSONObject {
-        val c = scValue(info)
-        // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
-        // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
-        val reserved = info.reservationId != null
-        // Ваучер гасит backend только по QR-токену с резервом; по числовому коду ключа быть не должно.
-        val voucherOk = reserved && kindOf(c) == "token"
         val o = JSONObject()
             .put("v", 2)
-            .put("c", c)
             .put("ts", System.currentTimeMillis())
-            .put("kind", kindOf(c))
-        if (reserved) o.put("op", info.reservationId)
-        if (voucherOk && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
-        // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
-        info.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
-        o.put("free", if (reserved && freeApplied) 1 else 0)
-            .put("cb", if (reserved) cashbackKopecks.coerceAtLeast(0L) else 0L)
+        // Карта есть — пишем карточные поля. Нет карты (льгота предзаказа) — только связь с заказом.
+        val card = info?.takeIf { it.code.isNotEmpty() }
+        if (card != null) {
+            val c = scValue(card)
+            // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
+            // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
+            val reserved = card.reservationId != null
+            // Ваучер гасит backend только по QR-токену с резервом; по числовому коду ключа быть не должно.
+            val voucherOk = reserved && kindOf(c) == "token"
+            o.put("c", c).put("kind", kindOf(c))
+            if (reserved) o.put("op", card.reservationId)
+            if (voucherOk && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
+            // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
+            card.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
+            o.put("free", if (reserved && freeApplied) 1 else 0)
+                .put("cb", if (reserved) cashbackKopecks.coerceAtLeast(0L) else 0L)
+        }
         // ord — канонический ключ связи с queue_numbers; qn — только для логов.
         // Пишем оба лишь когда номер реально получен от backend до открытия чека.
         if (QueueNumber.isUsable(queue)) {
