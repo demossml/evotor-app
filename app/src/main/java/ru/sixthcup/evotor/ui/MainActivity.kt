@@ -5565,6 +5565,8 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {}
         // Очередь предзаказов: первый запрос сразу, дальше раз в 10 с до onPause.
         startOrdersPoll()
+        // Корзину могли пополнить на экране предзаказа — полоса и суммы должны обновиться.
+        if (::root.isInitialized) onCartChanged()
         // Сбой скидки не теряем: причина уже в логе сервиса, кассиру — понятное сообщение.
         DiscountFailure.take(this)?.let { reason ->
             notice = DiscountFailure.cashierText(reason)

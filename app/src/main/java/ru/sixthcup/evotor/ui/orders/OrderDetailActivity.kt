@@ -1,6 +1,7 @@
 package ru.sixthcup.evotor.ui.orders
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -350,11 +351,11 @@ class OrderDetailActivity : AppCompatActivity() {
                     )
                     AlertDialog.Builder(this)
                         .setTitle("Позиции уже в чеке")
-                        .setMessage(PreorderPull.notice(plan) + "\n\nМожно переходить к оплате.")
-                        .setPositiveButton("К кассе") { _, _ ->
-                            setResult(Activity.RESULT_OK)
-                            finish()
-                        }
+                        .setMessage(
+                            PreorderPull.notice(plan) +
+                                "\n\nПозиции уже в корзине: «К кассе» → «В чек» в полосе корзины.",
+                        )
+                        .setPositiveButton("К кассе") { _, _ -> backToCashier() }
                         .setCancelable(false)
                         .show()
                     return@post
@@ -382,15 +383,33 @@ class OrderDetailActivity : AppCompatActivity() {
                 Log.i(TAG, "pull_ok order=${o.id} lines=${plan.added} mods=${plan.lines.count { it.isModifier }}")
                 AlertDialog.Builder(this)
                     .setTitle("Добавлено в чек")
-                    .setMessage(PreorderPull.notice(plan))
-                    .setPositiveButton("К кассе") { _, _ ->
-                        setResult(Activity.RESULT_OK)
-                        finish()
-                    }
+                    .setMessage(
+                        PreorderPull.notice(plan) +
+                            "\n\n«К кассе» → «В чек» в полосе корзины, чтобы открыть оплату.",
+                    )
+                    .setPositiveButton("К кассе") { _, _ -> backToCashier() }
                     .setCancelable(false)
                     .show()
             }
         }.start()
+    }
+
+    /**
+     * «К кассе»: вернуть уже запущенный экран кассы, а не очередь предзаказов.
+     * Обычный `finish()` возвращал в список заказов — кассир оставался «в поле» заказа.
+     */
+    private fun backToCashier() {
+        setResult(Activity.RESULT_OK)
+        try {
+            startActivity(
+                Intent(this, ru.sixthcup.evotor.ui.MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                },
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "back_to_cashier_failed", t)
+        }
+        finish()
     }
 
     companion object {

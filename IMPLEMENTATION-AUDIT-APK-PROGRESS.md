@@ -117,3 +117,9 @@ sha256 `80d7887c69e5448565d0bd0dc88b504e447323d43325f7244daa49371a9a12b8`,
 APK 167 / 5.3.8-orders-pull: `dist/sixthcup-evotor-5.3.8-orders-pull-vc167.apk`,
 sha256 `faede8708df07d03dcab6a30943c6df3a9a0c86b4cd6b394ce7dc17037ee3a7f`,
 тесты 588 pass / 0 fail.
+
+| «К кассе» возвращает в очередь предзаказов, а не на экран кассы | `finish()` закрывал только панель заказа; корзина на MainActivity не обновлялась | APK 168: `backToCashier()` (`CLEAR_TOP|SINGLE_TOP` → MainActivity) + `onCartChanged()` в `onResume` |
+
+APK 168 / 5.3.9-orders-back: `dist/sixthcup-evotor-5.3.9-orders-back-vc168.apk`,
+sha256 `f65e27b8e9af82a66b2f5b887d5ded72a635065887e644ef551e985264ba5d5e`,
+тесты 588 pass / 0 fail.
