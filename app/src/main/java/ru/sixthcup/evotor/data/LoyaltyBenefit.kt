@@ -79,11 +79,22 @@ object LoyaltyPreview {
          * карточные подарок/ваучер/кэшбэк в этот чек не идут.
          */
         orderBenefit: OrderBenefit? = null,
+        /**
+         * Строки корзины: по ним считается фактическая скидка в позициях (пол 1 ₽ на единицу),
+         * чтобы цифра на экране совпала с чеком. Пусто — берём расчёт из [FiscalCalc].
+         */
+        lines: List<CartLine> = emptyList(),
     ): Benefits {
         if (orderBenefit != null && orderBenefit.hasAmount && gross.signum() > 0) {
             val split = FiscalCalc.split(gross, eligible, card, choice, nowSec, orderBenefit.amountRub)
-            val total = BigDecimal(split.totalDiscountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
-            val payable = BigDecimal((DiscountCalc.kopecks(gross) - split.totalDiscountKopecks).coerceAtLeast(0))
+            val appliedKopecks = if (lines.isEmpty()) {
+                split.totalDiscountKopecks
+            } else {
+                (DiscountCalc.kopecks(gross) - FiscalLines.payableKopecks(FiscalLines.build(lines, split)))
+                    .coerceAtLeast(0L)
+            }
+            val total = BigDecimal(appliedKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
+            val payable = BigDecimal((DiscountCalc.kopecks(gross) - appliedKopecks).coerceAtLeast(0))
                 .divide(BigDecimal(100), 2, RoundingMode.DOWN)
             return Benefits(
                 free = BigDecimal.ZERO,

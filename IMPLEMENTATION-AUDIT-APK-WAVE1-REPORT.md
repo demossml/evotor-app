@@ -12,6 +12,7 @@
 | sha256 | `67ef1e0dc3c9aa974f5ada5f0390fadc366b9d92dbe30757916e55017ead9b4b` |
 | badging | `ru.sixthcup.evotor` versionCode 164, versionName 5.3.5-audit-p0, minSdk 23, targetSdk 30 |
 | подпись | **debug** (`CN=Android Debug`) — release-keystore на машине нет, см. `docs/RELEASE-KEY.md` |
+| финал | волны 1–2 собраны в `165` / `5.3.6-audit-p1` — см. `IMPLEMENTATION-AUDIT-APK-FINAL-REPORT.md` |
 
 ## STEP → статус
 

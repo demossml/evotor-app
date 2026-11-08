@@ -23,11 +23,11 @@
 | было (до волны 1) | `163` / `5.3.4-preorder-benefit` |
 | checkpoint волны 1 | `164` / `5.3.5-audit-p0` — `dist/sixthcup-evotor-5.3.5-audit-p0-vc164.apk` |
 | **финал** | **`165` / `5.3.6-audit-p1`** |
-| APK | `dist/sixthcup-evotor-5.3.6-audit-p1-vc165.apk` (6 161 781 байт) |
-| sha256 | `193cce279e768d041fa7c971cff5f156a56e0439b9734fe60bbe5f16a13cd2c2` |
+| APK | `dist/sixthcup-evotor-5.3.6-audit-p1-vc165.apk` (6 161 966 байт) |
+| sha256 | `597aa899e99ea458e08ed7383f71b2a793f1a8289b4c8ac2338f1237f8daf235` |
 | badging | `ru.sixthcup.evotor`, versionCode 165, versionName 5.3.6-audit-p1, minSdk 23, targetSdk 30 |
 | подпись | **debug** (`CN=Android Debug`): release-keystore на машине сборки нет (см. `docs/RELEASE-KEY.md`) |
-| тесты | **583 pass / 0 fail / 0 errors**, 69 классов |
+| тесты | **586 pass / 0 fail / 0 errors**, 69 классов |
 | lint | **0 errors, 108 warnings** |
 
 ## Точный JSON `sc` после фикса
@@ -86,7 +86,7 @@
 
 ## Тесты (полный прогон)
 
-`./gradlew :app:testDebugUnitTest` → **583 / 0 fail / 0 errors** (69 классов; на baseline было 560).
+`./gradlew :app:testDebugUnitTest` → **586 / 0 fail / 0 errors** (69 классов; на baseline было 560).
 
 | Файл тестов | Новых | Что проверяет |
 |---|---|---|
@@ -94,8 +94,8 @@
 | `PreorderPaidTest` | 4 | ретрай сеть/5xx, 4xx финальный, гейт «печать чека» |
 | `DiscountFailureTest` | 2 | текст кассиру при сбое скидки |
 | `CardSessionExtrasTest` | +3 | `preorder` ≠ `ord`, `sc` без карты, `free/cb=0` |
-| `FiscalDiscountTest` | +4 | льгота заказа заменяет карточные правила, пол 1 ₽ |
-| `LoyaltyBenefitTest` | +2 | payable/подпись льготы заказа |
+| `FiscalDiscountTest` | +6 | льгота заказа заменяет карточные правила; пол 1 ₽ **на каждую единицу** (0 ₽ позиций нет) |
+| `LoyaltyBenefitTest` | +3 | payable/подпись льготы заказа; экран == чек при урезанной скидке |
 | `PreorderPullTest` | +5 | choice не в чеке, label для печати, groupKey-группировка |
 
 ## ASSUMPTIONS
@@ -106,8 +106,9 @@
 2. `benefit` применяется только при наличии `quoteTotal` — без итога правило не подтверждено.
 3. Скидка льготы заказа уходит **ценами позиций** (`priceWithDiscountPosition`), т.к. `receiptDiscount`
    срабатывает не на всех прошивках. Следствие: в чеке это скидка на позиции, а не строка «скидка на чек».
-4. Сумма скидки ограничена суммой чека с полом 1 ₽ (чек не может стать нулевым). Если цена на кассе
-   ниже оценки гостя — скидка урезается, в логе `order_benefit rub=…`.
+4. Сумма скидки ограничена суммой чека; каждая позиция остаётся минимум за 1 ₽ (0 ₽ в чек не пробиваем).
+   Если цена на кассе ниже оценки гостя или скидка почти равна сумме чека — применяется на 1–2 ₽ меньше,
+   это видно в логах `order_benefit`/`discount_shortfall`, и **экран считает ту же сумму**, что уйдёт в чек.
 5. Признак успешной оплаты — печать чека SELL (`PrintExtra`). Если прошивка не вызывает PrintExtra,
    `mark-paid` не уйдёт: заказ останется active. Это осознанно безопаснее ложного `paid`.
 6. Фискальный id/сумма в `mark-paid` не передаются (API их не принимает) — сверка на backend по SELL.

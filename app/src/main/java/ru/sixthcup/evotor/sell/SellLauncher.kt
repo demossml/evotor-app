@@ -78,6 +78,15 @@ object SellLauncher {
             )
             val fiscalLines = FiscalLines.build(lines, split)
             if (split.positionDiscountKopecks > 0) {
+                // Пол 1 ₽ на единицу может «съесть» последний рубль скидки — фиксируем в лог.
+                val appliedPosition = DiscountCalc.kopecks(Cart.gross()) - FiscalLines.payableKopecks(fiscalLines)
+                if (appliedPosition < split.positionDiscountKopecks) {
+                    Log.w(
+                        "SellLauncher",
+                        "discount_shortfall requested=${split.positionDiscountKopecks} " +
+                            "applied=$appliedPosition reason=min_1_ruble_per_unit",
+                    )
+                }
                 Log.i(
                     "SellLauncher",
                     "fiscal_positions discount=${split.positionDiscountKopecks} gift=${split.giftApplied} " +

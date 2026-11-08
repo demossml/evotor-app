@@ -65,8 +65,8 @@
 |---|---|
 | версия | **165 / 5.3.6-audit-p1** |
 | APK | `dist/sixthcup-evotor-5.3.6-audit-p1-vc165.apk` |
-| sha256 | `193cce279e768d041fa7c971cff5f156a56e0439b9734fe60bbe5f16a13cd2c2` |
-| тесты | 583 pass / 0 fail / 0 errors, 69 классов |
+| sha256 | `597aa899e99ea458e08ed7383f71b2a793f1a8289b4c8ac2338f1237f8daf235` |
+| тесты | 586 pass / 0 fail / 0 errors, 69 классов |
 | lint | 0 errors / 108 warnings |
 | отчёт | `IMPLEMENTATION-AUDIT-APK-FINAL-REPORT.md` |
 

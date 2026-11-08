@@ -2479,6 +2479,8 @@ class MainActivity : AppCompatActivity() {
         CardSession.get(this), currentChoice(), Cart.gross(),
         Cart.giftEligibleLines().map { it.priceRub }, nowSec(),
         activeOrderBenefit(),
+        // Фактическая скидка считается по позициям (пол 1 ₽), чтобы сумма на экране == чек.
+        Cart.all(),
     )
 
     /** Льгота предзаказа действует, пока её состав реально лежит в корзине. */

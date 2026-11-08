@@ -149,4 +149,17 @@ class LoyaltyBenefitTest {
         assertTrue(b.hasOrderBenefit)
         assertTrue(b.hasAny)
     }
+    @Test
+    fun `preview matches the receipt when the benefit cannot cover the last rouble`() {
+        val lines = listOf(
+            CartLine("a", "Латте", d("100"), freeEligible = true, cartKey = "pre:o1:a"),
+            CartLine("b", "Круассан", d("100"), freeEligible = false, cartKey = "pre:o1:b"),
+        )
+        val b = LoyaltyPreview.of(
+            null, choice(), d("200"), emptyList(), now,
+            OrderBenefit("voucher", "Ваучер", d("199")), lines,
+        )
+        assertEquals(d("198.00"), b.orderBenefit)
+        assertEquals(d("2.00"), b.payable)
+    }
 }

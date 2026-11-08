@@ -185,4 +185,22 @@ class FiscalDiscountTest {
         assertEquals(10050L, s.positionDiscountKopecks)
         assertEquals(54950L, 65000L - s.totalDiscountKopecks)
     }
+    @Test
+    fun `order benefit distribution keeps every unit above zero`() {
+        val lines = listOf(line(uuid = "a", price = "250"), line(uuid = "b", price = "400", eligible = false))
+        val split = FiscalCalc.split(d("650"), emptyList(), null, choice(), now, orderBenefitRub = d("300"))
+        val fiscal = FiscalLines.build(lines, split)
+        assertEquals(35000L, FiscalLines.payableKopecks(fiscal))
+        assertTrue(fiscal.all { (it.unitPriceWithDiscount ?: it.unitPrice).signum() > 0 })
+    }
+
+    @Test
+    fun `order benefit never discounts a unit below one rouble`() {
+        val lines = listOf(line(uuid = "a", price = "100"), line(uuid = "b", price = "100", eligible = false))
+        val split = FiscalCalc.split(d("200"), emptyList(), null, choice(), now, orderBenefitRub = d("199"))
+        val fiscal = FiscalLines.build(lines, split)
+        // Каждая единица минимум 1 ₽: из 199 ₽ скидки применяется 198 ₽, к оплате 2 ₽.
+        assertEquals(200L, FiscalLines.payableKopecks(fiscal))
+        assertTrue(fiscal.all { (it.unitPriceWithDiscount ?: it.unitPrice).signum() > 0 })
+    }
 }

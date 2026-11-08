@@ -166,10 +166,11 @@ object FiscalLines {
                 remaining -= applied
             }
         }
-        // Остаток (ваучер) — по порядку, каждая единица не ниже нуля.
+        // Остаток (ваучер / льгота заказа) — по порядку. Ноль рублей в позиции пробивать нельзя,
+        // поэтому каждая единица остаётся минимум за 1 ₽.
         for (u in units) {
             if (remaining <= 0) break
-            val room = u.priceKopecks - u.discount
+            val room = (u.priceKopecks - u.discount - DiscountCalc.GIFT_FISCAL_MIN_KOPECKS).coerceAtLeast(0L)
             if (room <= 0) continue
             val take = minOf(room, remaining)
             u.discount += take
