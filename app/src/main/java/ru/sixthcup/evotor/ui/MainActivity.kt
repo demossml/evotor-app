@@ -96,8 +96,10 @@ import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.MenuTabs
 import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.data.OrderBenefit
+import ru.sixthcup.evotor.data.PreorderAutoPull
 import ru.sixthcup.evotor.data.PreorderPaid
 import ru.sixthcup.evotor.data.PreorderPullSession
+import ru.sixthcup.evotor.data.PreorderPuller
 import ru.sixthcup.evotor.data.PreorderQueue
 import ru.sixthcup.evotor.net.OrderApi
 import ru.sixthcup.evotor.data.ReceiptIssue
@@ -229,12 +231,9 @@ class MainActivity : AppCompatActivity() {
         if (trimmed.isEmpty()) return
         // Предзаказ гостя (ord1.<payload>.<signature>) — свой экран. loyalty-ветка ниже не меняется.
         if (OrderScanRouter.isOrderQr(trimmed)) {
-            val i = Intent(this, ru.sixthcup.evotor.ui.orders.OrderDetailActivity::class.java)
-            OrderScanRouter.extractOid(trimmed)?.takeIf { it.isNotBlank() }?.let {
-                i.putExtra(ru.sixthcup.evotor.ui.orders.OrderDetailActivity.EXTRA_OID, it)
-            }
-            Log.i(TAG, "order_qr_scan oid=${OrderScanRouter.extractOid(trimmed) != null}")
-            startActivity(i)
+            val oid = OrderScanRouter.extractOid(trimmed)?.takeIf { it.isNotBlank() }
+            Log.i(TAG, "order_qr_scan oid=${oid != null}")
+            handleOrderQr(oid)
             return
         }
         if (resolving) {
@@ -253,6 +252,95 @@ class MainActivity : AppCompatActivity() {
             CheckoutChoice.clear(this)
         }
         applyScan(trimmed)
+    }
+
+    /**
+     * QR заказа: готовый заказ при пустой корзине сразу наполняет обычное меню (кассир видит
+     * «как будто сам набрал»), остальные статусы открывают панель заказа.
+     */
+    private fun handleOrderQr(oid: String?) {
+        if (oid.isNullOrBlank()) {
+            openOrderPanel(null)
+            return
+        }
+        if (!Cart.isEmpty()) {
+            Log.i(TAG, "order_auto_skip order=${oid.take(8)} reason=cart_not_empty")
+            openOrderPanel(oid)
+            return
+        }
+        thread(name = "order-auto-pull") {
+            when (val r = OrderApi.resolveByOid(oid)) {
+                is OrderApi.Result.Ok -> {
+                    val o = r.value
+                    if (o.status.trim().equals(PreorderQueue.PAID, ignoreCase = true)) {
+                        runOnUiThread { if (!isFinishing && !isDestroyed) showPaidOrderInfo(o) }
+                        return@thread
+                    }
+                    if (!PreorderAutoPull.shouldPull(o.status, Cart.isEmpty())) {
+                        runOnUiThread { if (!isFinishing && !isDestroyed) openOrderPanel(o.id) }
+                        return@thread
+                    }
+                    val catalog = try {
+                        InventoryRepository.load(this)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "order_auto_catalog_failed", t)
+                        emptyList()
+                    }
+                    val prepared = PreorderPuller.prepare(o, catalog, Cart.all().map { it.cartKey }.toSet())
+                    if (!PreorderAutoPull.allowsSilentPull(prepared)) {
+                        Log.w(
+                            TAG,
+                            "order_auto_skip order=${o.id.take(8)} reason=plan_issues " +
+                                "missing=${prepared.plan.missingUuid.size} notFound=${prepared.plan.notFound.size}",
+                        )
+                        runOnUiThread { if (!isFinishing && !isDestroyed) openOrderPanel(o.id) }
+                        return@thread
+                    }
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        PreorderPuller.commit(prepared)
+                        screen = Screen.ORDER
+                        onCartChanged()
+                        notice = if (prepared.plan.hasAnything) {
+                            "Заказ ${o.shortCode} в корзине"
+                        } else {
+                            "Заказ ${o.shortCode} уже в корзине"
+                        }
+                        noticeKind = Kind.OK
+                        Log.i(
+                            TAG,
+                            "order_auto_pull order=${o.id.take(8)} lines=${prepared.plan.added} " +
+                                "already=${prepared.plan.alreadyPresent.size}",
+                        )
+                        safeRender()
+                    }
+                }
+                is OrderApi.Result.Err -> {
+                    Log.w(TAG, "order_auto_resolve_failed order=${oid.take(8)} err=${r.error}")
+                    runOnUiThread { if (!isFinishing && !isDestroyed) openOrderPanel(oid) }
+                }
+            }
+        }
+    }
+
+    private fun openOrderPanel(oid: String?) {
+        val i = Intent(this, ru.sixthcup.evotor.ui.orders.OrderDetailActivity::class.java)
+        oid?.takeIf { it.isNotBlank() }
+            ?.let { i.putExtra(ru.sixthcup.evotor.ui.orders.OrderDetailActivity.EXTRA_OID, it) }
+        startActivity(i)
+    }
+
+    /** Онлайн-оплаченный заказ: предоплаченные позиции второй раз не пробиваем. */
+    private fun showPaidOrderInfo(o: OrderApi.Order) {
+        AlertDialog.Builder(this)
+            .setTitle("Заказ ${o.shortCode} оплачен")
+            .setMessage(
+                "Заказ оплачен онлайн. Предоплаченные позиции в чек не добавляем —\n" +
+                    "добавки оформите отдельным чеком.",
+            )
+            .setPositiveButton("К кассе", null)
+            .setNegativeButton("Открыть заказ") { _, _ -> openOrderPanel(o.id) }
+            .show()
     }
 
     private fun applyScan(code: String) {
@@ -2490,6 +2578,29 @@ class MainActivity : AppCompatActivity() {
         return PreorderPullSession.benefit()
     }
 
+    /** Бейдж строки корзины: «Заказ 123456» для подтянутых позиций предзаказа. */
+    private fun preorderBadge(line: CartLine): String? {
+        if (!line.cartKey.startsWith("pre:")) return null
+        val id = line.cartKey.removePrefix("pre:").substringBefore(':')
+        if (id.isBlank()) return null
+        val code = if (PreorderPullSession.orderId() == id) PreorderPullSession.shortCode() else null
+        return if (code.isNullOrBlank()) "Предзаказ" else "Заказ $code"
+    }
+
+    /** Компактный маркер в полосе корзины, пока в чеке есть строки предзаказа. */
+    private fun preorderChipText(): String? {
+        val id = PreorderPullSession.orderId() ?: return null
+        if (Cart.all().none { it.cartKey.startsWith("pre:$id:") }) return null
+        val code = PreorderPullSession.shortCode()
+        return if (code.isNullOrBlank()) "предзаказ в чеке" else "заказ $code в чеке"
+    }
+
+    /** Подпись под заголовком корзины: тип заказа + маркер предзаказа. */
+    private fun cartSubText(): String = buildString {
+        append("Чек · ").append(orderType.lowercase())
+        preorderChipText()?.let { append(" · ").append(it) }
+    }
+
     /** Отвязка карты: следующая привязка снова получит окно льготы. */
     private fun forgetCard() {
         CardSession.clear(this)
@@ -2530,7 +2641,10 @@ class MainActivity : AppCompatActivity() {
         cartCountView?.text = n.toString()
         cartTotalView?.text = rub(cartTotalRub())
         val benefitLabel = currentBenefits().shortLabel()
-        cartSubView?.text = "Чек · ${orderType.lowercase()}" + (benefitLabel?.let { " · $it" } ?: "")
+        cartSubView?.text = buildString {
+            append(cartSubText())
+            benefitLabel?.let { append(" · ").append(it) }
+        }
         cartBarRoot?.visibility = if (empty) View.GONE else View.VISIBLE
         emptyCartBarRoot?.visibility = if (empty) View.VISIBLE else View.GONE
         repeatOrderView?.visibility = if (Cart.hasLastOrder()) View.VISIBLE else View.GONE
@@ -3229,7 +3343,7 @@ class MainActivity : AppCompatActivity() {
                     setOnClickListener {
                         orderType = label
                         paintOrderType(row)
-                        subTv.text = "Чек · ${orderType.lowercase()}"
+                        subTv.text = cartSubText()
                     }
                 }
                 row.addView(b, LinearLayout.LayoutParams(0, dp(40), 1f))
@@ -3243,7 +3357,7 @@ class MainActivity : AppCompatActivity() {
             val n = cartLineCount(lines)
             countBadge.text = n.toString()
             countBadge.visibility = if (n > 0) View.VISIBLE else View.GONE
-            subTv.text = "Чек · ${orderType.lowercase()}"
+            subTv.text = cartSubText()
             clearBtn.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
             foot.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
             footTotal.text = rub(cartTotalRub())
@@ -3329,6 +3443,16 @@ class MainActivity : AppCompatActivity() {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 })
+                preorderBadge(line)?.let { badge ->
+                    info.addView(TextView(this).apply {
+                        text = badge
+                        textSize = 9.5f
+                        weight(Fonts.SEMIBOLD)
+                        setTextColor(BRAND)
+                        background = rounded(0xFFF2F8F1.toInt(), 6, UiKit.LINE)
+                        setPadding(dp(6), dp(1), dp(6), dp(1))
+                    }, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(3) })
+                }
                 if (!line.recipe.isNullOrBlank()) {
                     info.addView(TextView(this).apply {
                         text = line.recipe
@@ -4064,6 +4188,19 @@ class MainActivity : AppCompatActivity() {
         if (sendingReceipt) return
         if (Cart.isEmpty()) {
             notice = "Корзина пуста — добавьте позиции."
+            noticeKind = Kind.WARN
+            safeRender()
+            return
+        }
+        // В POS уже открыт чек продажи: второй не откроется, дадим понятную инструкцию.
+        val openSell = try {
+            ReceiptApi.getReceipt(this, Receipt.Type.SELL)
+        } catch (t: Throwable) {
+            Log.w(TAG, "open_receipt_check_failed", t)
+            null
+        }
+        if (openSell != null) {
+            notice = "В Эвоторе уже открыт чек продажи. Закройте его и повторите."
             noticeKind = Kind.WARN
             safeRender()
             return

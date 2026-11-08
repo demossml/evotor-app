@@ -20,6 +20,7 @@ import ru.sixthcup.evotor.data.ChoicePrintStore
 import ru.sixthcup.evotor.data.DiscountCalc
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.FiscalLines
+import ru.sixthcup.evotor.data.PendingPayment
 import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.VoucherCalc
@@ -228,11 +229,20 @@ object SellLauncher {
                     try {
                         val result = future.result
                         if (result?.type == IntegrationManagerFuture.Result.Type.OK) {
+                            // Чек уже открыт: состояние «оплата не подтверждена» должно пережить
+                            // уход на экран Эвотор и возможный перезапуск процесса.
+                            PendingPayment.set(activity)
                             try {
                                 activity.startActivity(NavigationApi.createIntentForSellReceiptPayment())
                             } catch (e: Throwable) {
                                 Log.e("SellLauncher", "receipt_open_failed ${e.javaClass.simpleName}")
-                                onDone(Outcome(false, e.message ?: "Не удалось открыть оплату"))
+                                onDone(
+                                    Outcome(
+                                        false,
+                                        "Чек открыт, но экран оплаты не запустился. " +
+                                            "Откройте чек в Эвоторе вручную.",
+                                    ),
+                                )
                                 return@IntegrationManagerCallback
                             }
                             Log.i(

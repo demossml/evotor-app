@@ -16,11 +16,9 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import ru.sixthcup.evotor.data.Cart
-import ru.sixthcup.evotor.data.CartLine
 import ru.sixthcup.evotor.data.InventoryRepository
-import ru.sixthcup.evotor.data.OrderBenefit
-import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.PreorderPull
+import ru.sixthcup.evotor.data.PreorderPuller
 import ru.sixthcup.evotor.data.PreorderQueue
 import ru.sixthcup.evotor.net.OrderApi
 import java.math.BigDecimal
@@ -308,25 +306,9 @@ class OrderDetailActivity : AppCompatActivity() {
                 Log.w(TAG, "pull_catalog_failed", t)
                 emptyList()
             }
-            val byUuid = catalog.associateBy { it.uuid }
             val already = Cart.all().map { it.cartKey }.toSet()
-            val plan = PreorderPull.plan(o.id, o.items, byUuid, already)
-            plan.lines.forEach { l ->
-                Cart.add(
-                    CartLine(
-                        productUuid = l.productUuid,
-                        name = l.name,
-                        priceRub = l.priceRub,
-                        quantity = l.quantity,
-                        recipe = l.recipe,
-                        freeEligible = l.freeEligible,
-                        cartKey = l.cartKey,
-                        // Выбор без цены печатается PrintExtra, а не позицией чека.
-                        choiceTitle = l.choiceTitle,
-                        choiceLabel = l.choiceLabel,
-                    ),
-                )
-            }
+            val prepared = PreorderPuller.prepare(o, catalog, already)
+            val plan = prepared.plan
             // Опции без UUID не попадают в чек отдельной позицией — кассир увидит их в диалоге.
             if (plan.modifierNoUuid.isNotEmpty()) {
                 Log.w(
@@ -340,15 +322,8 @@ class OrderDetailActivity : AppCompatActivity() {
                 if (!plan.hasAnything && plan.alreadyPresent.isNotEmpty()) {
                     // Повторное «В чек»: состав уже в корзине — ведём кассира к оплате, не пугаем.
                     Log.i(TAG, "pull_already_in_cart order=${o.id.take(8)} count=${plan.alreadyPresent.size}")
-                    PreorderPullSession.set(
-                        o.id,
-                        o.shortCode,
-                        o.items.mapNotNull { i ->
-                            i.evotorProductUuid?.trim()?.takeIf { it.isNotEmpty() }
-                                ?.let { PreorderPullSession.Item(it, i.name, i.quantity.coerceAtLeast(1)) }
-                        },
-                        OrderBenefit.from(o),
-                    )
+                    // Сессия нужна и для повторного «В чек»: состав берём из заказа.
+                    PreorderPuller.commit(prepared)
                     AlertDialog.Builder(this)
                         .setTitle("Позиции уже в чеке")
                         .setMessage(
@@ -373,13 +348,8 @@ class OrderDetailActivity : AppCompatActivity() {
                         .show()
                     return@post
                 }
-                PreorderPullSession.set(
-                    o.id,
-                    o.shortCode,
-                    plan.lines.map { PreorderPullSession.Item(it.productUuid, it.name, it.quantity.toInt()) },
-                    // Льгота заказа едет в чек вместе с составом: касса снимет её и напишет sc.preorder.
-                    OrderBenefit.from(o),
-                )
+                // Корзина + сессия (включая льготу заказа) — один путь с авто-подтягиванием по QR.
+                PreorderPuller.commit(prepared)
                 Log.i(TAG, "pull_ok order=${o.id} lines=${plan.added} mods=${plan.lines.count { it.isModifier }}")
                 AlertDialog.Builder(this)
                     .setTitle("Добавлено в чек")

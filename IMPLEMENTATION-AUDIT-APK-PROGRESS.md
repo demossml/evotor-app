@@ -123,3 +123,21 @@ sha256 `faede8708df07d03dcab6a30943c6df3a9a0c86b4cd6b394ce7dc17037ee3a7f`,
 APK 168 / 5.3.9-orders-back: `dist/sixthcup-evotor-5.3.9-orders-back-vc168.apk`,
 sha256 `f65e27b8e9af82a66b2f5b887d5ded72a635065887e644ef551e985264ba5d5e`,
 тесты 588 pass / 0 fail.
+
+## Post-wave: авто-подтягивание по QR (APK 169)
+
+| Симптом / запрос | Решение |
+|---|---|
+| Скан QR готового заказа открывал панель, а не меню с заполненной корзиной | `handleOrderQr`: `ready` + **пустая** корзина → `PreorderPuller` сразу наполняет `Cart`, остаёмся на `Screen.ORDER`, плашка «Заказ N в корзине» |
+| Панель и авто-пул могли разойтись | `data/PreorderPuller.kt`: единый `prepare/commit` для обоих путей; `PreorderAutoPull` — чистое правило допуска |
+| Не видно, что в чеке предзаказ | бейдж «Заказ N» в строке корзины + маркер в полосе корзины |
+| «В чек» при уже открытом чеке POS | проверка `ReceiptApi.getReceipt(SELL)` → «Закройте открытый чек и повторите» |
+| `paid`-заказ | диалог «оплачен онлайн», предоплаченные позиции **не** добавляем; добавки — отдельным чеком |
+| Оплата не подтверждалась при перезапуске процесса | `PendingPayment.set()` теперь и внутри `SellLauncher` перед запуском экрана оплаты |
+
+Не делали (осознанно): авто-пул для `accepted`/`cooking` (у панели остаются статусные действия),
+слепой повтор `OpenSellReceiptCommand` (риск дублей позиций), серверное закрытие `paid` как «выдан».
+
+APK 169 / 5.3.10-preorder-autopull: `dist/sixthcup-evotor-5.3.10-preorder-autopull-vc169.apk`,
+sha256 `e3e02e6fca1ccf3a049a6f78f7ca38110c33eca4c91f082809c73f7f7418c136`,
+тесты 596 pass / 0 fail, lint 0 errors / 104 warnings.
