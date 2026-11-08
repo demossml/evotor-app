@@ -121,6 +121,15 @@
 Лояльность карты (QR/resolve, `CardSession` карточный путь), `ReceiptValidator`, `DiscountCalc.compute`,
 `ReceiptPlan`, сканер QR карты, `applicationId`, keystore, фискальные 0 ₽ позиции, `ChoicePrintStore`-механика.
 
+## Post-wave (live run)
+
+Живой запуск выявил два backend-разрыва (не код APK):
+1. orders-маршруты требовали `X-Device-Token` — ТЗ: `docs/BACKEND-ORDERS-AUTH-TZ.md` §4.
+2. `/:id/status` принимает только PATCH, а APK шлёт POST + `X-HTTP-Method-Override` (Android не умеет PATCH) — ТЗ: там же, «Дополнение».
+
+APK 166 / 5.3.7-orders-auth дополнительно исправляет текст ошибки для `http_404`
+(«Заказ не найден» вместо «Нет связи с сервером»).
+
 ## Готово к установке на кассу
 
 **Да, условно.** APK `165` устанавливается и работает: контракт `sc` приведён к канону, льгота заказа

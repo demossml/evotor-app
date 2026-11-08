@@ -137,26 +137,37 @@ object PreorderQueue {
         return if (sorted.size > 1) "$head · ещё ${sorted.size - 1}" else head
     }
 
-    /** Тексты ошибок по коду backend (матрица 3). */
-    fun errorText(code: String?, httpStatus: Int = 0): String = when (code?.trim()?.lowercase()) {
-        "unauthorized" -> "Терминал не авторизован. Перепривяжите кассу"
-        "wrong_store" -> "Заказ оформлен для другой кофейни"
-        "not_found" -> "Заказ не найден"
-        "expired" -> "Срок заказа истёк"
-        "already_paid" -> "Заказ уже оплачен"
-        "rejected" -> "Заказ отклонён или отменён"
-        "invalid_transition" -> "Статус уже изменился — обновите заказ"
-        "benefit_conflict" -> "Бонус гостя уже применён в другом чеке"
-        "bad_request" -> "Некорректный запрос"
-        "network" -> "Нет связи с сервером"
-        else -> when (httpStatus) {
-            401 -> "Терминал не авторизован. Перепривяжите кассу"
-            403 -> "Заказ оформлен для другой кофейни"
-            404 -> "Заказ не найден"
-            410 -> "Срок заказа истёк"
-            in 500..599 -> "Ошибка сервера ($httpStatus)"
-            0 -> "Нет связи с сервером"
-            else -> "Не удалось получить заказ ($httpStatus)"
+    /**
+     * Тексты ошибок по коду backend (матрица 3).
+     *
+     * Понимает и `error` из JSON, и синтетический `http_404`: [OrderApi] ставит его, когда тело
+     * ответа не JSON (например, HTML-404 от Express на несуществующий маршрут). Иначе такой
+     * ответ показывался кассиру как «Нет связи с сервером».
+     */
+    fun errorText(code: String?, httpStatus: Int = 0): String {
+        val raw = code?.trim()?.lowercase().orEmpty()
+        val http = httpStatus.takeIf { it > 0 }
+            ?: Regex("^http_(\\d{3})$").find(raw)?.groupValues?.get(1)?.toIntOrNull()
+        return when (raw) {
+            "unauthorized" -> "Терминал не авторизован. Перепривяжите кассу"
+            "wrong_store" -> "Заказ оформлен для другой кофейни"
+            "not_found" -> "Заказ не найден"
+            "expired" -> "Срок заказа истёк"
+            "already_paid" -> "Заказ уже оплачен"
+            "rejected" -> "Заказ отклонён или отменён"
+            "invalid_transition" -> "Статус уже изменился — обновите заказ"
+            "benefit_conflict" -> "Бонус гостя уже применён в другом чеке"
+            "bad_request" -> "Некорректный запрос"
+            "network", "timeout", "io" -> "Нет связи с сервером"
+            else -> when (http) {
+                401 -> "Терминал не авторизован. Перепривяжите кассу"
+                403 -> "Заказ оформлен для другой кофейни"
+                404 -> "Заказ не найден"
+                410 -> "Срок заказа истёк"
+                in 500..599 -> "Ошибка сервера ($http)"
+                null -> "Нет связи с сервером"
+                else -> "Не удалось получить заказ ($http)"
+            }
         }
     }
 

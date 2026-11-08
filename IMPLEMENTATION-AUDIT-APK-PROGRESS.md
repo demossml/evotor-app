@@ -100,3 +100,14 @@
 
 - Платные опции без `evotorUuid` уже показываются кассиру в диалоге «В чек» и не попадают
   в позиции; добавлен `Log.w pull_modifier_no_uuid` (без имён — только id заказа и счётчик).
+
+## Post-wave: разбор живого запуска (2026-11-08)
+
+| Симптом | Причина | Решение |
+|---|---|---|
+| `401` на `/api/devices/orders/active` | orders-маршруты требовали `X-Device-Token` (enroll), которого в APK нет | ТЗ backend: `docs/BACKEND-ORDERS-AUTH-TZ.md` (авторизация как у loyalty/catalog) |
+| `POST /api/devices/orders/:id/status` → `404`, на кассе «Нет связи с сервером» | Android `HttpURLConnection` не умеет PATCH: APK шлёт `POST` + `X-HTTP-Method-Override: PATCH`, backend принимает только PATCH → Express 404 (HTML) | ТЗ backend: принимать POST на `/:id/status` (или method-override); APK 166 понимает `http_404` и показывает «Заказ не найден» |
+
+APK 166 / 5.3.7-orders-auth: `dist/sixthcup-evotor-5.3.7-orders-auth-vc166.apk`,
+sha256 `80d7887c69e5448565d0bd0dc88b504e447323d43325f7244daa49371a9a12b8`,
+тесты 587 pass / 0 fail.

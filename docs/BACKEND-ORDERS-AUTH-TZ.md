@@ -141,3 +141,72 @@ if (!store) return res.status(403).json({ ok: false, error: 'wrong_store' });
 - Реализация enroll/токенов в APK (вариант B).
 - Изменения контракта `extras.sc` и льготы предзаказа.
 - Ослабление авторизации loyalty/catalog (они уже работают).
+
+---
+
+# Дополнение (2026-11-08): смена статуса — `POST` + `X-HTTP-Method-Override: PATCH`
+
+## Симптом
+
+```
+GET  /api/devices/orders/resolve              200
+POST /api/devices/orders/<uuid>/status        404
+GET  /api/devices/orders/resolve              200
+```
+
+На кассе заказ открывается, но кнопка «Принять» показывает ошибку.
+
+## Причина
+
+Android `HttpURLConnection` **не умеет PATCH**: `setRequestMethod("PATCH")` бросает
+`ProtocolException`. Поэтому APK отправляет `POST` с заголовком
+`X-HTTP-Method-Override: PATCH` (см. `OrderApi.request`). Маршрут `/:id/status`
+зарегистрирован только как `PATCH`, Express видит `POST` → `404` (HTML-тело).
+
+Дополнительно APK показывал «Нет связи с сервером», потому что тело 404 не JSON и код
+превращался в `http_404` (исправлено в APK 166: теперь «Заказ не найден»).
+
+## Требуемое изменение (любой из вариантов)
+
+**Вариант 1 (рекомендуемый) — принимать оба метода на одном обработчике:**
+
+```js
+router.route('/:id/status')
+  .patch(requireDevice, handleStatus)
+  .post(requireDevice, handleStatus);   // APK шлёт POST + X-HTTP-Method-Override
+```
+
+**Вариант 2 — глобальный method-override middleware до маршрутов:**
+
+```js
+app.use((req, _res, next) => {
+  const m = req.get('X-HTTP-Method-Override');
+  if (req.method === 'POST' && m) req.method = m.toUpperCase();
+  next();
+});
+```
+
+Вариант 1 предпочтителен: явно, без глобальной магии. `mark-paid`/`reject` уже POST —
+их менять не нужно.
+
+## Критерии приёмки
+
+| # | Проверка | Ожидание |
+|---|---|---|
+| 1 | `POST /:id/status` + `X-HTTP-Method-Override: PATCH`, валидный переход | `200 {ok:true, order}` |
+| 2 | Тот же запрос без override | `404`/`405` (не `500`) |
+| 3 | Реальный `PATCH /:id/status` | `200` |
+| 4 | Недопустимый переход | `409 invalid_transition` |
+| 5 | Чужая точка | `403 wrong_store` |
+| 6 | `POST /:id/mark-paid`, `POST /:id/reject` | без изменений |
+
+## Тесты backend (vitest)
+
+- `orders/status.spec.ts`: POST+override → 200; POST без override → 4xx; real PATCH → 200;
+  недопустимый переход → 409; `from`/`to` в теле 409.
+- регресс: `GET /active`, `GET /resolve`.
+
+## Примечание для APK
+
+После backend-фикса обновление APK **не требуется**. В APK 166 дополнительно исправлен текст
+ошибки для `http_404` (`Заказ не найден` вместо «Нет связи с сервером»).

@@ -126,6 +126,16 @@ class PreorderQueueTest {
     }
 
     @Test
+    fun `synthetic http codes are understood`() {
+        // OrderApi ставит `http_404`, когда тело ответа не JSON (например, 404 от Express).
+        assertEquals("Заказ не найден", PreorderQueue.errorText("http_404"))
+        assertEquals("Терминал не авторизован. Перепривяжите кассу", PreorderQueue.errorText("http_401"))
+        assertEquals("Заказ оформлен для другой кофейни", PreorderQueue.errorText("http_403"))
+        assertEquals("Ошибка сервера (503)", PreorderQueue.errorText("http_503"))
+        assertEquals("Нет связи с сервером", PreorderQueue.errorText("timeout"))
+    }
+
+    @Test
     fun `order expiration is computed from server time`() {
         assertEquals(
             20,
