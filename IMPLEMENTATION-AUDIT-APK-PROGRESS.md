@@ -36,6 +36,40 @@
 | W1-WARN — предупреждения без uuid | done (лог + диалог уже были) | — |
 | W1-BUILD — сборка волны 1 | done | 579 pass / 0 fail, lint 0 errors, APK `dist/sixthcup-evotor-5.3.5-audit-p0-vc164.apk` (sha256 `67ef1e0d…`) |
 
+## WAVE 2 — P1
+
+| STEP | Статус | Тесты |
+|---|---|---|
+| P1-7 — choice/корица для бариста | done | 583 pass / 0 fail (после шага) |
+| P2-5 — не глотать ошибки скидки | done | 583 pass / 0 fail |
+| P2-7 — CI | не делал | в репозитории нет CI-заготовок (`.github` отсутствует) |
+| WAVE 4 | не делал | вне scope |
+
+### P1-7 — что изменено
+
+- `data/PreorderPull.kt`: `Line.choiceTitle/choiceLabel` из модификатора `groupKey=choice`;
+  `choiceOf()` не выдумывает название схемы, если backend прислал в `group` ключ `choice`.
+- `ui/orders/OrderDetailActivity.kt`: выбор передаётся в `CartLine` → `ChoicePrintStore` → PrintExtra
+  печатает строку бариста. Позиция 0 ₽ не создаётся.
+
+### P2-5 — что изменено
+
+- `data/DiscountFailure.kt` (новый): `report/take`, текст кассиру.
+- `integration/DiscountIntegrationService.kt`: `catch` больше не молчит — `Log.e` + `DiscountFailure.report`.
+- `ui/MainActivity.kt`: при возврате на главный экран кассир видит «Не удалось применить скидку».
+- `data/Prices`/`DiscountCalc.compute` не менялись.
+
+## Финальная сборка
+
+| | |
+|---|---|
+| версия | **165 / 5.3.6-audit-p1** |
+| APK | `dist/sixthcup-evotor-5.3.6-audit-p1-vc165.apk` |
+| sha256 | `193cce279e768d041fa7c971cff5f156a56e0439b9734fe60bbe5f16a13cd2c2` |
+| тесты | 583 pass / 0 fail / 0 errors, 69 классов |
+| lint | 0 errors / 108 warnings |
+| отчёт | `IMPLEMENTATION-AUDIT-APK-FINAL-REPORT.md` |
+
 ### P0-3 — что изменено
 
 - `data/OrderBenefit.kt` (новый): льгота заказа из `benefit`+`quoteTotal`, восстановление из сессии.

@@ -26,6 +26,21 @@ object PreorderPull {
     fun isChoice(m: OrderApi.Modifier): Boolean =
         m.groupKey?.trim()?.equals(GROUP_CHOICE, ignoreCase = true) == true
 
+    /**
+     * Выбор без цены для печати: `title` — название схемы, `label` — выбранный вариант.
+     * Если backend прислал в `group` сам ключ (`choice`), название схемы не выдумываем.
+     */
+    fun choiceOf(item: OrderApi.Item): Pair<String?, String?>? {
+        val m = item.modifiers.firstOrNull { isChoice(it) } ?: return null
+        val label = m.name.trim().ifBlank { return null }
+        val rawTitle = m.group.trim()
+        val title = rawTitle.takeIf {
+            it.isNotEmpty() && !it.equals(GROUP_CHOICE, ignoreCase = true) &&
+                !it.equals(m.groupKey.orEmpty(), ignoreCase = true)
+        }
+        return title to label
+    }
+
     data class Line(
         val productUuid: String,
         val name: String,
@@ -38,6 +53,9 @@ object PreorderPull {
         val freeEligible: Boolean,
         /** Модификатор — отдельная позиция чека (не основная строка напитка). */
         val isModifier: Boolean = false,
+        /** Выбор без цены (корица): печатается PrintExtra, в чек как позиция не идёт. */
+        val choiceTitle: String? = null,
+        val choiceLabel: String? = null,
     )
 
     data class Plan(
@@ -83,6 +101,7 @@ object PreorderPull {
             }
             val baseKey = "pre:$orderId:${item.lineId.ifBlank { index.toString() }}"
             if (baseKey in alreadyInCart) return@forEachIndexed
+            val choice = choiceOf(item)
             lines.add(
                 Line(
                     productUuid = product.uuid,
@@ -92,6 +111,8 @@ object PreorderPull {
                     recipe = recipeOf(item),
                     cartKey = baseKey,
                     freeEligible = product.freeEligible,
+                    choiceTitle = choice?.first,
+                    choiceLabel = choice?.second,
                 ),
             )
             // Платные опции — отдельными позициями по своему uuid Эвотор.

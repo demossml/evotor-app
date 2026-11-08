@@ -215,4 +215,26 @@ class PreorderPullTest {
         )
         assertEquals(config, recipe)
     }
+    // P1-7: выбор без цены печатается строкой PrintExtra, а не позицией 0 ₽.
+    @Test
+    fun `choice label travels to the cart for printing`() {
+        val mods = listOf(
+            OrderApi.Modifier("Корица", "9", "с корицей", 0, true, null, "choice"),
+        )
+        val plan = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog)
+        val line = plan.lines.single()
+        assertEquals("Корица", line.choiceTitle)
+        assertEquals("с корицей", line.choiceLabel)
+        assertTrue(plan.lines.none { it.isModifier })
+    }
+
+    @Test
+    fun `choice key in the group does not become a title`() {
+        val mods = listOf(
+            OrderApi.Modifier("choice", "9", "без корицы", 0, true, null, "choice"),
+        )
+        val line = PreorderPull.plan("o1", listOf(item("l1", "U1", mods = mods)), catalog).lines.single()
+        assertNull(line.choiceTitle)
+        assertEquals("без корицы", line.choiceLabel)
+    }
 }

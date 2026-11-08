@@ -88,6 +88,7 @@ import ru.sixthcup.evotor.data.CatalogCache
 import ru.sixthcup.evotor.data.CatalogMode
 import ru.sixthcup.evotor.data.CatalogProduct
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.DiscountFailure
 import ru.sixthcup.evotor.data.Combo
 import ru.sixthcup.evotor.data.Combos
 import ru.sixthcup.evotor.data.DrinkVariants
@@ -5562,6 +5563,12 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {}
         // Очередь предзаказов: первый запрос сразу, дальше раз в 10 с до onPause.
         startOrdersPoll()
+        // Сбой скидки не теряем: причина уже в логе сервиса, кассиру — понятное сообщение.
+        DiscountFailure.take(this)?.let { reason ->
+            notice = DiscountFailure.cashierText(reason)
+            noticeKind = Kind.WARN
+            if (::root.isInitialized) safeRender()
+        }
         // Drain scan that arrived while we were paused / before register.
         ScannerHub.poll()?.let { code -> handler.post { if (!isFinishing && !isDestroyed) handleScannedCode(code) } }
         // Вернулись с экрана оплаты: показываем явное подтверждение результата (состояние хранится на диске).

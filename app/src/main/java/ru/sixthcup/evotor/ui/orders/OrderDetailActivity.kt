@@ -320,6 +320,9 @@ class OrderDetailActivity : AppCompatActivity() {
                         recipe = l.recipe,
                         freeEligible = l.freeEligible,
                         cartKey = l.cartKey,
+                        // Выбор без цены печатается PrintExtra, а не позицией чека.
+                        choiceTitle = l.choiceTitle,
+                        choiceLabel = l.choiceLabel,
                     ),
                 )
             }

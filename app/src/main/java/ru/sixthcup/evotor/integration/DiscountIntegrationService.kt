@@ -17,6 +17,7 @@ import ru.sixthcup.evotor.data.Choice
 import ru.sixthcup.evotor.data.FiscalCalc
 import ru.sixthcup.evotor.data.Cart
 import ru.sixthcup.evotor.data.DiscountCalc
+import ru.sixthcup.evotor.data.DiscountFailure
 import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.QueueNumberStore
 import ru.sixthcup.evotor.data.SalePrintLoyalty
@@ -198,7 +199,10 @@ class DiscountIntegrationService : IntegrationService() {
                             null,
                         ),
                     )
-                } catch (_: Throwable) {
+                } catch (t: Throwable) {
+                    // Тихий skip скрывал дефект: пишем причину и показываем кассиру сообщение.
+                    Log.e("DiscountIntegration", "discount_failed", t)
+                    DiscountFailure.report(applicationContext, t.javaClass.simpleName)
                     try { callback.skip() } catch (_: Exception) {}
                 }
                 // ВАЖНО: CheckoutChoice здесь НЕ чистим. Эвотор может пересчитать чек несколько раз
