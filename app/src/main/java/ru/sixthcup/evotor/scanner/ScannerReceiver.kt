@@ -48,20 +48,25 @@ class ScannerReceiver : BroadcastReceiver() {
         )
 
         fun extractCode(intent: Intent): String? {
-            // 1) Official Evotor bundle key
-            intent.extras?.getString(KEY_OFFICIAL)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-            // 2) Fallbacks (legacy / other firmwares)
-            for (k in FALLBACK_KEYS) {
-                intent.getStringExtra(k)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-            }
-            // 3) Any string extra that looks non-empty (last resort, skip huge blobs)
             val b: Bundle = intent.extras ?: return null
-            for (k in b.keySet()) {
-                val v = b.get(k) as? String ?: continue
-                val t = v.trim()
+            val values = HashMap<String, String?>(b.size())
+            for (k in b.keySet()) values[k] = b.getString(k)
+            val code = codeFromStrings(values)
+            if (code == null && values.keys.any { it !in KNOWN_KEYS }) {
+                Log.d(TAG, "scan_ignored_unknown_extras keys=${values.keys}")
+            }
+            return code
+        }
+
+        /** Только официальный ключ и известные legacy-ключи; любые прочие extras игнорируются. */
+        internal fun codeFromStrings(values: Map<String, String?>): String? {
+            for (k in KNOWN_KEYS) {
+                val t = values[k]?.trim().orEmpty()
                 if (t.isNotEmpty() && t.length <= 4000) return t
             }
             return null
         }
+
+        private val KNOWN_KEYS: List<String> = listOf(KEY_OFFICIAL) + FALLBACK_KEYS
     }
 }

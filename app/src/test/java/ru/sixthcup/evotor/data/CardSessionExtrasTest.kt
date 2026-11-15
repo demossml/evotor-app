@@ -30,6 +30,7 @@ class CardSessionExtrasTest {
         reservationId = reservationId,
         reservationExpiresAt = 0L,
         freeStatus = "RESERVED",
+        canRedeem = true,
         seq = seq,
     )
 

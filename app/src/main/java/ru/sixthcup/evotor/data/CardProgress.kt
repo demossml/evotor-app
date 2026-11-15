@@ -29,12 +29,9 @@ data class CardProgress(
     val left: Int get() = (goal - cups).coerceAtLeast(0)
 
     companion object {
-        /** Допуск на «чек пробили чуть позже истечения резерва», как в [DiscountCalc]. */
-        const val RESERVE_GRACE_SEC = 120L
-
         fun of(info: CardInfo, nowSec: Long = System.currentTimeMillis() / 1000): CardProgress {
             val goal = info.cupsForFree.coerceAtLeast(1)
-            val kind = CardSession.kindOf(info.code)
+            val kind = CardSession.effectiveKind(info)
             val manual = kind == "code"
 
             // paidTotal (если сервер его отдал) — единственный точный источник: paidCups у ручного
@@ -49,8 +46,10 @@ data class CardProgress(
                 (info.paidTotal != null && info.paidTotal > 0 && cups == 0)
             val giftKnown = info.freeAvailable > 0 || earned != null || info.paidCups >= goal || !manual
 
-            val reserveAlive = info.reservationExpiresAt == 0L || info.reservationExpiresAt + RESERVE_GRACE_SEC >= nowSec
-            val redeemEnabled = !manual && info.reservationId != null && info.freeAvailable > 0 && reserveAlive
+            val reserveAlive = info.reservationExpiresAt == 0L ||
+                info.reservationExpiresAt + ReservationPolicy.GRACE_SEC >= nowSec
+            val redeemEnabled = !manual && info.canRedeem && info.reservationId != null &&
+                info.freeAvailable > 0 && reserveAlive
 
             return CardProgress(
                 cups = cups,

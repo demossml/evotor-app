@@ -35,6 +35,7 @@ class LoyaltyBenefitTest {
         reservationExpiresAt = 0L,
         freeStatus = freeStatus,
         vouchers = vouchers,
+        canRedeem = true,
     )
 
     private fun choice(free: Boolean = false, cashback: Boolean = false, kopecks: Long = 0L, voucher: Int? = null) =

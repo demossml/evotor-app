@@ -131,6 +131,7 @@ class GiftRulesTest {
             reservationId = "R-1",
             reservationExpiresAt = 0L,
             freeStatus = "RESERVED",
+            canRedeem = true,
         )
         val sc = CardSession.sc(info, freeApplied = true, cashbackKopecks = 0, queue = QueueNumber("ord-9", "47"))
         assertEquals(1, sc.getInt("free"))
@@ -152,6 +153,7 @@ class GiftRulesTest {
             reservationId = "R-1",
             reservationExpiresAt = 0L,
             freeStatus = "RESERVED",
+            canRedeem = true,
         )
         val sc = CardSession.sc(info, freeApplied = false, cashbackKopecks = 0)
         assertEquals(0, sc.getInt("free"))

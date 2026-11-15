@@ -1629,6 +1629,13 @@ class MainActivity : AppCompatActivity() {
         lastEnrich?.byUuid?.get(uuid)?.productId?.takeIf { it > 0 }
 
     /**
+     * Товару нужна серверная configuration: он сопоставлен с сервером или у него есть схемы.
+     * Если fetch не удался, такой товар нельзя продавать «по каталогу» (аудит D-02).
+     */
+    private fun needsConfigFor(p: CatalogProduct): Boolean =
+        p.supportsMods || p.groupId != null || productIdOf(p.uuid) != null
+
+    /**
      * Чем товар терминала опознаётся в ответе конфигурации: uuid, серверный id, объём, имя.
      * Одного uuid мало — backend берёт его из связей точки ([VolumeResolver]).
      */
@@ -1682,7 +1689,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Перерисовать панель отладки (если лист открыт и флаг включён). */
     private fun refreshDebugPanel() {
-        if (!ConfigSheetDebug.DEBUG_CONFIG_SHEET) return
+        if (!ConfigSheetDebug.SHOW_CONFIG_SHEET) return
         val panel = debugPanel ?: return
         val extra = sheetPickerDebug?.invoke()
         panel.text = ConfigSheetDebug.text(sheetDebug.copy(extra = extra))
@@ -1798,7 +1805,9 @@ class MainActivity : AppCompatActivity() {
         val opts = if (needOpts) optionsFor(start) else OptionPicker.Opts()
         logSheet("item", start, cfgForSheet, needOpts, opts)
         // Обязательные схемы сервера: пока объём/молоко/добавки не закрыты, в чек нельзя.
-        var configBlocked = ProductConfigGuard.blockers(pendingConfigFor(start), volumeRefOf(start))
+        var configBlocked = ProductConfigGuard.blockers(
+            pendingConfigFor(start), volumeRefOf(start), needsConfig = needsConfigFor(start),
+        )
         val scheme = SheetContract.scheme(variants, lastEnrich, catalogFetchOk)
         Log.i(
             "SC_TOP",
@@ -1911,7 +1920,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Панель отладки: видно состав ответа конфигурации сразу при открытии листа (без adb).
-        if (ConfigSheetDebug.DEBUG_CONFIG_SHEET) {
+        if (ConfigSheetDebug.SHOW_CONFIG_SHEET) {
             val panel = TextView(this).apply {
                 text = ConfigSheetDebug.text(sheetDebug)
                 textSize = 10f
@@ -1989,7 +1998,9 @@ class MainActivity : AppCompatActivity() {
         sheetApplyConfig = { cfg ->
             val current = picker.selectedVariant ?: start
             val effective = sheetProduct(current, variants)
-            configBlocked = ProductConfigGuard.blockers(cfg, volumeRefOf(current))
+            configBlocked = ProductConfigGuard.blockers(
+                cfg, volumeRefOf(current), needsConfig = needsConfigFor(current),
+            )
             val fresh = optionsFor(current)
             picker.rebindOpts(effective, fresh)
             logSheet("item-cfg", current, cfg, needOpts = fresh.milk.isNotEmpty() ||
@@ -2012,7 +2023,9 @@ class MainActivity : AppCompatActivity() {
             val newOpts = if (needOptsVolume) optionsFor(effective) else OptionPicker.Opts()
             logSheet("volume", selected, cfgForVolume, needOptsVolume, newOpts)
             // Схемы привязаны к объёму: у выбранного размера их может не быть — тогда блок.
-            configBlocked = ProductConfigGuard.blockers(pendingConfigFor(selected), volumeRefOf(selected))
+            configBlocked = ProductConfigGuard.blockers(
+                pendingConfigFor(selected), volumeRefOf(selected), needsConfig = needsConfigFor(selected),
+            )
             picker.rebindOpts(selected, newOpts)
             paint()
         }
@@ -2051,7 +2064,9 @@ class MainActivity : AppCompatActivity() {
         addBtn.setOnClickListener {
             val variant = picker.selectedVariant ?: return@setOnClickListener
             // Проверяем заново по факту нажатия: объём мог смениться, конфигурация — обновиться.
-            val blocked = ProductConfigGuard.blockers(pendingConfigFor(variant), volumeRefOf(variant)) + picker.blockers()
+            val blocked = ProductConfigGuard.blockers(
+                pendingConfigFor(variant), volumeRefOf(variant), needsConfig = needsConfigFor(variant),
+            ) + picker.blockers()
             if (blocked.isNotEmpty()) {
                 Toast.makeText(this, blocked.first(), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -2153,6 +2168,9 @@ class MainActivity : AppCompatActivity() {
             hasEvotorOptions = !variantModel.options.isEmpty,
         )
         val opts = if (needOptsCombo) optionsFor(drinkCard) else OptionPicker.Opts()
+        val configBlockedCombo = ProductConfigGuard.blockers(
+            cfgForCombo, volumeRefOf(drinkCard), needsConfig = needsConfigFor(drinkCard),
+        )
         logSheet("combo", drinkCard, cfgForCombo, needOptsCombo, opts)
 
         val dialog = BottomSheetDialog(this)
@@ -2390,7 +2408,7 @@ class MainActivity : AppCompatActivity() {
         fun paint() {
             val total = picker.unitPrice().add(foodPrice)
             priceView.text = rub(total.subtract(combo.discountRub))
-            val blocked = picker.blockers()
+            val blocked = configBlockedCombo + picker.blockers()
             addBtn.text = if (blocked.isEmpty()) {
                 (if (editingGroupId != null) "Сохранить · " else "В заказ · ") + rub(total.subtract(combo.discountRub))
             } else blocked.first()
@@ -2409,7 +2427,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(foot, LinearLayout.LayoutParams(MATCH, WRAP))
 
         addBtn.setOnClickListener {
-            val blocked = picker.blockers()
+            val blocked = configBlockedCombo + picker.blockers()
             if (blocked.isNotEmpty()) {
                 Toast.makeText(this, blocked.first(), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -3941,12 +3959,13 @@ class MainActivity : AppCompatActivity() {
      * Ручной числовой код сюда не попадает — по нему списания нет.
      */
     private fun openClientScreen(card: CardInfo, force: Boolean = false, onDone: (() -> Unit)? = null) {
-        // force — явное действие кассира (тап по карте в шапке или «Изменить льготу» в корзине).
-        if (!force && !benefitGuard.ask(card.code, hasOffer = true)) return
-
         val now = nowSec()
-        val eligible = Cart.giftEligibleLines().map { it.priceRub }
         val offers = ClientOffers.of(card, now)
+        // force — явное действие кассира (тап по карте в шапке или «Изменить льготу» в корзине).
+        // Автопоказ — только когда реально есть что предложить, а не после каждой карты.
+        if (!force && !benefitGuard.ask(card.code, hasOffer = offers.any)) return
+
+        val eligible = Cart.giftEligibleLines().map { it.priceRub }
         val voucherList = offers.vouchers
         val giftPossible = offers.gift
         val cbPossible = offers.cashback
@@ -4028,7 +4047,7 @@ class MainActivity : AppCompatActivity() {
         if (!offers.any) {
             box.addView(
                 noteRow(
-                    if (CardSession.kindOf(card.code) != "token") "Списание подарка и купона — только по QR гостя."
+                    if (CardSession.effectiveKind(card) != "token") "Списание подарка и купона — только по QR гостя."
                     else "Сейчас у карты нет доступных льгот. Прогресс и кэшбэк сохраняются.",
                 ),
                 LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) },

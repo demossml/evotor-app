@@ -44,7 +44,7 @@ object FiscalCalc {
         if (card == null || card.code.isEmpty()) {
             return FiscalSplit(0L, 0L, giftApplied = false, voucherId = null, floorApplied = false)
         }
-        val reserved = DiscountCalc.reserved(card, nowSec)
+        val reserved = DiscountCalc.reserved(card, nowSec) && card.canRedeem
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
         val calc = DiscountCalc.compute(
             gross = gross,

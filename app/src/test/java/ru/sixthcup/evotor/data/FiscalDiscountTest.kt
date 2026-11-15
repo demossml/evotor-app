@@ -16,13 +16,17 @@ class FiscalDiscountTest {
     private fun d(s: String) = BigDecimal(s)
     private val now = 1_000_000L
 
-    private fun card(freeAvailable: Int = 1, vouchers: List<ResolveVoucher> = emptyList(), reservationId: String? = "R-1") =
-        CardInfo(
-            code = "payload.sig", cardCode = "0012", paidCups = 3, cupsForFree = 5,
-            freeAvailable = freeAvailable, cashbackKopecks = 5000,
-            reservationId = reservationId, reservationExpiresAt = 0L, freeStatus = "RESERVED",
-            vouchers = vouchers,
-        )
+    private fun card(
+        freeAvailable: Int = 1,
+        vouchers: List<ResolveVoucher> = emptyList(),
+        reservationId: String? = "R-1",
+        canRedeem: Boolean = true,
+    ) = CardInfo(
+        code = "payload.sig", cardCode = "0012", paidCups = 3, cupsForFree = 5,
+        freeAvailable = freeAvailable, cashbackKopecks = 5000,
+        reservationId = reservationId, reservationExpiresAt = 0L, freeStatus = "RESERVED",
+        vouchers = vouchers, canRedeem = canRedeem,
+    )
 
     private fun line(
         uuid: String = "p1",
@@ -37,6 +41,14 @@ class FiscalDiscountTest {
         Choice.normalize(free, cashback, kopecks, voucher)
 
     // ── split ────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `canRedeem false disables gift`() {
+        val s = FiscalCalc.split(d("250"), listOf(d("250")), card(canRedeem = false), choice(free = true), now)
+        assertEquals(0L, s.positionDiscountKopecks)
+        assertEquals(0L, s.receiptDiscountKopecks)
+        assertFalse(s.giftApplied)
+    }
 
     @Test
     fun `gift goes to positions, nothing to the receipt`() {

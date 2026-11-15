@@ -20,6 +20,10 @@ data class CardInfo(
     val reservationExpiresAt: Long,
     /** "RESERVED" | "ALREADY_RESERVED" | "NONE" | "OFFLINE" | "ERROR" */
     val freeStatus: String,
+    /** Серверное право списания в этом чеке. false — подарок/кэшбэк/ваучер только показываем. */
+    val canRedeem: Boolean = false,
+    /** `token` | `code` из resolve; null у старого кэша — тогда fallback по форме кода. */
+    val kind: String? = null,
     val note: String? = null,
     /** Причина отказа backend: invalid_card | card_not_found | card_blocked (для журнала). */
     val errorCode: String? = null,
@@ -49,7 +53,9 @@ object CardSession {
             .put("code", info.code).put("cardCode", info.cardCode).put("paidCups", info.paidCups)
             .put("cupsForFree", info.cupsForFree).put("freeAvailable", info.freeAvailable)
             .put("cb", info.cashbackKopecks).put("res", info.reservationId ?: JSONObject.NULL)
-            .put("resExp", info.reservationExpiresAt).put("status", info.freeStatus).put("note", info.note ?: JSONObject.NULL)
+            .put("resExp", info.reservationExpiresAt).put("status", info.freeStatus)
+            .put("canRedeem", info.canRedeem).put("kind", info.kind ?: JSONObject.NULL)
+            .put("note", info.note ?: JSONObject.NULL)
             .put("seq", info.seq ?: JSONObject.NULL)
             .put("paidTotal", info.paidTotal ?: JSONObject.NULL)
             .put("freeUsed", info.freeUsed ?: JSONObject.NULL)
@@ -61,7 +67,12 @@ object CardSession {
     fun get(ctx: Context): CardInfo? {
         val p = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         val s = p.getString(KEY, null) ?: return null
-        if (System.currentTimeMillis() - p.getLong(KEY_AT, 0L) > TTL_MS) { clear(ctx); return null }
+        if (System.currentTimeMillis() - p.getLong(KEY_AT, 0L) > TTL_MS) {
+            when (CardTtlPolicy.action(Cart.isEmpty(), PendingPayment.active(ctx))) {
+                CardTtlPolicy.Action.CLEAR -> { clear(ctx); return null }
+                CardTtlPolicy.Action.KEEP_STALE -> markStale(ctx, stale = true)
+            }
+        }
         return try {
             val o = JSONObject(s)
             CardInfo(
@@ -69,6 +80,9 @@ object CardSession {
                 cupsForFree = o.optInt("cupsForFree", 5), freeAvailable = o.optInt("freeAvailable"),
                 cashbackKopecks = o.optLong("cb"), reservationId = if (o.isNull("res")) null else o.getString("res"),
                 reservationExpiresAt = o.optLong("resExp"), freeStatus = o.optString("status", "NONE"),
+                // Старый кэш без поля: безопасный default false, до повторного resolve.
+                canRedeem = o.optBoolean("canRedeem", false),
+                kind = if (o.isNull("kind")) null else o.optString("kind").takeIf { it == "token" || it == "code" },
                 note = if (o.isNull("note")) null else o.getString("note"),
                 seq = if (o.isNull("seq")) null else o.optInt("seq").takeIf { it > 0 },
                 paidTotal = if (!o.has("paidTotal") || o.isNull("paidTotal")) null else o.optInt("paidTotal"),
@@ -164,15 +178,17 @@ object CardSession {
             // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
             // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
             val reserved = card.reservationId != null
+            // Списать можно только когда сервер разрешил (canRedeem) и hold ещё жив.
+            val redeem = reserved && card.canRedeem
             // Ваучер гасит backend только по QR-токену с резервом; по числовому коду ключа быть не должно.
-            val voucherOk = reserved && kindOf(c) == "token"
-            o.put("c", c).put("kind", kindOf(c))
+            val voucherOk = redeem && effectiveKind(card) == "token"
+            o.put("c", c).put("kind", effectiveKind(card))
             if (reserved) o.put("op", card.reservationId)
             if (voucherOk && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
             // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
             card.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
-            o.put("free", if (reserved && freeApplied) 1 else 0)
-                .put("cb", if (reserved) cashbackKopecks.coerceAtLeast(0L) else 0L)
+            o.put("free", if (redeem && freeApplied) 1 else 0)
+                .put("cb", if (redeem) cashbackKopecks.coerceAtLeast(0L) else 0L)
         }
         // ord — канонический ключ связи с queue_numbers; qn — только для логов.
         // Пишем оба лишь когда номер реально получен от backend до открытия чека.
@@ -192,10 +208,13 @@ object CardSession {
      * Ручной ввод: канонический цифровой код карты из ответа resolve (без пробелов и ведущих нулей).
      */
     internal fun scValue(info: CardInfo): String =
-        if (kindOf(info.code) == "token") info.code.trim()
+        if (effectiveKind(info) == "token") info.code.trim()
         else info.cardCode.ifBlank { info.code }.trim()
 
-    /** Подписанный QR содержит точку (`<payload>.<sig>`), короткий код карты — только цифры. */
+    /** Серверный kind, иначе — форма кода: подписанный QR содержит точку, короткий код — только цифры. */
+    fun effectiveKind(info: CardInfo): String =
+        info.kind?.takeIf { it == "token" || it == "code" } ?: kindOf(info.code)
+
     fun kindOf(code: String): String = if (code.contains('.')) "token" else "code"
 
 }

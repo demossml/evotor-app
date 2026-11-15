@@ -95,7 +95,7 @@ class DiscountCalcTest {
             code = "payload.sig", cardCode = "0012", paidCups = 3, cupsForFree = 5,
             freeAvailable = freeAvailable, cashbackKopecks = 0,
             reservationId = reservationId, reservationExpiresAt = 0L, freeStatus = "RESERVED",
-            vouchers = vouchers,
+            vouchers = vouchers, canRedeem = true,
         )
 
     @Test fun giftNeverMakesTheReceiptZeroKopecks() {

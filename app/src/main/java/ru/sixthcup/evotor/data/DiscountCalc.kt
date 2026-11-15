@@ -11,8 +11,10 @@ import java.math.RoundingMode
  * Инвариант: ваучер и кэшбэк не складываются. Если ваучер применён, кэшбэк в чек не идёт.
  */
 object DiscountCalc {
-    /** Запас для медленного баристы: backend засчитает истёкший резерв, только если бонус никто не занял. */
-    const val GRACE_SEC = 300L
+    /**
+     * Запас для медленного баристы: backend засчитает истёкший резерв, только если бонус никто не занял.
+     * Значение — в [ReservationPolicy.GRACE_SEC], общее с UI.
+     */
 
     /**
      * Минимальная фискальная сумма, когда применён подарок или ваучер.
@@ -29,7 +31,8 @@ object DiscountCalc {
     )
 
     fun reserved(info: CardInfo, nowSec: Long): Boolean =
-        info.reservationId != null && (info.reservationExpiresAt == 0L || info.reservationExpiresAt + GRACE_SEC >= nowSec)
+        info.reservationId != null &&
+            (info.reservationExpiresAt == 0L || info.reservationExpiresAt + ReservationPolicy.GRACE_SEC >= nowSec)
 
     fun kopecks(rub: BigDecimal): Long = rub.multiply(BigDecimal(100)).setScale(0, RoundingMode.DOWN).toLong()
 
@@ -109,7 +112,7 @@ object DiscountCalc {
         if (card == null || card.code.isEmpty()) {
             return PayBreakdown(grossKopecks, 0L, grossKopecks, giftApplied = false, voucherId = null, floorApplied = false)
         }
-        val reserved = reserved(card, nowSec)
+        val reserved = reserved(card, nowSec) && card.canRedeem
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
         val allowed = VoucherCalc.allowedTogether(
             voucher,

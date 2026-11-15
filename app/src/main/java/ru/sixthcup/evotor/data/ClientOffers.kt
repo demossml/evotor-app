@@ -17,10 +17,11 @@ data class ClientOffers(
     companion object {
         fun of(card: CardInfo, nowSec: Long): ClientOffers {
             val reserved = DiscountCalc.reserved(card, nowSec)
+            val voucherRedeemable = card.canRedeem && reserved && CardSession.effectiveKind(card) == "token"
             return ClientOffers(
-                gift = card.freeAvailable > 0 && reserved,
-                cashback = reserved && card.cashbackKopecks > 0,
-                vouchers = card.vouchers,
+                gift = card.canRedeem && card.freeAvailable > 0 && reserved,
+                cashback = card.canRedeem && reserved && card.cashbackKopecks > 0,
+                vouchers = if (voucherRedeemable) card.vouchers else emptyList(),
             )
         }
     }

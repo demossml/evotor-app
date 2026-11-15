@@ -33,7 +33,7 @@ object CardRefresh {
     fun credential(info: CardInfo): String? {
         val code = info.code.trim()
         if (code.isEmpty()) return null
-        return if (CardSession.kindOf(code) == "token") code
+        return if (CardSession.effectiveKind(info) == "token") code
         else info.cardCode.ifBlank { code }.trim().ifEmpty { null }
     }
 

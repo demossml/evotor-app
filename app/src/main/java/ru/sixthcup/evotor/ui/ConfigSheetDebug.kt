@@ -1,5 +1,7 @@
 package ru.sixthcup.evotor.ui
 
+import ru.sixthcup.evotor.BuildConfig
+
 /**
  * Отладочная панель в модальном окне товара: видно, что происходит с
  * `GET /api/devices/products/{id}/configuration` — без adb и logcat.
@@ -11,9 +13,12 @@ object ConfigSheetDebug {
 
     /**
      * Флаг в одном месте: `false` убирает панель целиком (одна правка и пересборка).
-     * Пока `true` — владелец читает причину прямо на экране кассы.
+     * В release панель всегда выключена, даже если флаг остался `true`.
      */
     const val DEBUG_CONFIG_SHEET = true
+
+    /** Показывать ли панель в этой сборке. Release — никогда. */
+    val SHOW_CONFIG_SHEET: Boolean = BuildConfig.DEBUG && DEBUG_CONFIG_SHEET
 
     /** Фаза запроса. */
     enum class Phase { OPENED, WAITING, DONE, FAILED }

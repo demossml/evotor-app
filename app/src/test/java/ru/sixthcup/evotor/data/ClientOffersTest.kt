@@ -25,11 +25,12 @@ class ClientOffersTest {
         reservationExpiresAt: Long = 0L,
         freeStatus: String = "RESERVED",
         vouchers: List<ResolveVoucher> = emptyList(),
+        canRedeem: Boolean = true,
     ) = CardInfo(
         code = code, cardCode = cardCode, paidCups = paidCups, cupsForFree = cupsForFree,
         freeAvailable = freeAvailable, cashbackKopecks = cashbackKopecks,
         reservationId = reservationId, reservationExpiresAt = reservationExpiresAt,
-        freeStatus = freeStatus, vouchers = vouchers,
+        freeStatus = freeStatus, vouchers = vouchers, canRedeem = canRedeem,
     )
 
     @Test
@@ -48,13 +49,34 @@ class ClientOffersTest {
     }
 
     @Test
-    fun `no reservation disables gift and cashback but keeps vouchers as is`() {
+    fun `canRedeem false hides gift and cashback even with reservation`() {
+        val offers = ClientOffers.of(card(canRedeem = false), now)
+        assertFalse(offers.gift)
+        assertFalse(offers.cashback)
+    }
+
+    @Test
+    fun `no reservation disables gift cashback and vouchers`() {
         val offers = ClientOffers.of(
             card(reservationId = null, freeStatus = "NONE", vouchers = listOf(voucher15)), now,
         )
         assertFalse(offers.gift)
         assertFalse(offers.cashback)
-        assertEquals(1, offers.vouchers.size)
+        assertTrue(offers.vouchers.isEmpty())
+    }
+
+    @Test
+    fun `canRedeem false hides vouchers`() {
+        val offers = ClientOffers.of(card(vouchers = listOf(voucher15), canRedeem = false), now)
+        assertTrue(offers.vouchers.isEmpty())
+    }
+
+    @Test
+    fun `manual code hides vouchers even with a reservation`() {
+        val offers = ClientOffers.of(
+            card(code = "0012", vouchers = listOf(voucher15), canRedeem = true), now,
+        )
+        assertTrue(offers.vouchers.isEmpty())
     }
 
     @Test
@@ -82,11 +104,11 @@ class ClientOffersTest {
 
     @Test
     fun `reservation grace decides availability`() {
-        val expired = card(reservationExpiresAt = now - DiscountCalc.GRACE_SEC - 1)
+        val expired = card(reservationExpiresAt = now - ReservationPolicy.GRACE_SEC - 1)
         assertFalse(ClientOffers.of(expired, now).gift)
         assertFalse(ClientOffers.of(expired, now).cashback)
 
-        val insideGrace = card(reservationExpiresAt = now - DiscountCalc.GRACE_SEC + 1)
+        val insideGrace = card(reservationExpiresAt = now - ReservationPolicy.GRACE_SEC + 1)
         assertTrue(ClientOffers.of(insideGrace, now).gift)
         assertTrue(ClientOffers.of(insideGrace, now).cashback)
     }

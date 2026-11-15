@@ -1,8 +1,8 @@
 # 6.7 Coffee — кассовое приложение Эвотор
 
-Package: `ru.sixthcup.evotor`  
-VersionCode: **81**  
-VersionName: **4.6.6-audit-fixes-p0-p12**  
+Package: `ru.sixthcup.evotor`<br>
+VersionCode: **170**<br>
+VersionName: **5.3.11-audit-fixes**<br>
 App UUID: `151071e8-88a4-44f6-b71a-b17c559f9b7d`
 
 ## Архитектура

@@ -19,12 +19,19 @@ object CatalogCache {
 
     fun load(ctx: Context, storeUuid: String? = null): CatalogApi.Payload? {
         val f = File(ctx.applicationContext.filesDir, fileName(storeUuid))
-        // migrate: prefer v2, fall back to v1 filename
-        val src = when {
-            f.isFile && f.length() > 0L -> f
-            else -> File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json").takeIf { it.isFile && it.length() > 0L }
-        } ?: return null
+        val legacy = File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json")
+        val src = pickSource(f, legacy, storeUuid) ?: return null
         return loadFrom(src)
+    }
+
+    /**
+     * v1-файл был общим для всех точек. Читаем его только когда storeUuid неизвестен:
+     * при известной точке чужой кэш может подменить фото/схемы добавок.
+     */
+    internal fun pickSource(perStore: File, legacy: File, storeUuid: String?): File? = when {
+        perStore.isFile && perStore.length() > 0L -> perStore
+        storeUuid.isNullOrBlank() && legacy.isFile && legacy.length() > 0L -> legacy
+        else -> null
     }
 
     /** Чтение кэша из конкретного файла (без Android Context) — покрыто юнит-тестом. */
@@ -195,8 +202,8 @@ object CatalogCache {
     fun savedAt(ctx: Context, storeUuid: String? = null): Long {
         return try {
             val f = File(ctx.applicationContext.filesDir, fileName(storeUuid))
-            val src = if (f.isFile && f.length() > 0L) f
-            else File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json").takeIf { it.isFile && it.length() > 0L }
+            val legacy = File(ctx.applicationContext.filesDir, "catalog_enrich_v1.json")
+            val src = pickSource(f, legacy, storeUuid)
             src?.let { JSONObject(it.readText()).optLong("savedAt", 0L) } ?: 0L
         } catch (_: Throwable) {
             0L

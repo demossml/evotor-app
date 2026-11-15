@@ -49,6 +49,46 @@ class CardProgressTest {
     }
 
     @Test
+    fun `server kind token wins over dotless code shape`() {
+        val info = parse(
+            """{ "kind": "token", "paidCups": 0, "cupsForFree": 5, "freeAvailable": 1,
+                "cashback": 0, "freeStatus": "RESERVED", "reservationId": "R-1",
+                "reservationExpiresAt": 9999999999 }""",
+            code = "opaque-token-without-dot",
+        )
+        val p = CardProgress.of(info, nowSec = 1_000)
+        assertEquals("token", p.kind)
+        assertTrue(p.redeemEnabled)
+    }
+
+    @Test
+    fun `server kind code wins over dotted code shape`() {
+        val info = parse(
+            """{ "kind": "code", "paidCups": 0, "cupsForFree": 5, "freeAvailable": 1,
+                "freeStatus": "RESERVED", "reservationId": "R-1",
+                "reservationExpiresAt": 9999999999 }""",
+            code = "12.34",
+        )
+        val p = CardProgress.of(info, nowSec = 1_000)
+        assertEquals("code", p.kind)
+        assertFalse(p.redeemEnabled)
+    }
+
+    @Test
+    fun `token with canRedeem false cannot redeem even with reservation`() {
+        val info = parse(
+            """{ "canRedeem": false, "paidCups": 0, "cupsForFree": 5, "freeAvailable": 1,
+                "cashback": 1500, "freeStatus": "RESERVED", "reservationId": "R-1",
+                "reservationExpiresAt": 9999999999 }""",
+            code = "payload.signature",
+        )
+        val p = CardProgress.of(info, nowSec = 1_000)
+        assertFalse(p.redeemEnabled)
+        // Показ заработанного подарка сохраняется, но списание запрещено сервером.
+        assertTrue(p.giftAvailable)
+    }
+
+    @Test
     fun `token without reservation cannot redeem`() {
         val info = parse(
             """{ "cardCode": "12", "paidCups": 2, "cupsForFree": 5, "freeAvailable": 1,
@@ -72,6 +112,22 @@ class CardProgressTest {
         assertFalse(CardProgress.of(info, nowSec = 2000).redeemEnabled)
         // В пределах допуска — ещё можно.
         assertTrue(CardProgress.of(info, nowSec = 1100).redeemEnabled)
+    }
+
+    @Test
+    fun `ui and fiscal use the same reservation grace`() {
+        val expiresAt = 1_000L
+        val inside = expiresAt + ReservationPolicy.GRACE_SEC - 1
+        val outside = expiresAt + ReservationPolicy.GRACE_SEC + 1
+        val info = CardInfo(
+            code = "payload.sig", cardCode = "12", paidCups = 0, cupsForFree = 5,
+            freeAvailable = 1, cashbackKopecks = 0, reservationId = "R-1",
+            reservationExpiresAt = expiresAt, freeStatus = "RESERVED", canRedeem = true,
+        )
+        assertEquals(true, DiscountCalc.reserved(info, inside))
+        assertEquals(true, CardProgress.of(info, inside).redeemEnabled)
+        assertEquals(false, DiscountCalc.reserved(info, outside))
+        assertEquals(false, CardProgress.of(info, outside).redeemEnabled)
     }
 
     @Test

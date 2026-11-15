@@ -104,7 +104,7 @@ class DiscountIntegrationService : IntegrationService() {
                         return
                     }
                     val now = System.currentTimeMillis() / 1000
-                    val reserved = DiscountCalc.reserved(info, now)
+                    val reserved = DiscountCalc.reserved(info, now) && info.canRedeem
                     val prices = receiptUnitPrices()
                     val receiptGross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                     // Если позиции открытого чека прочитать не удалось, берём корзину APK:

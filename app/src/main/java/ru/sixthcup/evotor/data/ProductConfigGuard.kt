@@ -9,6 +9,12 @@ package ru.sixthcup.evotor.data
  */
 object ProductConfigGuard {
 
+    /**
+     * Схема не получена, но товар относится к серверному каталогу/схемам.
+     * Показываем кассиру и блокируем «В чек»: продавать вслепую нельзя.
+     */
+    const val CONFIG_UNAVAILABLE = "Нет схемы с сервера — продажа заблокирована, повторите"
+
     /** `productId` объёма, к которому относится товар терминала (по uuid, id, размеру, имени). */
     fun volumeProductId(cfg: ProductConfig, ref: VolumeRef): Int? =
         VolumeResolver.resolve(cfg, ref)?.productId
@@ -21,7 +27,7 @@ object ProductConfigGuard {
 
     /** Совместимость: сопоставление только по uuid терминала. */
     fun blockers(cfg: ProductConfig?, volumeEvotorUuid: String?): List<String> =
-        blockers(cfg, VolumeRef(evotorUuid = volumeEvotorUuid))
+        blockers(cfg, VolumeRef(evotorUuid = volumeEvotorUuid), needsConfig = false)
 
     fun milkScheme(cfg: ProductConfig, ref: VolumeRef): MilkScheme? =
         volumeProductId(cfg, ref)?.let { cfg.milk?.byProductId?.get(it) }
@@ -62,8 +68,12 @@ object ProductConfigGuard {
      * Причины, по которым позицию нельзя отдать в чек при известной конфигурации.
      * Пустой список — ограничений нет (обязательные схемы либо не заданы, либо укомплектованы).
      */
-    fun blockers(cfg: ProductConfig?, ref: VolumeRef): List<String> {
-        val c = cfg ?: return emptyList()
+    fun blockers(cfg: ProductConfig?, ref: VolumeRef, needsConfig: Boolean = false): List<String> {
+        val c = cfg
+        if (c == null) {
+            // Товар связан с сервером/схемами, но достоверной configuration нет — не продаём.
+            return if (needsConfig) listOf(CONFIG_UNAVAILABLE) else emptyList()
+        }
         val pid = volumeProductId(c, ref)
         if (c.volumes.isNotEmpty() && pid == null) {
             return listOf(

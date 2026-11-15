@@ -2,6 +2,7 @@ package ru.sixthcup.evotor.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.sixthcup.evotor.net.CatalogApi
@@ -105,6 +106,18 @@ class CatalogCacheTest {
             assertEquals("no_store_link", back?.byUuid?.get("u-43")?.notReadyReason)
         } finally {
             file.delete()
+        }
+    }
+
+    @Test
+    fun `legacy cache is not used when store is known`() {
+        val perStore = File.createTempFile("catalog-per", ".json").apply { delete() }
+        val legacy = File.createTempFile("catalog-legacy", ".json").apply { writeText("{}") }
+        try {
+            assertNull("чужой v1 при известной точке не читаем", CatalogCache.pickSource(perStore, legacy, "store-A"))
+            assertEquals(legacy, CatalogCache.pickSource(perStore, legacy, null))
+        } finally {
+            legacy.delete()
         }
     }
 

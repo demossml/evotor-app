@@ -55,7 +55,10 @@ object LoyaltyApi {
      * поля (`paid_total` → `paidCups`), а ручной код отдаёт остаток цикла — без `paidTotal`
      * прогресс не восстановить.
      */
-    internal fun parseResolve(o: JSONObject, code: String): CardInfo = CardInfo(
+    internal fun parseResolve(o: JSONObject, code: String): CardInfo {
+        val kind = o.optString("kind").trim().takeIf { it == "token" || it == "code" }
+            ?: if (code.contains('.')) "token" else "code"
+        return CardInfo(
         code = code,
         cardCode = o.optString("cardCode"),
         paidCups = intOf(o, "paidCups", "cups", "cupsTowardFree", "paid") ?: 0,
@@ -66,13 +69,17 @@ object LoyaltyApi {
         else o.optString("reservationId").ifBlank { null },
         reservationExpiresAt = longOf(o, "reservationExpiresAt", "reservation_expires_at") ?: 0L,
         freeStatus = o.optString("freeStatus", "NONE"),
+        // Старый backend без поля: QR-токен считаем правомочным, код — нет.
+        canRedeem = o.optBoolean("canRedeem", kind != "code"),
+        kind = kind,
         // Сервер пока не присылает seq; поле читается на будущее и не влияет на чек.
         seq = intOf(o, "seq")?.takeIf { it > 0 },
         paidTotal = intOf(o, "paidTotal", "paid_total")?.takeIf { it >= 0 },
         freeUsed = intOf(o, "freeUsed", "free_used")?.takeIf { it >= 0 },
         // Отсутствие поля — не ошибка: старый backend просто не присылает ваучеры.
         vouchers = VoucherJson.parse(o.optJSONArray("vouchers")),
-    )
+        )
+    }
 
     private fun intOf(o: JSONObject, vararg keys: String): Int? {
         for (k in keys) {

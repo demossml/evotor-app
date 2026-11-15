@@ -109,7 +109,7 @@ object LoyaltyPreview {
             )
         }
         if (card == null || card.code.isEmpty()) return Benefits.NONE.copy(payable = gross.max(BigDecimal.ZERO))
-        val reserved = DiscountCalc.reserved(card, nowSec)
+        val reserved = DiscountCalc.reserved(card, nowSec) && card.canRedeem
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
         val calc = DiscountCalc.compute(
             gross = gross,
@@ -149,9 +149,10 @@ object LoyaltyPreview {
     /** Можно ли предложить гостю выбор льготы сразу после привязки карты. */
     fun canOffer(card: CardInfo?, nowSec: Long): Boolean {
         if (card == null || card.code.isEmpty() || card.errorCode != null) return false
+        if (!card.canRedeem) return false
         if (card.freeStatus == "OFFLINE" || card.freeStatus == "ERROR") return false
         // Ручной числовой код не даёт списания: резерва нет, backend льготы не применит.
-        if (CardSession.kindOf(card.code) != "token") return false
+        if (CardSession.effectiveKind(card) != "token") return false
         if (!DiscountCalc.reserved(card, nowSec)) return false
         return card.freeAvailable > 0 || card.vouchers.isNotEmpty()
     }

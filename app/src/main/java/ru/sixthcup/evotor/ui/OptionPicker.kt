@@ -112,9 +112,25 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     private var defSyrup: Opt? = null
     private var defSugar: Opt? = null
 
-    private companion object {
+    companion object {
         /** Опции из номенклатуры Эвотор: «можно несколько» без схемного maxCount. */
-        const val UNLIMITED = 99
+        private const val UNLIMITED = 99
+
+        /** Только опции, которые реально идут отдельной позицией/влияют на сумму чека. */
+        internal fun billableSelection(
+            milk: Opt?,
+            syrup: Opt?,
+            sugar: Opt?,
+            extras: Collection<Opt>,
+        ): List<Opt> = (listOfNotNull(milk, syrup, sugar) + extras).filter { it.sendToReceipt }
+
+        /** Сумма выбранных billable-опций; `sendToReceipt=false` (print-only) не входит. */
+        internal fun billableSum(
+            milk: Opt?,
+            syrup: Opt?,
+            sugar: Opt?,
+            extras: Collection<Opt>,
+        ): BigDecimal = billableSelection(milk, syrup, sugar, extras).fold(BigDecimal.ZERO) { acc, o -> acc.add(o.price) }
     }
 
     private val density = resources.displayMetrics.density
@@ -205,12 +221,8 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     val selectedVariant: CatalogProduct? get() = variant
 
     fun unitPrice(): BigDecimal {
-        var sum = variant?.priceRub ?: BigDecimal.ZERO
-        milk?.let { sum = sum.add(it.price) }
-        syrup?.let { sum = sum.add(it.price) }
-        sugar?.let { sum = sum.add(it.price) }
-        extras.values.forEach { sum = sum.add(it.price) }
-        return sum
+        val base = variant?.priceRub ?: BigDecimal.ZERO
+        return base.add(billableSum(milk, syrup, sugar, extras.values))
     }
 
     /** Состав для строки чека: объём + не-дефолтные опции (как `modsLine` в index). */
@@ -244,7 +256,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
 
     /** Выбранные опции с товаром Эвотор — отдельные строки чека (zero-option без uuid не входят). */
     fun chosen(): List<Opt> =
-        (listOfNotNull(milk, syrup, sugar) + extras.values)
+        billableSelection(milk, syrup, sugar, extras.values)
             .filter { it.sellable && !it.zeroOption && !it.evotorUuid.isNullOrBlank() }
 
     /**

@@ -80,6 +80,7 @@ class VoucherTest {
         reservationExpiresAt = 0L,
         freeStatus = if (reservationId != null) "RESERVED" else "NONE",
         vouchers = listOf(percent),
+        canRedeem = true,
     )
 
     @Test
