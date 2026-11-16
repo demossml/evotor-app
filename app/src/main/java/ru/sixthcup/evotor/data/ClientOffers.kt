@@ -20,7 +20,7 @@ data class ClientOffers(
             val voucherRedeemable = card.canRedeem && reserved && CardSession.effectiveKind(card) == "token"
             return ClientOffers(
                 gift = card.canRedeem && card.freeAvailable > 0 && reserved,
-                cashback = card.canRedeem && reserved && card.cashbackKopecks > 0,
+                cashback = CardSession.cashbackRedeemable(card, reserved) && card.cashbackKopecks > 0,
                 vouchers = if (voucherRedeemable) card.vouchers else emptyList(),
             )
         }

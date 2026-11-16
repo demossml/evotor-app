@@ -64,7 +64,8 @@ object LoyaltyApi {
         paidCups = intOf(o, "paidCups", "cups", "cupsTowardFree", "paid") ?: 0,
         cupsForFree = intOf(o, "cupsForFree", "cups_for_free", "goal")?.takeIf { it > 0 } ?: 5,
         freeAvailable = intOf(o, "freeAvailable", "free_available") ?: 0,
-        cashbackKopecks = longOf(o, "cashback", "cashbackKopecks", "cashback_kopecks") ?: 0L,
+        cashbackKopecks = longOf(o, "balanceKopecks", "balance_kopecks", "balance", "cashback", "cashbackKopecks", "cashback_kopecks") ?: 0L,
+        balanceKopecks = longOf(o, "balanceKopecks", "balance_kopecks", "balance", "cashback", "cashbackKopecks", "cashback_kopecks") ?: 0L,
         reservationId = if (!o.has("reservationId") || o.isNull("reservationId")) null
         else o.optString("reservationId").ifBlank { null },
         reservationExpiresAt = longOf(o, "reservationExpiresAt", "reservation_expires_at") ?: 0L,
@@ -72,6 +73,9 @@ object LoyaltyApi {
         // Старый backend без поля: QR-токен считаем правомочным, код — нет.
         canRedeem = o.optBoolean("canRedeem", kind != "code"),
         kind = kind,
+        identifiedBy = if (kind == "token") "QR" else "CODE",
+        effectiveEarnPercent = intOf(o, "effectiveEarnPercent", "effective_earn_percent", "earnPercent", "percent"),
+        phoneMasked = o.optString("phoneMasked", o.optString("phone_masked")).trim().takeIf { it.isNotEmpty() },
         // Сервер пока не присылает seq; поле читается на будущее и не влияет на чек.
         seq = intOf(o, "seq")?.takeIf { it > 0 },
         paidTotal = intOf(o, "paidTotal", "paid_total")?.takeIf { it >= 0 },

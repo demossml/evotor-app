@@ -104,7 +104,8 @@ class DiscountIntegrationService : IntegrationService() {
                         return
                     }
                     val now = System.currentTimeMillis() / 1000
-                    val reserved = DiscountCalc.reserved(info, now) && info.canRedeem
+                    val reservedBase = DiscountCalc.reserved(info, now)
+                    val reserved = reservedBase && info.canRedeem
                     val prices = receiptUnitPrices()
                     val receiptGross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                     // Если позиции открытого чека прочитать не удалось, берём корзину APK:
@@ -138,6 +139,7 @@ class DiscountIntegrationService : IntegrationService() {
                             chosenVoucher,
                             DiscountCalc.freeApplies(reserved, choice.free, info.freeAvailable, eligibleUnitPrices),
                         ),
+                        cashbackAllowed = CardSession.cashbackRedeemable(info, reservedBase),
                     )
                     val freeDiscount = calc.free
                     val cbRub = calc.cashback
@@ -152,7 +154,8 @@ class DiscountIntegrationService : IntegrationService() {
                     val split = FiscalCalc.split(gross, eligibleUnitPrices, info, choice, now)
                     var discountKopecks = (split.receiptDiscountKopecks + comboKopecks).coerceAtMost(grossKopecks)
                     val total = BigDecimal(discountKopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN)
-                    val cbKopecks = DiscountCalc.kopecks(cbRub)
+                    // Фактическая скидка после пола 1 ₽; cb в extras не должен превышать её.
+                    val cbKopecks = split.receiptDiscountKopecks
                     val voucherApplied = calc.voucher.signum() > 0
                     logDiscount(
                         reserved = reserved,

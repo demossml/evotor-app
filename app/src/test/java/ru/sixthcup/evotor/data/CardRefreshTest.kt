@@ -59,6 +59,20 @@ class CardRefreshTest {
     }
 
     @Test
+    fun `phone metadata survives a resolve refresh`() {
+        val current = card().copy(
+            identifiedBy = "PHONE", phoneMasked = "+7 ••• ••• 45 67", effectiveEarnPercent = 5,
+        )
+        val fresh = card(paidCups = 4)
+        val r = CardRefresh.apply(current, fresh)
+        assertEquals(RefreshOutcome.UPDATED, r.outcome)
+        assertEquals("PHONE", r.info?.identifiedBy)
+        assertEquals("+7 ••• ••• 45 67", r.info?.phoneMasked)
+        assertEquals(5, r.info?.effectiveEarnPercent)
+        assertEquals(4, r.info?.paidCups)
+    }
+
+    @Test
     fun `rejected card drops the session`() {
         val r = CardRefresh.apply(card(), card(code = "", cardCode = "", freeStatus = "ERROR"))
         assertEquals(RefreshOutcome.DROPPED, r.outcome)

@@ -44,7 +44,8 @@ object FiscalCalc {
         if (card == null || card.code.isEmpty()) {
             return FiscalSplit(0L, 0L, giftApplied = false, voucherId = null, floorApplied = false)
         }
-        val reserved = DiscountCalc.reserved(card, nowSec) && card.canRedeem
+        val reservedBase = DiscountCalc.reserved(card, nowSec)
+        val reserved = reservedBase && card.canRedeem
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
         val calc = DiscountCalc.compute(
             gross = gross,
@@ -59,6 +60,7 @@ object FiscalCalc {
                 voucher,
                 DiscountCalc.freeApplies(reserved, choice.free, card.freeAvailable, eligibleUnitPrices),
             ),
+            cashbackAllowed = CardSession.cashbackRedeemable(card, reservedBase),
         )
         val giftApplied = calc.free.signum() > 0
         val voucherApplied = calc.voucher.signum() > 0
@@ -68,9 +70,21 @@ object FiscalCalc {
             (cheapestEligible - DiscountCalc.GIFT_FISCAL_MIN_KOPECKS).coerceAtLeast(0L)
         } else 0L
         var positionDiscount = (giftDiscount + DiscountCalc.kopecks(calc.voucher)).coerceAtMost(grossKopecks)
-        val receiptDiscount = DiscountCalc.kopecks(calc.cashback).coerceAtMost(grossKopecks)
+        var receiptDiscount = DiscountCalc.kopecks(calc.cashback).coerceAtMost(grossKopecks)
 
         var floor = false
+        // Кэшбэк может покрыть 100% корзины, но не может сделать чек нулевым.
+        if (receiptDiscount > 0L) {
+            if (grossKopecks < DiscountCalc.GIFT_FISCAL_MIN_KOPECKS) {
+                receiptDiscount = 0L
+            } else {
+                val maxReceipt = (grossKopecks - DiscountCalc.GIFT_FISCAL_MIN_KOPECKS).coerceAtLeast(0L)
+                if (receiptDiscount > maxReceipt) {
+                    receiptDiscount = maxReceipt
+                    floor = true
+                }
+            }
+        }
         if (giftApplied || voucherApplied) {
             if (grossKopecks < DiscountCalc.GIFT_FISCAL_MIN_KOPECKS) {
                 // Чек дешевле рубля не раздуваем: скидки нет.

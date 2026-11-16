@@ -80,13 +80,15 @@ object DiscountCalc {
         voucher: ResolveVoucher? = null,
         /** false, если ваучер нельзя применить вместе с подарком (stackableWithFreeCup = false). */
         voucherAllowed: Boolean = true,
+        /** Кэшбэк разрешён сервером; phone-bonus не требует reservationId. */
+        cashbackAllowed: Boolean = reserved,
     ): Result {
         val free = if (freeApplies(reserved, freeChosen, freeAvailable, eligibleUnitPrices))
             eligibleUnitPrices.minOrNull()!!.setScale(2, RoundingMode.DOWN) else BigDecimal.ZERO
         val remaining = gross.subtract(free).max(BigDecimal.ZERO)
         val voucherRub = voucherDiscount(remaining, voucher, reserved, voucherAllowed)
         // Кэшбэк — только когда денежная скидка ваучера не применена: суммировать нельзя.
-        val cb = if (reserved && requestedCashbackKopecks > 0L && voucherRub.signum() == 0)
+        val cb = if (cashbackAllowed && requestedCashbackKopecks > 0L && voucherRub.signum() == 0)
             BigDecimal(requestedCashbackKopecks.coerceAtMost(cardCashbackKopecks)).divide(BigDecimal(100), 2, RoundingMode.DOWN)
                 .min(remaining.subtract(voucherRub).max(BigDecimal.ZERO))
         else BigDecimal.ZERO
@@ -121,12 +123,13 @@ object DiscountCalc {
         val result = compute(
             gross, eligibleUnitPrices, reserved, choice.free, card.freeAvailable,
             choice.cashbackKopecks, card.cashbackKopecks, voucher, allowed,
+            cashbackAllowed = CardSession.cashbackRedeemable(card, reserved),
         )
         val giftApplied = result.free.signum() > 0
         val voucherApplied = result.voucher.signum() > 0
         var discount = kopecks(result.total).coerceIn(0L, grossKopecks)
         var net = (grossKopecks - discount).coerceAtLeast(0L)
-        val needsFloor = giftApplied || voucherApplied
+        val needsFloor = giftApplied || voucherApplied || result.cashback.signum() > 0
         val floor = needsFloor && net < GIFT_FISCAL_MIN_KOPECKS && grossKopecks >= GIFT_FISCAL_MIN_KOPECKS
         if (floor) {
             net = GIFT_FISCAL_MIN_KOPECKS

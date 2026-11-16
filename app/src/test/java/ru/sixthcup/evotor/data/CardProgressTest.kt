@@ -131,6 +131,19 @@ class CardProgressTest {
     }
 
     @Test
+    fun `bonus balance and earn percent are parsed`() {
+        val info = parse(
+            """{ "kind": "code", "balanceKopecks": 1250, "effectiveEarnPercent": 5,
+                "phoneMasked": "+7 ••• ••• 45 67", "paidCups": 0, "cupsForFree": 5 }""",
+        )
+        assertEquals(1250L, info.cashbackKopecks)
+        assertEquals(1250L, info.balanceKopecks)
+        assertEquals(5, info.effectiveEarnPercent)
+        assertEquals("+7 ••• ••• 45 67", info.phoneMasked)
+        assertEquals("CODE", info.identifiedBy)
+    }
+
+    @Test
     fun `true zero stays zero`() {
         val info = parse("""{ "paidCups": 0, "cupsForFree": 5, "freeAvailable": 0, "cashback": 0, "freeStatus": "NONE" }""")
         val p = CardProgress.of(info)

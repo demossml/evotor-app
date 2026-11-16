@@ -59,6 +59,17 @@ class FiscalDiscountTest {
     }
 
     @Test
+    fun `phone bonus can cover 100 percent but leaves 1 ruble`() {
+        val phone = card(freeAvailable = 0, reservationId = null, canRedeem = true).copy(
+            identifiedBy = "PHONE", cashbackKopecks = 25000, balanceKopecks = 25000,
+        )
+        val s = FiscalCalc.split(d("250"), listOf(d("250")), phone, choice(cashback = true, kopecks = 25000), now)
+        assertEquals(24900L, s.receiptDiscountKopecks)
+        assertEquals(0L, s.positionDiscountKopecks)
+        assertTrue(s.floorApplied)
+    }
+
+    @Test
     fun `cashback stays on the receipt and is never doubled`() {
         val s = FiscalCalc.split(d("400"), emptyList(), card(freeAvailable = 0), choice(cashback = true, kopecks = 5000L), now)
         assertEquals(0L, s.positionDiscountKopecks)

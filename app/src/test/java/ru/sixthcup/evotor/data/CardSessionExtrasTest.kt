@@ -35,6 +35,45 @@ class CardSessionExtrasTest {
     )
 
     @Test
+    fun `phone bonus spend writes cb without free gift`() {
+        val info = CardInfo(
+            code = "0012",
+            cardCode = "12",
+            paidCups = 0,
+            cupsForFree = 5,
+            freeAvailable = 1,
+            cashbackKopecks = 5000,
+            balanceKopecks = 5000,
+            reservationId = null,
+            reservationExpiresAt = 0L,
+            freeStatus = "NONE",
+            canRedeem = true,
+            kind = "code",
+            identifiedBy = "PHONE",
+            effectiveEarnPercent = 5,
+            phoneMasked = "+7 ••• ••• 45 67",
+        )
+        val sc = CardSession.sc(info, freeApplied = true, cashbackKopecks = 3000)
+        assertEquals(0, sc.getInt("free"))
+        assertEquals(3000L, sc.getLong("cb"))
+        assertFalse(sc.has("op"))
+        assertEquals("code", sc.getString("kind"))
+        assertEquals("12", sc.getString("c"))
+    }
+
+    @Test
+    fun `phone bonus does not spend without canRedeem`() {
+        val info = CardInfo(
+            code = "0012", cardCode = "12", paidCups = 0, cupsForFree = 5,
+            freeAvailable = 0, cashbackKopecks = 5000, balanceKopecks = 5000,
+            reservationId = null, reservationExpiresAt = 0L, freeStatus = "NONE",
+            canRedeem = false, kind = "code", identifiedBy = "PHONE",
+        )
+        val sc = CardSession.sc(info, freeApplied = false, cashbackKopecks = 3000)
+        assertEquals(0L, sc.getLong("cb"))
+    }
+
+    @Test
     fun `extras nested under app uuid and flat sc are identical`() {
         val extras = CardSession.extras(card(), freeApplied = true, cashbackKopecks = 500)
         val nested = extras.getJSONObject(BuildConfig.APP_UUID).getJSONObject("sc")

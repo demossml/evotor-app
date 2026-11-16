@@ -95,6 +95,8 @@ import ru.sixthcup.evotor.data.DrinkVariants
 import ru.sixthcup.evotor.data.InventoryRepository
 import ru.sixthcup.evotor.data.MenuTabs
 import ru.sixthcup.evotor.data.PendingPayment
+import ru.sixthcup.evotor.data.PhoneUtil
+import ru.sixthcup.evotor.data.BonusSpend
 import ru.sixthcup.evotor.data.OrderBenefit
 import ru.sixthcup.evotor.data.PreorderAutoPull
 import ru.sixthcup.evotor.data.PreorderPaid
@@ -108,6 +110,7 @@ import ru.sixthcup.evotor.net.DeviceHeaders
 import ru.sixthcup.evotor.net.LoyaltyApi
 import ru.sixthcup.evotor.net.QueueNumberApi
 import ru.sixthcup.evotor.net.CatalogApi
+import ru.sixthcup.evotor.net.CustomersApi
 import ru.sixthcup.evotor.net.ProductConfigApi
 import ru.sixthcup.evotor.net.ProductConfigPolicy
 import ru.sixthcup.evotor.net.StoreUuidResolver
@@ -729,6 +732,249 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeGuestSheet() { guestDialog?.dismiss() }
 
+    /**
+     * Бонусная карта по телефону: lookup/register без PWA. Телефон уходит цифрами,
+     * сервер возвращает маску/баланс/процент; register — только после явного consent.
+     */
+    private fun showPhoneCardSheet() {
+        val dialog = BottomSheetDialog(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(WHITE)
+        }
+        sheetHead(root, "Карта кэшбэка", "Телефон гостя — без PWA") { dialog.dismiss() }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, dp(16), dp(16))
+        }
+        sheetScroll(root, box)
+
+        val result = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var busy = false
+
+        fun money(kopecks: Long): String =
+            rub(BigDecimal(kopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN))
+
+        fun showError(text: String) {
+            result.removeAllViews()
+            result.addView(banner(text, Kind.WARN, 11f))
+        }
+
+        val phone = EditText(this).apply {
+            hint = "+7 (900) 123-45-67"
+            setRawInputType(InputType.TYPE_CLASS_PHONE)
+            isSingleLine = true
+            textSize = 13f
+            setTextColor(INK)
+            setHintTextColor(UiKit.MUTED)
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            background = rounded(WHITE, 11, LINE)
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        var formatting = false
+        phone.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (formatting) return
+                val formatted = PhoneUtil.format(s?.toString())
+                if (formatted != s?.toString()) {
+                    formatting = true
+                    phone.setText(formatted)
+                    phone.setSelection(formatted.length)
+                    formatting = false
+                }
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+
+        fun renderProfile(profile: CustomersApi.Profile, digits: String) {
+            result.removeAllViews()
+            val cardBox = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                background = rounded(UiKit.SURFACE_2, 14, UiKit.LINE)
+            }
+            cardBox.addView(TextView(this).apply {
+                text = "КАРТА КЭШБЭКА 6.7"
+                textSize = 9.5f
+                letterSpacing = 0.12f
+                weight(Fonts.SEMIBOLD)
+                setTextColor(UiKit.MUTED)
+            })
+            cardBox.addView(TextView(this).apply {
+                text = profile.phoneMasked ?: PhoneUtil.masked(digits)
+                textSize = 17f
+                weight(Fonts.STRONG)
+                setTextColor(INK)
+                setPadding(0, dp(3), 0, 0)
+            })
+            cardBox.addView(TextView(this).apply {
+                text = "Баланс: " + money(profile.balanceKopecks)
+                textSize = 12f
+                weight(Fonts.SEMIBOLD)
+                setTextColor(INK)
+                setPadding(0, dp(6), 0, 0)
+            })
+            cardBox.addView(TextView(this).apply {
+                text = "Кэшбэк: " + (profile.effectiveEarnPercent?.let { "$it%" } ?: "—")
+                textSize = 11f
+                setTextColor(UiKit.MUTED)
+                setPadding(0, dp(2), 0, 0)
+            })
+            result.addView(cardBox, LinearLayout.LayoutParams(MATCH, WRAP))
+
+            fun bind(after: (CardInfo) -> Unit) {
+                if (busy) return
+                busy = true
+                result.addView(banner("Проверяем карту…", Kind.INFO, 11f),
+                    LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
+                val cardCode = profile.cardCode?.trim().orEmpty().ifBlank { digits }
+                thread(name = "phone-card-bind") {
+                    val resolved = LoyaltyApi.resolve(cardCode)
+                    runOnUiThread {
+                        busy = false
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        if (resolved.freeStatus == "ERROR" && resolved.code.isEmpty()) {
+                            showError(resolved.note ?: "Карта не найдена на сервере")
+                            return@runOnUiThread
+                        }
+                        val info = if (resolved.code.isNotEmpty()) {
+                            resolved.copy(
+                                code = cardCode,
+                                cardCode = cardCode,
+                                cashbackKopecks = profile.balanceKopecks,
+                                balanceKopecks = profile.balanceKopecks,
+                                effectiveEarnPercent = profile.effectiveEarnPercent,
+                                phoneMasked = profile.phoneMasked ?: PhoneUtil.masked(digits),
+                                identifiedBy = "PHONE",
+                                kind = resolved.kind ?: "code",
+                            )
+                        } else {
+                            CardInfo(
+                                code = cardCode, cardCode = cardCode, paidCups = 0, cupsForFree = 5,
+                                freeAvailable = 0, cashbackKopecks = profile.balanceKopecks,
+                                balanceKopecks = profile.balanceKopecks, reservationId = null,
+                                reservationExpiresAt = 0L, freeStatus = "OFFLINE", canRedeem = false,
+                                kind = "code", identifiedBy = "PHONE",
+                                effectiveEarnPercent = profile.effectiveEarnPercent,
+                                phoneMasked = profile.phoneMasked ?: PhoneUtil.masked(digits),
+                                note = resolved.note,
+                            )
+                        }
+                        CardSession.set(this, info)
+                        lastCardCode = cardCode
+                        lastCardLabel = profile.phoneMasked ?: PhoneUtil.masked(digits)
+                        notice = if (info.canRedeem) null else
+                            "Карта привязана. Списание бонусов недоступно без подтверждения сервера."
+                        noticeKind = if (info.canRedeem) Kind.INFO else Kind.WARN
+                        screen = Screen.ORDER
+                        safeRender()
+                        after(info)
+                    }
+                }
+            }
+
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(10), 0, 0)
+            }
+            actions.addView(btn("К заказу", "primary") { bind { dialog.dismiss() } },
+                LinearLayout.LayoutParams(0, dp(48), 1f))
+            actions.addView(btn("Списать бонусы", "ghost") { bind { info ->
+                dialog.dismiss()
+                handler.post { openBonusSpendSheet(info) }
+            } }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { leftMargin = dp(8) })
+            result.addView(actions, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+
+        fun renderRegister(digits: String) {
+            result.removeAllViews()
+            result.addView(banner("Номер не найден. Можно выпустить карту кэшбэка.", Kind.INFO, 11f))
+            val consent = android.widget.CheckBox(this).apply {
+                text = "Клиент согласен на обработку номера телефона для бонусной программы 6.7 COFFEE (версия v1)."
+                textSize = 11f
+                setTextColor(INK)
+                setPadding(0, dp(8), 0, dp(4))
+            }
+            lateinit var release: TextView
+            release = btn("Выпустить карту", "primary") {
+                if (busy || !consent.isChecked) return@btn
+                busy = true
+                release.isEnabled = false
+                release.alpha = 0.55f
+                result.addView(banner("Выпускаем карту…", Kind.INFO, 11f),
+                    LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
+                thread(name = "phone-card-register") {
+                    val profile = CustomersApi.register(digits, "v1")
+                    runOnUiThread {
+                        busy = false
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        if (!profile.ok) {
+                            showError(CustomersApi.errorText(profile.httpStatus, profile.error))
+                        } else if (profile.found || !profile.cardCode.isNullOrBlank()) {
+                            renderProfile(profile, digits)
+                        } else {
+                            showError("Карта не выпущена. Повторите или обратитесь к администратору.")
+                        }
+                    }
+                }
+            }
+            release.isEnabled = false
+            release.alpha = 0.55f
+            consent.setOnCheckedChangeListener { _, checked ->
+                release.isEnabled = checked
+                release.alpha = if (checked) 1f else 0.55f
+            }
+            result.addView(consent, LinearLayout.LayoutParams(MATCH, WRAP))
+            result.addView(release, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(8) })
+        }
+
+        fun search() {
+            if (busy) return
+            val digits = PhoneUtil.normalize(phone.text.toString())
+            if (!PhoneUtil.isValid(digits)) {
+                showError("Введите российский номер: +7 и 10 цифр.")
+                return
+            }
+            busy = true
+            result.removeAllViews()
+            result.addView(banner("Ищем карту…", Kind.INFO, 11f))
+            thread(name = "phone-card-lookup") {
+                val profile = CustomersApi.lookup(digits)
+                runOnUiThread {
+                    busy = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (!profile.ok) {
+                        showError(CustomersApi.errorText(profile.httpStatus, profile.error))
+                    } else if (profile.found) {
+                        renderProfile(profile, digits)
+                    } else {
+                        renderRegister(digits)
+                    }
+                }
+            }
+        }
+
+        val find = btn("Найти", "primary") { search() }
+        phone.setOnEditorActionListener { _, action, _ ->
+            if (action == EditorInfo.IME_ACTION_SEARCH || action == EditorInfo.IME_ACTION_DONE) {
+                search(); true
+            } else false
+        }
+        box.addView(phone, LinearLayout.LayoutParams(MATCH, dp(50)))
+        box.addView(find, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(10) })
+        box.addView(result, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
+        box.addView(noteRow("Телефон нужен только для бонусной карты. Процент начисления задаёт сервер — бариста его не меняет."),
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+
+        Fonts.apply(root)
+        dialog.setContentView(root)
+        styleSheet(dialog)
+        dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
+    }
+
     private fun fillGuest() {
         val body = guestBody ?: return
         body.removeAllViews()
@@ -845,6 +1091,8 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { if (!resolving) resolve(field.text.toString()) }
         }, LinearLayout.LayoutParams(dp(46), dp(44)).apply { leftMargin = dp(7) })
         body.addView(row)
+        body.addView(btn("Телефон / карта кэшбэка", "ghost") { showPhoneCardSheet() },
+            LinearLayout.LayoutParams(MATCH, dp(46)).apply { topMargin = dp(8) })
 
         val last = lastCardCode
         if (last != null && !resolving) {
@@ -4032,11 +4280,13 @@ class MainActivity : AppCompatActivity() {
             if (cbPossible) {
                 add(
                     choiceCell(
-                        "Списать кэшбэк",
-                        "до ${card.cashbackKopecks / 100} ₽",
+                        "Оплатить бонусами",
+                        "до ${(if (card.balanceKopecks > 0) card.balanceKopecks else card.cashbackKopecks) / 100} ₽ · сумму можно изменить",
                         useCashback,
                     ) {
-                        useCashback = true; useGift = false; selectedVoucher = null; paint()
+                        // Сумму выбирает отдельный лист: до 100% корзины, с полом 1 ₽ в чеке.
+                        dialog.dismiss()
+                        openBonusSpendSheet(card)
                     },
                 )
             }
@@ -4168,6 +4418,112 @@ class MainActivity : AppCompatActivity() {
      * Перед передачей в чек. Экрана оплаты в APK нет: способ оплаты, сумма, сдача и чек — это Эвотор POS.
      * Здесь решается только льгота по карте гостя (подарок / списание кэшбэка) — и только из резерва.
      */
+    /** Списание бонусов до 100% корзины: кассир может уменьшить сумму ползунком. */
+    private fun openBonusSpendSheet(card: CardInfo) {
+        val balance = if (card.balanceKopecks > 0) card.balanceKopecks else card.cashbackKopecks
+        val cartKopecks = DiscountCalc.kopecks(Cart.gross())
+        val max = BonusSpend.maxSpendKopecks(balance, cartKopecks)
+        val canSpend = CardSession.cashbackRedeemable(
+            card, DiscountCalc.reserved(card, System.currentTimeMillis() / 1000),
+        )
+        val dialog = BottomSheetDialog(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(WHITE)
+        }
+        sheetHead(root, "Списать бонусы", card.phoneMasked ?: card.cardCode.ifBlank { "карта гостя" }) { dialog.dismiss() }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, dp(16), dp(16))
+        }
+        sheetScroll(root, box)
+
+        fun money(kopecks: Long): String =
+            rub(BigDecimal(kopecks).divide(BigDecimal(100), 2, RoundingMode.DOWN))
+
+        if (!canSpend || max <= 0L) {
+            box.addView(noteRow(
+                when {
+                    !canSpend -> "Сервер не разрешил списание бонусов по этой карте."
+                    balance <= 0L -> "На карте нет бонусов."
+                    else -> "Корзина пуста — сначала добавьте напиток."
+                },
+            ), LinearLayout.LayoutParams(MATCH, WRAP))
+            box.addView(btn("Понятно", "ghost") { dialog.dismiss() },
+                LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(12) })
+            Fonts.apply(root)
+            dialog.setContentView(root)
+            styleSheet(dialog)
+            dialog.show()
+            dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+            dialog.behavior.skipCollapsed = true
+            return
+        }
+
+        val maxUi = minOf(max, Int.MAX_VALUE.toLong()).toInt()
+        var spendKopecks = maxUi.toLong()
+        val amount = TextView(this).apply {
+            textSize = 24f
+            weight(Fonts.STRONG)
+            setTextColor(INK)
+        }
+        fun paintAmount() {
+            amount.text = money(spendKopecks)
+        }
+        paintAmount()
+        val seek = android.widget.SeekBar(this).apply {
+            this.max = maxUi.coerceAtLeast(1)
+            progress = maxUi
+        }
+
+        box.addView(TextView(this).apply {
+            text = "Доступно: ${money(balance)} · в корзине: ${money(cartKopecks)}"
+            textSize = 11f
+            setTextColor(UiKit.MUTED)
+        })
+        box.addView(amount, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
+        val coverHint = TextView(this).apply {
+            text = if (spendKopecks >= cartKopecks) "Покрывает 100% корзины (в чеке останется 1 ₽)" else "Частичное списание"
+            textSize = 10f
+            setTextColor(UiKit.MUTED)
+        }
+        box.addView(coverHint)
+        box.addView(seek, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
+        val apply = btn("Списать ${money(spendKopecks)}", "primary") {
+            val spend = BonusSpend.clamp(spendKopecks, balance, cartKopecks)
+            if (spend <= 0L) return@btn
+            CheckoutChoice.save(this, free = false, cashback = true, cashbackKopecks = spend, voucherId = null)
+            notice = "Бонусы к списанию: ${money(spend)}"
+            noticeKind = Kind.INFO
+            dialog.dismiss()
+            screen = Screen.ORDER
+            safeRender()
+        }
+        seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                spendKopecks = BonusSpend.clamp(progress.toLong(), balance, cartKopecks)
+                paintAmount()
+                apply.text = "Списать ${money(spendKopecks)}"
+                coverHint.text = if (spendKopecks >= cartKopecks) {
+                    "Покрывает 100% корзины (в чеке останется 1 ₽)"
+                } else {
+                    "Частичное списание"
+                }
+            }
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar?) {}
+        })
+        box.addView(apply, LinearLayout.LayoutParams(MATCH, dp(50)).apply { topMargin = dp(12) })
+        box.addView(noteRow("Процент начисления задаёт сервер; бариста меняет только сумму списания."),
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
+        Fonts.apply(root)
+        dialog.setContentView(root)
+        styleSheet(dialog)
+        dialog.show()
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+        dialog.behavior.skipCollapsed = true
+    }
+
     private fun openLoyaltyOrSend(card: CardInfo?) {
         if (Cart.isEmpty()) {
             notice = "Корзина пуста — добавьте позиции."
@@ -5500,6 +5856,14 @@ class MainActivity : AppCompatActivity() {
                     textSize = 10.5f
                     setTextColor(UiKit.MUTED)
                     setPadding(0, dp(8), 0, 0)
+                })
+            }
+            if (card.identifiedBy == "PHONE") {
+                root.addView(TextView(this).apply {
+                    text = "Бонусы за покупку появятся в течение нескольких минут."
+                    textSize = 10f
+                    setTextColor(UiKit.MUTED)
+                    setPadding(0, dp(6), 0, 0)
                 })
             }
         } else {

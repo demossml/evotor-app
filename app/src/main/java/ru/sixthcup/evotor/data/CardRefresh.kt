@@ -38,7 +38,15 @@ object CardRefresh {
     }
 
     fun apply(current: CardInfo, fetched: CardInfo): RefreshResult = when {
-        fetched.code.isNotEmpty() -> RefreshResult(RefreshOutcome.UPDATED, fetched)
+        fetched.code.isNotEmpty() -> RefreshResult(
+            RefreshOutcome.UPDATED,
+            fetched.copy(
+                // resolve по cardCode не знает телефон — не теряем метаданные бонусной карты.
+                phoneMasked = fetched.phoneMasked ?: current.phoneMasked,
+                effectiveEarnPercent = fetched.effectiveEarnPercent ?: current.effectiveEarnPercent,
+                identifiedBy = if (current.identifiedBy == "PHONE") "PHONE" else fetched.identifiedBy,
+            ),
+        )
         // Сервер явно отказал (карта удалена/заблокирована) — держать её на чеке нельзя.
         fetched.freeStatus == "ERROR" -> RefreshResult(RefreshOutcome.DROPPED, null)
         // OFFLINE и прочие сбои: показываем прежние данные, помечаем устаревшими.

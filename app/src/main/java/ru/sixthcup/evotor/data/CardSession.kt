@@ -16,6 +16,8 @@ data class CardInfo(
     val cupsForFree: Int,
     val freeAvailable: Int,
     val cashbackKopecks: Long,
+    /** Баланс бонусов из customers/resolve; для QR обычно совпадает с cashbackKopecks. */
+    val balanceKopecks: Long = cashbackKopecks,
     val reservationId: String?,
     val reservationExpiresAt: Long,
     /** "RESERVED" | "ALREADY_RESERVED" | "NONE" | "OFFLINE" | "ERROR" */
@@ -24,6 +26,11 @@ data class CardInfo(
     val canRedeem: Boolean = false,
     /** `token` | `code` из resolve; null у старого кэша — тогда fallback по форме кода. */
     val kind: String? = null,
+    /** `PHONE` | `QR` | `CODE` — чем гость идентифицирован. */
+    val identifiedBy: String = "QR",
+    /** Процент начисления, который показывает сервер. Бариста его не меняет. */
+    val effectiveEarnPercent: Int? = null,
+    val phoneMasked: String? = null,
     val note: String? = null,
     /** Причина отказа backend: invalid_card | card_not_found | card_blocked (для журнала). */
     val errorCode: String? = null,
@@ -55,6 +62,10 @@ object CardSession {
             .put("cb", info.cashbackKopecks).put("res", info.reservationId ?: JSONObject.NULL)
             .put("resExp", info.reservationExpiresAt).put("status", info.freeStatus)
             .put("canRedeem", info.canRedeem).put("kind", info.kind ?: JSONObject.NULL)
+            .put("balance", info.balanceKopecks)
+            .put("earnPercent", info.effectiveEarnPercent ?: JSONObject.NULL)
+            .put("phoneMasked", info.phoneMasked ?: JSONObject.NULL)
+            .put("identifiedBy", info.identifiedBy)
             .put("note", info.note ?: JSONObject.NULL)
             .put("seq", info.seq ?: JSONObject.NULL)
             .put("paidTotal", info.paidTotal ?: JSONObject.NULL)
@@ -75,14 +86,22 @@ object CardSession {
         }
         return try {
             val o = JSONObject(s)
+            val cb = o.optLong("cb")
             CardInfo(
                 code = o.getString("code"), cardCode = o.optString("cardCode"), paidCups = o.optInt("paidCups"),
                 cupsForFree = o.optInt("cupsForFree", 5), freeAvailable = o.optInt("freeAvailable"),
-                cashbackKopecks = o.optLong("cb"), reservationId = if (o.isNull("res")) null else o.getString("res"),
+                cashbackKopecks = cb,
+                balanceKopecks = if (o.has("balance") && !o.isNull("balance")) o.optLong("balance", cb) else cb,
+                reservationId = if (o.isNull("res")) null else o.getString("res"),
                 reservationExpiresAt = o.optLong("resExp"), freeStatus = o.optString("status", "NONE"),
                 // Старый кэш без поля: безопасный default false, до повторного resolve.
                 canRedeem = o.optBoolean("canRedeem", false),
                 kind = if (o.isNull("kind")) null else o.optString("kind").takeIf { it == "token" || it == "code" },
+                identifiedBy = o.optString("identifiedBy").ifBlank {
+                    if (o.optString("kind") == "token" || o.optString("code").contains('.')) "QR" else "CODE"
+                },
+                effectiveEarnPercent = if (o.has("earnPercent") && !o.isNull("earnPercent")) o.optInt("earnPercent") else null,
+                phoneMasked = if (o.isNull("phoneMasked")) null else o.optString("phoneMasked").takeIf { it.isNotBlank() },
                 note = if (o.isNull("note")) null else o.getString("note"),
                 seq = if (o.isNull("seq")) null else o.optInt("seq").takeIf { it > 0 },
                 paidTotal = if (!o.has("paidTotal") || o.isNull("paidTotal")) null else o.optInt("paidTotal"),
@@ -178,17 +197,18 @@ object CardSession {
             // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
             // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
             val reserved = card.reservationId != null
-            // Списать можно только когда сервер разрешил (canRedeem) и hold ещё жив.
-            val redeem = reserved && card.canRedeem
+            // Free gift требует hold; кэшбэк — только серверное право canRedeem (bonus-карта может быть без hold).
+            val freeRedeem = reserved && card.canRedeem
+            val cashbackRedeem = cashbackRedeemable(card, reserved)
             // Ваучер гасит backend только по QR-токену с резервом; по числовому коду ключа быть не должно.
-            val voucherOk = redeem && effectiveKind(card) == "token"
+            val voucherOk = freeRedeem && effectiveKind(card) == "token"
             o.put("c", c).put("kind", effectiveKind(card))
             if (reserved) o.put("op", card.reservationId)
             if (voucherOk && voucherId != null && voucherId > 0) o.put("voucherId", voucherId)
             // sc.q — диагностика sequence: пишем только если сервер реально его прислал.
             card.seq?.takeIf { it > 0 }?.let { o.put("q", it) }
-            o.put("free", if (redeem && freeApplied) 1 else 0)
-                .put("cb", if (redeem) cashbackKopecks.coerceAtLeast(0L) else 0L)
+            o.put("free", if (freeRedeem && freeApplied) 1 else 0)
+                .put("cb", if (cashbackRedeem) cashbackKopecks.coerceAtLeast(0L) else 0L)
         }
         // ord — канонический ключ связи с queue_numbers; qn — только для логов.
         // Пишем оба лишь когда номер реально получен от backend до открытия чека.
@@ -210,6 +230,13 @@ object CardSession {
     internal fun scValue(info: CardInfo): String =
         if (effectiveKind(info) == "token") info.code.trim()
         else info.cardCode.ifBlank { info.code }.trim()
+
+    /**
+     * Кэшбэк: QR/код требует hold (reserved), phone-bonus — только серверный canRedeem.
+     * Так бонусная карта может списываться без reservationId, не открывая free-gift.
+     */
+    fun cashbackRedeemable(info: CardInfo, reserved: Boolean): Boolean =
+        info.canRedeem && (reserved || info.identifiedBy.equals("PHONE", ignoreCase = true))
 
     /** Серверный kind, иначе — форма кода: подписанный QR содержит точку, короткий код — только цифры. */
     fun effectiveKind(info: CardInfo): String =

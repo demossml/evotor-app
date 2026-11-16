@@ -175,7 +175,8 @@ object SellLauncher {
                     )
                 }
                 card != null && card.code.isNotEmpty() -> {
-                    val reserved = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000) && card.canRedeem
+                    val reservedBase = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
+                    val reserved = reservedBase && card.canRedeem
                     val eligible = Cart.giftEligibleLines().map { it.priceRub }
                     val voucher = card.vouchers.firstOrNull { it.id == voucherId }
                     val calc = DiscountCalc.compute(
@@ -186,9 +187,11 @@ object SellLauncher {
                             voucher,
                             DiscountCalc.freeApplies(reserved, freeApplied, card.freeAvailable, eligible),
                         ),
+                        cashbackAllowed = CardSession.cashbackRedeemable(card, reservedBase),
                     )
                     extrasFree = if (calc.free.signum() > 0) 1 else 0
-                    extrasCb = DiscountCalc.kopecks(calc.cashback)
+                    // Фактическая скидка после пола 1 ₽; иначе backend спишет больше, чем ушло в чек.
+                    extrasCb = split.receiptDiscountKopecks
                     extrasHasOp = card.reservationId != null
                     // Ваучер уходит только если он реально даёт скидку (резерв есть, stackable соблюдён).
                     extrasVoucher = if (calc.voucher.signum() > 0) voucher?.id ?: 0 else 0

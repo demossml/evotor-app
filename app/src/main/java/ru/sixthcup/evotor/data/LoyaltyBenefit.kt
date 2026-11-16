@@ -124,6 +124,7 @@ object LoyaltyPreview {
                 voucher,
                 DiscountCalc.freeApplies(reserved, choice.free, card.freeAvailable, eligible),
             ),
+            cashbackAllowed = CardSession.cashbackRedeemable(card, reserved),
         )
         // Итог — из того же расклада, что уходит в позиции и в скидку на чек: цифры не разойдутся.
         val bd = FiscalCalc.split(gross, eligible, card, choice, nowSec)

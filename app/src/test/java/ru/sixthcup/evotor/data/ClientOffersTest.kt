@@ -26,11 +26,13 @@ class ClientOffersTest {
         freeStatus: String = "RESERVED",
         vouchers: List<ResolveVoucher> = emptyList(),
         canRedeem: Boolean = true,
+        identifiedBy: String = "QR",
     ) = CardInfo(
         code = code, cardCode = cardCode, paidCups = paidCups, cupsForFree = cupsForFree,
         freeAvailable = freeAvailable, cashbackKopecks = cashbackKopecks,
         reservationId = reservationId, reservationExpiresAt = reservationExpiresAt,
         freeStatus = freeStatus, vouchers = vouchers, canRedeem = canRedeem,
+        identifiedBy = identifiedBy,
     )
 
     @Test
@@ -68,6 +70,20 @@ class ClientOffersTest {
     @Test
     fun `canRedeem false hides vouchers`() {
         val offers = ClientOffers.of(card(vouchers = listOf(voucher15), canRedeem = false), now)
+        assertTrue(offers.vouchers.isEmpty())
+    }
+
+    @Test
+    fun `phone bonus cashback works without reservation`() {
+        val offers = ClientOffers.of(
+            card(
+                code = "0012", reservationId = null, freeStatus = "NONE",
+                canRedeem = true, identifiedBy = "PHONE",
+            ),
+            now,
+        )
+        assertTrue(offers.cashback)
+        assertFalse(offers.gift)
         assertTrue(offers.vouchers.isEmpty())
     }
 
