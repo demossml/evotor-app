@@ -16,6 +16,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -748,7 +749,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), dp(16))
         }
-        sheetScroll(root, box)
+        val scroll = sheetScroll(root, box)
 
         val result = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var busy = false
@@ -768,7 +769,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 13f
             setTextColor(INK)
             setHintTextColor(UiKit.MUTED)
-            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            imeOptions = EditorInfo.IME_ACTION_GO
             background = rounded(WHITE, 11, LINE)
             setPadding(dp(12), 0, dp(12), 0)
         }
@@ -905,6 +906,12 @@ class MainActivity : AppCompatActivity() {
             if (checked) consent.error = null
         }
 
+        fun hidePhoneKeyboard() {
+            val imm = getSystemService(InputMethodManager::class.java)
+            imm?.hideSoftInputFromWindow(phone.windowToken, 0)
+            phone.clearFocus()
+        }
+
         fun search() {
             if (busy) return
             val national = PhoneUtil.nationalDigits(phone.text?.toString().orEmpty())
@@ -915,6 +922,8 @@ class MainActivity : AppCompatActivity() {
             if (!consent.isChecked) {
                 consent.error = PhoneCardService.CONSENT_MESSAGE
                 showError(PhoneCardService.CONSENT_MESSAGE)
+                scroll.post { scroll.smoothScrollTo(0, consent.top.coerceAtLeast(0)) }
+                consent.requestFocus()
                 return
             }
             val digits = PhoneUtil.toApiDigits(national)
@@ -926,6 +935,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     busy = false
                     if (isFinishing || isDestroyed) return@runOnUiThread
+                    hidePhoneKeyboard()
                     when (outcome) {
                         is PhoneCardService.Result.Profile -> renderProfile(outcome.profile, digits)
                         is PhoneCardService.Result.Error -> showError(outcome.message)
@@ -934,14 +944,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val find = btn("Найти / Выдать карту", "primary") { search() }
-        phone.setOnEditorActionListener { _, action, _ ->
-            if (action == EditorInfo.IME_ACTION_SEARCH || action == EditorInfo.IME_ACTION_DONE) {
-                search(); true
+        // Один и тот же путь для кнопки и действия IME «Готово/Найти».
+        fun submit() {
+            hidePhoneKeyboard()
+            search()
+        }
+
+        val find = btn("Найти / Выдать карту", "primary") { submit() }
+        phone.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_GO ||
+                actionId == EditorInfo.IME_ACTION_DONE ||
+                actionId == EditorInfo.IME_ACTION_SEARCH ||
+                actionId == EditorInfo.IME_NULL
+            ) {
+                submit(); true
             } else false
         }
-        box.addView(phone, LinearLayout.LayoutParams(MATCH, dp(50)))
-        box.addView(consent, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
+        // Согласие выше поля: его видно до открытия клавиатуры и после закрытия IME.
+        box.addView(consent, LinearLayout.LayoutParams(MATCH, WRAP))
+        box.addView(phone, LinearLayout.LayoutParams(MATCH, dp(50)).apply { topMargin = dp(6) })
         box.addView(find, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(10) })
         box.addView(result, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
         box.addView(noteRow("Телефон нужен только для бонусной карты. Процент начисления задаёт сервер — бариста его не меняет."),
@@ -951,6 +972,7 @@ class MainActivity : AppCompatActivity() {
         dialog.setContentView(root)
         styleSheet(dialog)
         dialog.show()
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
     }
