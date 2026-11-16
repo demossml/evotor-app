@@ -771,20 +771,27 @@ class MainActivity : AppCompatActivity() {
             background = rounded(WHITE, 11, LINE)
             setPadding(dp(12), 0, dp(12), 0)
         }
-        var formatting = false
+        var phoneMaskLock = false
         phone.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                if (formatting) return
-                val formatted = PhoneUtil.format(s?.toString())
-                if (formatted != s?.toString()) {
-                    formatting = true
-                    phone.setText(formatted)
-                    phone.setSelection(formatted.length)
-                    formatting = false
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (phoneMaskLock) return
+                phoneMaskLock = true
+                try {
+                    // Единственный источник истины — национальные цифры. Префикс +7
+                    // каждый раз отбрасывается, а не попадает в номер.
+                    val national = PhoneUtil.nationalDigits(s?.toString().orEmpty())
+                    val formatted = PhoneUtil.formatDisplay(national)
+                    if (formatted != s?.toString()) {
+                        s?.replace(0, s.length, formatted)
+                    }
+                    // На кассе предсказуемее всегда держать курсор в конце.
+                    phone.setSelection(phone.text?.length ?: 0)
+                } finally {
+                    phoneMaskLock = false
                 }
             }
-            override fun afterTextChanged(s: android.text.Editable?) {}
         })
 
         fun renderProfile(profile: CustomersApi.Profile, digits: String) {
@@ -931,11 +938,12 @@ class MainActivity : AppCompatActivity() {
 
         fun search() {
             if (busy) return
-            val digits = PhoneUtil.normalize(phone.text.toString())
-            if (!PhoneUtil.isValid(digits)) {
+            val national = PhoneUtil.nationalDigits(phone.text?.toString().orEmpty())
+            if (!PhoneUtil.isComplete(national)) {
                 showError("Введите российский номер: +7 и 10 цифр.")
                 return
             }
+            val digits = PhoneUtil.toApiDigits(national)
             busy = true
             result.removeAllViews()
             result.addView(banner("Ищем карту…", Kind.INFO, 11f))
