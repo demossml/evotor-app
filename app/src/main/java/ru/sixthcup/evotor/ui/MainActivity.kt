@@ -111,6 +111,7 @@ import ru.sixthcup.evotor.net.LoyaltyApi
 import ru.sixthcup.evotor.net.QueueNumberApi
 import ru.sixthcup.evotor.net.CatalogApi
 import ru.sixthcup.evotor.net.CustomersApi
+import ru.sixthcup.evotor.net.PhoneCardService
 import ru.sixthcup.evotor.net.ProductConfigApi
 import ru.sixthcup.evotor.net.ProductConfigPolicy
 import ru.sixthcup.evotor.net.StoreUuidResolver
@@ -832,42 +833,42 @@ class MainActivity : AppCompatActivity() {
 
             fun bind(after: (CardInfo) -> Unit) {
                 if (busy) return
+                // cardCode — только серверный. Телефон/локальная заглушка сюда не подставляются.
+                val cardCode = profile.cardCode?.trim().orEmpty()
+                if (cardCode.isEmpty()) {
+                    showError("Сервер не вернул номер карты. Карта не выдана.")
+                    return
+                }
                 busy = true
                 result.addView(banner("Проверяем карту…", Kind.INFO, 11f),
                     LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
-                val cardCode = profile.cardCode?.trim().orEmpty().ifBlank { digits }
                 thread(name = "phone-card-bind") {
                     val resolved = LoyaltyApi.resolve(cardCode)
                     runOnUiThread {
                         busy = false
                         if (isFinishing || isDestroyed) return@runOnUiThread
-                        if (resolved.freeStatus == "ERROR" && resolved.code.isEmpty()) {
-                            showError(resolved.note ?: "Карта не найдена на сервере")
+                        // Сессию создаём только из успешного resolve. При OFFLINE/5xx
+                        // не подставляем локальную карту и не пишем «фейковый» cardCode.
+                        if (resolved.code.isEmpty()) {
+                            showError(
+                                if (resolved.freeStatus == "ERROR") {
+                                    resolved.note ?: "Карта не найдена на сервере"
+                                } else {
+                                    PhoneCardService.NO_CONNECTION_MESSAGE
+                                },
+                            )
                             return@runOnUiThread
                         }
-                        val info = if (resolved.code.isNotEmpty()) {
-                            resolved.copy(
-                                code = cardCode,
-                                cardCode = cardCode,
-                                cashbackKopecks = profile.balanceKopecks,
-                                balanceKopecks = profile.balanceKopecks,
-                                effectiveEarnPercent = profile.effectiveEarnPercent,
-                                phoneMasked = profile.phoneMasked ?: PhoneUtil.masked(digits),
-                                identifiedBy = "PHONE",
-                                kind = resolved.kind ?: "code",
-                            )
-                        } else {
-                            CardInfo(
-                                code = cardCode, cardCode = cardCode, paidCups = 0, cupsForFree = 5,
-                                freeAvailable = 0, cashbackKopecks = profile.balanceKopecks,
-                                balanceKopecks = profile.balanceKopecks, reservationId = null,
-                                reservationExpiresAt = 0L, freeStatus = "OFFLINE", canRedeem = false,
-                                kind = "code", identifiedBy = "PHONE",
-                                effectiveEarnPercent = profile.effectiveEarnPercent,
-                                phoneMasked = profile.phoneMasked ?: PhoneUtil.masked(digits),
-                                note = resolved.note,
-                            )
-                        }
+                        val info = resolved.copy(
+                            code = cardCode,
+                            cardCode = cardCode,
+                            cashbackKopecks = profile.balanceKopecks,
+                            balanceKopecks = profile.balanceKopecks,
+                            effectiveEarnPercent = profile.effectiveEarnPercent,
+                            phoneMasked = profile.phoneMasked ?: PhoneUtil.masked(digits),
+                            identifiedBy = "PHONE",
+                            kind = resolved.kind ?: "code",
+                        )
                         CardSession.set(this, info)
                         lastCardCode = cardCode
                         lastCardLabel = profile.phoneMasked ?: PhoneUtil.masked(digits)
@@ -894,46 +895,14 @@ class MainActivity : AppCompatActivity() {
             result.addView(actions, LinearLayout.LayoutParams(MATCH, WRAP))
         }
 
-        fun renderRegister(digits: String) {
-            result.removeAllViews()
-            result.addView(banner("Номер не найден. Можно выпустить карту кэшбэка.", Kind.INFO, 11f))
-            val consent = android.widget.CheckBox(this).apply {
-                text = "Клиент согласен на обработку номера телефона для бонусной программы 6.7 COFFEE (версия v1)."
-                textSize = 11f
-                setTextColor(INK)
-                setPadding(0, dp(8), 0, dp(4))
-            }
-            lateinit var release: TextView
-            release = btn("Выпустить карту", "primary") {
-                if (busy || !consent.isChecked) return@btn
-                busy = true
-                release.isEnabled = false
-                release.alpha = 0.55f
-                result.addView(banner("Выпускаем карту…", Kind.INFO, 11f),
-                    LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
-                thread(name = "phone-card-register") {
-                    val profile = CustomersApi.register(digits, "v1")
-                    runOnUiThread {
-                        busy = false
-                        if (isFinishing || isDestroyed) return@runOnUiThread
-                        if (!profile.ok) {
-                            showError(CustomersApi.errorText(profile.httpStatus, profile.error))
-                        } else if (profile.found || !profile.cardCode.isNullOrBlank()) {
-                            renderProfile(profile, digits)
-                        } else {
-                            showError("Карта не выпущена. Повторите или обратитесь к администратору.")
-                        }
-                    }
-                }
-            }
-            release.isEnabled = false
-            release.alpha = 0.55f
-            consent.setOnCheckedChangeListener { _, checked ->
-                release.isEnabled = checked
-                release.alpha = if (checked) 1f else 0.55f
-            }
-            result.addView(consent, LinearLayout.LayoutParams(MATCH, WRAP))
-            result.addView(release, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(8) })
+        val consent = android.widget.CheckBox(this).apply {
+            text = "Клиент согласен на обработку номера телефона для бонусной программы 6.7 COFFEE (версия v1)."
+            textSize = 11f
+            setTextColor(INK)
+            setPadding(0, dp(8), 0, dp(4))
+        }
+        consent.setOnCheckedChangeListener { _, checked ->
+            if (checked) consent.error = null
         }
 
         fun search() {
@@ -943,33 +912,36 @@ class MainActivity : AppCompatActivity() {
                 showError("Введите российский номер: +7 и 10 цифр.")
                 return
             }
+            if (!consent.isChecked) {
+                consent.error = PhoneCardService.CONSENT_MESSAGE
+                showError(PhoneCardService.CONSENT_MESSAGE)
+                return
+            }
             val digits = PhoneUtil.toApiDigits(national)
             busy = true
             result.removeAllViews()
             result.addView(banner("Ищем карту…", Kind.INFO, 11f))
-            thread(name = "phone-card-lookup") {
-                val profile = CustomersApi.lookup(digits)
+            thread(name = "phone-card-lookup-register") {
+                val outcome = PhoneCardService().findOrCreate(digits, consent = true)
                 runOnUiThread {
                     busy = false
                     if (isFinishing || isDestroyed) return@runOnUiThread
-                    if (!profile.ok) {
-                        showError(CustomersApi.errorText(profile.httpStatus, profile.error))
-                    } else if (profile.found) {
-                        renderProfile(profile, digits)
-                    } else {
-                        renderRegister(digits)
+                    when (outcome) {
+                        is PhoneCardService.Result.Profile -> renderProfile(outcome.profile, digits)
+                        is PhoneCardService.Result.Error -> showError(outcome.message)
                     }
                 }
             }
         }
 
-        val find = btn("Найти", "primary") { search() }
+        val find = btn("Найти / Выдать карту", "primary") { search() }
         phone.setOnEditorActionListener { _, action, _ ->
             if (action == EditorInfo.IME_ACTION_SEARCH || action == EditorInfo.IME_ACTION_DONE) {
                 search(); true
             } else false
         }
         box.addView(phone, LinearLayout.LayoutParams(MATCH, dp(50)))
+        box.addView(consent, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
         box.addView(find, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(10) })
         box.addView(result, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
         box.addView(noteRow("Телефон нужен только для бонусной карты. Процент начисления задаёт сервер — бариста его не меняет."),
