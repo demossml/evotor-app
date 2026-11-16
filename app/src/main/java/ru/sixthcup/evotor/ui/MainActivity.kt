@@ -174,6 +174,9 @@ class MainActivity : AppCompatActivity() {
     private var wishYear: Int = 0
     private var wishMonth: Int = 0 // 0-based, целевой месяц (обычно следующий)
     private var resolving = false
+    /** Меняется при смене/сбросе карты: старый фоновый refresh не должен вернуть её в сессию. */
+    private var cardEpoch = 0
+    private var resolveSeq = 0
     private var input: EditText? = null
     private var notice: String? = null
     private var noticeKind: Kind = Kind.ERROR
@@ -870,6 +873,9 @@ class MainActivity : AppCompatActivity() {
                             identifiedBy = "PHONE",
                             kind = resolved.kind ?: "code",
                         )
+                        // Новый гость не наследует выбор льготы предыдущего.
+                        CheckoutChoice.clearCard(this)
+                        cardEpoch++
                         CardSession.set(this, info)
                         lastCardCode = cardCode
                         lastCardLabel = profile.phoneMasked ?: PhoneUtil.masked(digits)
@@ -927,6 +933,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val digits = PhoneUtil.toApiDigits(national)
+            val epoch = cardEpoch
             busy = true
             result.removeAllViews()
             result.addView(banner("Ищем карту…", Kind.INFO, 11f))
@@ -935,6 +942,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     busy = false
                     if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (epoch != cardEpoch) return@runOnUiThread
                     hidePhoneKeyboard()
                     when (outcome) {
                         is PhoneCardService.Result.Profile -> renderProfile(outcome.profile, digits)
@@ -1031,9 +1039,9 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { notice = null; screen = Screen.ORDER; safeRender() }
             }, LinearLayout.LayoutParams(WRAP, dp(36)).apply { rightMargin = dp(6) })
             actions.addView(TextView(this).apply {
-                text = "Отвязать"; textSize = 10f; weight(Fonts.SEMIBOLD); gravity = Gravity.CENTER; setTextColor(WHITE)
+                text = "Сменить клиента"; textSize = 10f; weight(Fonts.SEMIBOLD); gravity = Gravity.CENTER; setTextColor(WHITE)
                 setPadding(dp(12), 0, dp(12), 0); background = rounded(0x24FFFFFF.toInt(), 9, null); isClickable = true
-                setOnClickListener { forgetCard(); notice = null; screen = Screen.ORDER; safeRender() }
+                setOnClickListener { forgetCard(); notice = null; screen = Screen.CARD; safeRender() }
             }, LinearLayout.LayoutParams(WRAP, dp(36)))
             col.addView(actions)
             gc.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
@@ -1147,15 +1155,21 @@ class MainActivity : AppCompatActivity() {
         val code = raw.trim().removePrefix("6.7:").removePrefix("67coffee:").trim()
         if (code.isEmpty()) { input?.error = "Введите номер карты или отсканируйте QR"; return }
         if (resolving) return
+        val seq = ++resolveSeq
+        val epoch = cardEpoch
         resolving = true; notice = null; safeRender()
         thread(name = "loyalty-lookup") {
             val info = LoyaltyApi.resolve(code)
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
+                // Более новый resolve или сброс карты уже отменил этот ответ.
+                if (seq != resolveSeq) return@runOnUiThread
                 resolving = false
+                if (epoch != cardEpoch) return@runOnUiThread
                 // Apply barcode that arrived while resolve was in flight.
                 val pendingScan = ScannerHub.poll()
                 if (info.code.isNotEmpty()) {
+                    cardEpoch++
                     CardSession.set(this, info)
                     Log.i(TAG, "card_resolved kind=${CardSession.kindOf(code)} free=${info.freeAvailable} cb=${info.cashbackKopecks} reserved=${info.reservationId != null}")
                     lastCardCode = code; lastCardLabel = info.cardCode.ifBlank { null }
@@ -2869,9 +2883,16 @@ class MainActivity : AppCompatActivity() {
         preorderChipText()?.let { append(" · ").append(it) }
     }
 
-    /** Отвязка карты: следующая привязка снова получит окно льготы. */
+    /** Полный сброс гостя: карта, выбранные льготы и «последняя карта» в памяти UI. */
     private fun forgetCard() {
+        cardEpoch++
+        resolveSeq++
+        resolving = false
         CardSession.clear(this)
+        // Сбрасываем только free/cashback/voucher; combo-скидка к карте не относится.
+        CheckoutChoice.clearCard(this)
+        lastCardCode = null
+        lastCardLabel = null
         benefitGuard.onCardCleared()
     }
 
@@ -3221,13 +3242,18 @@ class MainActivity : AppCompatActivity() {
         val pm = PopupMenu(this, anchor)
         pm.menu.add(0, 1, 0, "Обновить каталог")
         pm.menu.add(0, 2, 1, "Ввести другую карту")
-        if (card != null) pm.menu.add(0, 3, 2, "Сбросить клиента")
+        if (card != null) pm.menu.add(0, 3, 2, "Сменить клиента")
         if (!Cart.isEmpty()) pm.menu.add(0, 4, 3, "Очистить корзину")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> loadProducts()
                 2 -> { notice = null; screen = Screen.CARD; safeRender() }
-                3 -> confirm("Сбросить клиента?", "Карта будет отвязана от заказа, корзина останется.", "Сбросить") { forgetCard() }
+                3 -> confirm("Сменить клиента?", "Карта будет отвязана от заказа, корзина останется.", "Сменить") {
+                    forgetCard()
+                    notice = null
+                    screen = Screen.CARD
+                    safeRender()
+                }
                 4 -> confirm("Очистить корзину?", "Все ${Cart.count()} поз. будут удалены.", "Очистить") { Cart.clear(); onCartChanged() }
             }
             true
@@ -3476,6 +3502,23 @@ class MainActivity : AppCompatActivity() {
             UiKit.loyaltyDots(this, cups, goal, onColor = 0xFFF6F3EE.toInt()),
             LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) },
         )
+        box.addView(TextView(this).apply {
+            text = "Сменить клиента"
+            textSize = 10f
+            weight(Fonts.SEMIBOLD)
+            setTextColor(0xCCF6F3EE.toInt())
+            setPadding(0, dp(8), 0, 0)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Отвязать карту и выбрать другого гостя"
+            setOnClickListener {
+                dismissSheets()
+                forgetCard()
+                notice = null
+                screen = Screen.CARD
+                safeRender()
+            }
+        }, LinearLayout.LayoutParams(WRAP, WRAP))
         return box
     }
 
@@ -4764,10 +4807,15 @@ class MainActivity : AppCompatActivity() {
     private fun refreshCardAsync(notifyOnChange: Boolean = false) {
         val current = CardSession.get(this)?.takeIf { it.code.isNotEmpty() } ?: return
         if (cardRefreshing) return
+        val epoch = cardEpoch
         cardRefreshing = true
         thread(name = "card-refresh") {
             val result = try {
-                CardSession.refreshFromServer(this) { LoyaltyApi.resolve(it) }
+                CardSession.refreshFromServer(
+                    this,
+                    { LoyaltyApi.resolve(it) },
+                    shouldApply = { cardEpoch == epoch },
+                )
             } catch (t: Throwable) {
                 Log.w(TAG, "card_refresh_failed", t)
                 null
@@ -4775,6 +4823,8 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 cardRefreshing = false
+                // Пока шёл запрос, гостя сменили/сбросили — старый ответ не применяем.
+                if (cardEpoch != epoch) return@runOnUiThread
                 when {
                     result == null -> Unit
                     result.dropped -> {
@@ -5878,6 +5928,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(button("К баристе", primary = true, heightDp = 48) {
+            forgetCard()
             postPayOrder = null
             screen = Screen.QUEUE
             safeRender()
@@ -5892,6 +5943,7 @@ class MainActivity : AppCompatActivity() {
             isFocusable = true
             setPadding(0, dp(14), 0, dp(8))
             setOnClickListener {
+                forgetCard()
                 postPayOrder = null
                 screen = Screen.ORDER
                 safeRender()
@@ -6139,6 +6191,8 @@ class MainActivity : AppCompatActivity() {
                     // Номер и состояние карты показываем сразу после оплаты (post-pay).
                     postPayOrder = done
                     screen = if (done != null) Screen.POSTPAY else Screen.QUEUE
+                    // Без post-pay экрана карта больше не нужна: следующий гость начинает с чистого листа.
+                    if (done == null) forgetCard()
                     // Чашки появятся у гостя только после poll на backend — тянем свежие данные.
                     refreshCardAsync()
                     safeRender()
@@ -6177,7 +6231,12 @@ class MainActivity : AppCompatActivity() {
         when (screen) {
             Screen.ORDER -> { notice = null; screen = Screen.CARD; safeRender() }
             Screen.SHIFT -> { screen = Screen.ORDER; safeRender() }
-            Screen.POSTPAY -> { postPayOrder = null; screen = Screen.QUEUE; safeRender() }
+            Screen.POSTPAY -> {
+                forgetCard()
+                postPayOrder = null
+                screen = Screen.QUEUE
+                safeRender()
+            }
             Screen.QUEUE -> { screen = Screen.ORDER; safeRender() }
             Screen.CARD -> super.onBackPressed()
         }

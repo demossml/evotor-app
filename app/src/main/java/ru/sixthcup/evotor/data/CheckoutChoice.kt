@@ -35,5 +35,13 @@ object CheckoutChoice {
     } catch (_: Throwable) {
         BigDecimal.ZERO
     }
+
+    /** Сброс только карточных льгот: комбо-скидка не относится к гостю и остаётся. */
+    fun clearCard(context: Context) {
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .remove("free").remove("cashback").remove("cashbackKopecks").remove("voucherId")
+            .apply()
+    }
+
     fun clear(context: Context) { context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().clear().apply() }
 }

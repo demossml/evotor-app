@@ -131,10 +131,17 @@ object CardSession {
      * 404/отказ сервера → сессия очищается; сеть/5xx → прежние данные остаются с пометкой
      * «устарели». `fetch` передаётся снаружи, чтобы логику можно было покрыть без сети.
      */
-    fun refreshFromServer(ctx: Context, fetch: (String) -> CardInfo): RefreshResult {
+    fun refreshFromServer(
+        ctx: Context,
+        fetch: (String) -> CardInfo,
+        /** false — карту уже сменили/сбросили, результат старого refresh не применяем. */
+        shouldApply: () -> Boolean = { true },
+    ): RefreshResult {
         val current = get(ctx) ?: return RefreshResult(RefreshOutcome.NO_CARD, null)
         val credential = CardRefresh.credential(current) ?: return RefreshResult(RefreshOutcome.NO_CARD, null)
+        if (!shouldApply()) return RefreshResult(RefreshOutcome.NO_CARD, null)
         val result = CardRefresh.apply(current, fetch(credential))
+        if (!shouldApply()) return RefreshResult(RefreshOutcome.NO_CARD, null)
         when (result.outcome) {
             RefreshOutcome.UPDATED -> { set(ctx, result.info!!); markStale(ctx, stale = false) }
             RefreshOutcome.DROPPED -> clear(ctx)
