@@ -19,6 +19,10 @@ object QueueNumberApi {
 
     fun issue(orderId: String? = null): QueueNumber? {
         val startedAt = System.currentTimeMillis()
+        if (DeviceAuthPolicy.blockedError(DeviceHeaders.storeUuid()) != null) {
+            Log.w(TAG, "queue_number_skipped missing_store")
+            return null
+        }
         return try {
             val conn = (URL(BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/queue-number").openConnection() as HttpURLConnection)
             conn.requestMethod = "POST"

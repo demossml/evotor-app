@@ -222,6 +222,12 @@ object OrderApi {
 
     private fun <T> request(method: String, path: String, body: JSONObject?, parse: (JSONObject) -> T): Result<T> {
         val started = System.currentTimeMillis()
+        // Без UUID точки backend не сможет сверить заказ со store: не отправляем запрос
+        // и не создаём иллюзию «очередь пуста / заказа нет».
+        if (DeviceAuthPolicy.blockedError(DeviceHeaders.storeUuid()) != null) {
+            Log.w(TAG, "$method $path blocked missing_store")
+            return Result.Err(DeviceAuthPolicy.MISSING_STORE, DeviceAuthPolicy.missingStoreMessage())
+        }
         return try {
             val conn = (URL(BuildConfig.API_BASE_URL.trimEnd('/') + path).openConnection() as HttpURLConnection)
             conn.requestMethod = if (method == "PATCH") "POST" else method

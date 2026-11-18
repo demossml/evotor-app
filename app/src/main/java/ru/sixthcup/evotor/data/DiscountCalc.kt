@@ -114,7 +114,7 @@ object DiscountCalc {
         if (card == null || card.code.isEmpty()) {
             return PayBreakdown(grossKopecks, 0L, grossKopecks, giftApplied = false, voucherId = null, floorApplied = false)
         }
-        val reserved = reserved(card, nowSec) && card.canRedeem
+        val reserved = reserved(card, nowSec) && card.canRedeem && CardSession.hasSecureProof(card)
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
         val allowed = VoucherCalc.allowedTogether(
             voucher,

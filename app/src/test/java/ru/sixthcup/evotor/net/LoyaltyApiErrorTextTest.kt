@@ -51,18 +51,33 @@ class LoyaltyApiErrorTextTest {
     }
 
     @Test
-    fun `auth and unexpected statuses are unchanged`() {
-        assertEquals("Нет доступа к серверу лояльности (401). Сообщите администратору.", LoyaltyApi.resolveErrorText(401, null))
+    fun `auth and unexpected statuses are clear`() {
+        assertEquals("Терминал не авторизован (401). Проверьте привязку кассы в кабинете Эвотор.", LoyaltyApi.resolveErrorText(401, null))
         assertEquals("Неожиданный ответ сервера (418).", LoyaltyApi.resolveErrorText(418, null))
     }
 
     @Test
-    fun `card is dropped only for 400 and 404`() {
+    fun `rate limit and reservation conflict are explained`() {
+        assertEquals(
+            "Слишком много запросов к карте. Подождите минуту и повторите.",
+            LoyaltyApi.resolveErrorText(429, null),
+        )
+        assertEquals(
+            "Карта уже используется в другом чеке. Завершите его и повторите.",
+            LoyaltyApi.resolveErrorText(409, "reservation_conflict"),
+        )
+    }
+
+    @Test
+    fun `card is dropped on every HTTP failure, not only 400 and 404`() {
         assertTrue(LoyaltyApi.resolveDrop(400))
+        assertTrue(LoyaltyApi.resolveDrop(401))
+        assertTrue(LoyaltyApi.resolveDrop(403))
         assertTrue(LoyaltyApi.resolveDrop(404))
-        // Настроечные и временные ошибки не должны лишать гостя начисления чашек.
-        assertFalse(LoyaltyApi.resolveDrop(503))
-        assertFalse(LoyaltyApi.resolveDrop(500))
-        assertFalse(LoyaltyApi.resolveDrop(401))
+        assertTrue(LoyaltyApi.resolveDrop(429))
+        assertTrue(LoyaltyApi.resolveDrop(500))
+        assertTrue(LoyaltyApi.resolveDrop(503))
+        // Сетевые исключения сюда не попадают: там остаётся подписанный QR.
+        assertFalse(LoyaltyApi.resolveDrop(0))
     }
 }

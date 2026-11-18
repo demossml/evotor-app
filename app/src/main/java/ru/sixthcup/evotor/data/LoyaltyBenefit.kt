@@ -109,7 +109,7 @@ object LoyaltyPreview {
             )
         }
         if (card == null || card.code.isEmpty()) return Benefits.NONE.copy(payable = gross.max(BigDecimal.ZERO))
-        val reserved = DiscountCalc.reserved(card, nowSec) && card.canRedeem
+        val reserved = DiscountCalc.reserved(card, nowSec) && card.canRedeem && CardSession.hasSecureProof(card)
         val voucher = choice.voucherId?.let { id -> card.vouchers.firstOrNull { it.id == id } }
         val calc = DiscountCalc.compute(
             gross = gross,

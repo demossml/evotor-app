@@ -18,6 +18,16 @@ object LoyaltyApi {
     fun resolve(code: String): CardInfo {
         val isToken = code.contains('.')
         val startedAt = System.currentTimeMillis()
+        if (DeviceAuthPolicy.blockedError(DeviceHeaders.storeUuid()) != null) {
+            Log.w("LoyaltyApi", "resolve blocked missing_store")
+            return offline(
+                code = code,
+                isToken = isToken,
+                note = DeviceAuthPolicy.missingStoreMessage(),
+                drop = true,
+                errorCode = DeviceAuthPolicy.MISSING_STORE,
+            )
+        }
         return try {
             val conn = (URL(BuildConfig.API_BASE_URL.trimEnd('/') + "/api/devices/loyalty/resolve").openConnection() as HttpURLConnection)
             conn.requestMethod = "POST"
@@ -112,14 +122,20 @@ object LoyaltyApi {
         code == "card_not_found" || code == "invalid_card" ->
             "Карта не найдена. Проверьте номер или отсканируйте QR."
         code == "proxy_not_configured" -> "Сервер лояльности не настроен. Обратитесь к администратору."
+        code == "rate_limited" || status == 429 -> "Слишком много запросов к карте. Подождите минуту и повторите."
+        code == "reservation_conflict" -> "Карта уже используется в другом чеке. Завершите его и повторите."
         status == 400 || status == 404 -> "Карта не найдена или недействительна. Проверьте номер или QR."
-        status == 401 || status == 403 -> "Нет доступа к серверу лояльности ($status). Сообщите администратору."
+        status == 401 || status == 403 -> DeviceAuthPolicy.authMessage(status)
+        status == 503 -> "Сервер лояльности временно недоступен (503). Повторите позже."
         status >= 500 -> "Сервер лояльности временно недоступен ($status)."
         else -> "Неожиданный ответ сервера ($status)."
     }
 
-    /** Карту не прикрепляем к чеку, только если сервер сказал, что она недействительна. */
-    internal fun resolveDrop(status: Int): Boolean = status == 400 || status == 404
+    /**
+     * Карту не прикрепляем к чеку при любом HTTP-отказе: 401/403, 404, 429, 5xx.
+     * Подписанный QR остаётся только при сетевом исключении/таймауте — это отдельная ветка catch.
+     */
+    internal fun resolveDrop(status: Int): Boolean = DeviceAuthPolicy.dropCard(status)
 
     /**
      * Server unreachable: a signed QR still goes into the receipt so the cup can be credited after the sale

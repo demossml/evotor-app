@@ -36,6 +36,10 @@ object CustomersApi {
         if (!PhoneUtil.isValid(normalized)) {
             return Profile(found = false, error = "invalid_phone")
         }
+        if (DeviceAuthPolicy.blockedError(DeviceHeaders.storeUuid()) != null) {
+            Log.w("CustomersApi", "customers/$path blocked missing_store")
+            return Profile(found = false, error = DeviceAuthPolicy.MISSING_STORE)
+        }
         var conn: HttpURLConnection? = null
         return try {
             val body = JSONObject().put("phone", normalized).apply {
@@ -134,6 +138,8 @@ object CustomersApi {
         return when {
             c == "invalid_phone" || status == 400 -> "Проверьте номер телефона: нужен российский номер из 11 цифр."
             c == "consent_required" -> "Нужно согласие клиента на обработку телефона."
+            c == DeviceAuthPolicy.MISSING_STORE -> DeviceAuthPolicy.missingStoreMessage()
+            c == "unauthorized" || status == 401 || status == 403 -> DeviceAuthPolicy.authMessage(status)
             c == "rate_limited" || status == 429 -> "Слишком много запросов. Подождите минуту и повторите."
             status == 503 || c == "service_unavailable" -> "Сервис бонусов временно недоступен. Повторите позже."
             c == "network" -> "Нет связи с сервером. Проверьте интернет."

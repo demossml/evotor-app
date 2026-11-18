@@ -204,8 +204,10 @@ object CardSession {
             // Льготы существуют только вместе с резервом: без `op` backend всё равно применит 0,
             // поэтому не пишем в чек неисполнимые free/cb (иначе они врут и в логах, и в разборе).
             val reserved = card.reservationId != null
-            // Free gift требует hold; кэшбэк — только серверное право canRedeem (bonus-карта может быть без hold).
-            val freeRedeem = reserved && card.canRedeem
+            // Free gift требует hold и безопасного proof; кэшбэк — серверное право canRedeem
+            // (bonus-карта по телефону может быть без hold).
+            val secure = hasSecureProof(card)
+            val freeRedeem = reserved && card.canRedeem && secure
             val cashbackRedeem = cashbackRedeemable(card, reserved)
             // Ваучер гасит backend только по QR-токену с резервом; по числовому коду ключа быть не должно.
             val voucherOk = freeRedeem && effectiveKind(card) == "token"
@@ -239,11 +241,21 @@ object CardSession {
         else info.cardCode.ifBlank { info.code }.trim()
 
     /**
-     * Кэшбэк: QR/код требует hold (reserved), phone-bonus — только серверный canRedeem.
-     * Так бонусная карта может списываться без reservationId, не открывая free-gift.
+     * Безопасный proof: подписанный QR либо телефонная бонусная карта, подтверждённая сервером.
+     * Голый числовой код карты не даёт списаний даже при ошибочно выданном reservationId.
+     */
+    fun hasSecureProof(info: CardInfo): Boolean =
+        effectiveKind(info) == "token" ||
+            info.identifiedBy.equals("QR", ignoreCase = true) ||
+            info.identifiedBy.equals("PHONE", ignoreCase = true)
+
+    /**
+     * Кэшбэк: QR требует hold (reserved), phone-bonus — только серверный canRedeem.
+     * Числовой код карты не списывает кэшбэк ни при каких условиях.
      */
     fun cashbackRedeemable(info: CardInfo, reserved: Boolean): Boolean =
-        info.canRedeem && (reserved || info.identifiedBy.equals("PHONE", ignoreCase = true))
+        info.canRedeem && hasSecureProof(info) &&
+            (reserved || info.identifiedBy.equals("PHONE", ignoreCase = true))
 
     /** Серверный kind, иначе — форма кода: подписанный QR содержит точку, короткий код — только цифры. */
     fun effectiveKind(info: CardInfo): String =

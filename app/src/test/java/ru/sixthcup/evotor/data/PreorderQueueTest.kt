@@ -115,6 +115,7 @@ class PreorderQueueTest {
         assertEquals("Заказ оформлен для другой кофейни", PreorderQueue.errorText("wrong_store"))
         assertEquals("Заказ не найден", PreorderQueue.errorText("not_found"))
         assertEquals("Срок заказа истёк", PreorderQueue.errorText("expired"))
+        assertTrue(PreorderQueue.errorText("missing_store").contains("точка продаж"))
         assertEquals("Заказ уже оплачен", PreorderQueue.errorText("already_paid"))
         assertEquals("Заказ отклонён или отменён", PreorderQueue.errorText("rejected"))
         assertEquals("Статус уже изменился — обновите заказ", PreorderQueue.errorText("invalid_transition"))

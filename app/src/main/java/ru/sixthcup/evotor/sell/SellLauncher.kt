@@ -176,7 +176,7 @@ object SellLauncher {
                 }
                 card != null && card.code.isNotEmpty() -> {
                     val reservedBase = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
-                    val reserved = reservedBase && card.canRedeem
+                    val reserved = reservedBase && card.canRedeem && CardSession.hasSecureProof(card)
                     val eligible = Cart.giftEligibleLines().map { it.priceRub }
                     val voucher = card.vouchers.firstOrNull { it.id == voucherId }
                     val calc = DiscountCalc.compute(

@@ -105,7 +105,7 @@ class DiscountIntegrationService : IntegrationService() {
                     }
                     val now = System.currentTimeMillis() / 1000
                     val reservedBase = DiscountCalc.reserved(info, now)
-                    val reserved = reservedBase && info.canRedeem
+                    val reserved = reservedBase && info.canRedeem && CardSession.hasSecureProof(info)
                     val prices = receiptUnitPrices()
                     val receiptGross = prices.fold(BigDecimal.ZERO) { a, p -> a.add(p.second) }
                     // Если позиции открытого чека прочитать не удалось, берём корзину APK:

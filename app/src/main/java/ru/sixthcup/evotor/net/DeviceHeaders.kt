@@ -16,6 +16,10 @@ object DeviceHeaders {
     private const val PREF = "sixthcup_device"
     private const val KEY_DEV = "device_uuid"
 
+    /** UUID точки, уже определённый при старте приложения. Сеть здесь не дергаем. */
+    fun storeUuid(context: Context? = SixthCupApp.instance): String? =
+        context?.let { StoreUuidResolver.peek(it) }
+
     fun apply(conn: HttpURLConnection, context: Context? = SixthCupApp.instance) {
         val ctx = context ?: return
         try {

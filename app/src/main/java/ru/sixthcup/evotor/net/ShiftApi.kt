@@ -110,6 +110,10 @@ object ShiftApi {
 
     // ── HTTP ──
     private fun call(method: String, path: String, body: String?): Res<JSONObject> {
+        if (DeviceAuthPolicy.blockedError(DeviceHeaders.storeUuid()) != null) {
+            Log.w("ShiftApi", "$method $path blocked missing_store")
+            return Res.Fail(DeviceAuthPolicy.missingStoreMessage())
+        }
         return try {
             val conn = URL(BuildConfig.API_BASE_URL.trimEnd('/') + path).openConnection() as HttpURLConnection
             conn.requestMethod = method
@@ -130,7 +134,16 @@ object ShiftApi {
             } else {
                 val msg = try { JSONObject(text).optString("message") } catch (_: Throwable) { "" }
                 Log.w("ShiftApi", "$method $path HTTP $status")
-                Res.Fail(msg.ifBlank { if (status == 404) "Сервер пока не поддерживает этот раздел" else "Ошибка сервера ($status)" })
+                Res.Fail(
+                    msg.ifBlank {
+                        when {
+                            DeviceAuthPolicy.authFailure(status) -> DeviceAuthPolicy.authMessage(status)
+                            status == 404 -> "Сервер пока не поддерживает этот раздел"
+                            status == 429 -> "Слишком много запросов. Подождите минуту."
+                            else -> "Ошибка сервера ($status)"
+                        }
+                    },
+                )
             }
         } catch (e: Throwable) {
             Log.w("ShiftApi", "$method $path failed: ${e.message}")

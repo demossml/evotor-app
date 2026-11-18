@@ -4600,6 +4600,10 @@ class MainActivity : AppCompatActivity() {
     /** Защита от двойного нажатия «В чек»: второй вызов, пока первый не завершился, игнорируется. */
     private var sendingReceipt = false
 
+    /** Один mark-paid на заказ: onResume и повторный возврат не должны дублировать запрос. */
+    private val paidInFlight: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /**
      * Финальная проверка корзины по последнему каталогу и передача позиций Эвотору.
      * Платная добавка без evotorUuid / удалённый товар / изменившаяся схема — чек не открываем.
@@ -4726,46 +4730,72 @@ class MainActivity : AppCompatActivity() {
      * а 4xx не повторяем: там ответ уже финальный.
      */
     private fun markPreorderPaid(orderId: String) {
+        // onResume может сработать несколько раз (возврат с экрана оплаты, повторный resume).
+        // Один заказ — один активный поток mark-paid; повторный вызов просто игнорируется.
+        if (!paidInFlight.add(orderId)) {
+            Log.i(TAG, "preorder_paid_skip reason=inflight order=$orderId")
+            return
+        }
         thread(name = "preorder-paid") {
-            var attempt = 1
-            while (true) {
-                when (val r = OrderApi.markPaid(orderId)) {
-                    is OrderApi.Result.Ok -> {
-                        PreorderPullSession.clear()
-                        SaleConfirmStore.clear(this)
-                        Log.i(TAG, "preorder_paid order=$orderId status=${r.value.status} attempt=$attempt")
-                        return@thread
-                    }
-                    is OrderApi.Result.Err -> {
-                        if (r.error == "benefit_conflict") {
-                            // Бонус гостя занят другим чеком: повтор не поможет, нужен администратор.
-                            Log.w(TAG, "preorder_paid_conflict order=$orderId attempt=$attempt")
+            try {
+                var attempt = 1
+                while (true) {
+                    when (val r = OrderApi.markPaid(orderId)) {
+                        is OrderApi.Result.Ok -> {
                             PreorderPullSession.clear()
                             SaleConfirmStore.clear(this)
-                            runOnUiThread {
-                                if (isFinishing || isDestroyed) return@runOnUiThread
-                                notice = PreorderQueue.errorText(r.error)
-                                noticeKind = Kind.WARN
-                                safeRender()
+                            Log.i(TAG, "preorder_paid order=$orderId status=${r.value.status} attempt=$attempt")
+                            return@thread
+                        }
+                        is OrderApi.Result.Err -> {
+                            if (r.error == "already_paid") {
+                                // Ответ на предыдущий запрос потерялся, но backend уже принял оплату.
+                                // Это успех по смыслу: снимаем локальный pending и не дублируем SELL.
+                                Log.i(TAG, "preorder_paid_already order=$orderId attempt=$attempt")
+                                PreorderPullSession.clear()
+                                SaleConfirmStore.clear(this)
+                                refreshActiveOrders(silent = true)
+                                return@thread
                             }
-                            refreshActiveOrders(silent = true)
-                            return@thread
+                            if (r.error == "invalid_transition") {
+                                // Статус уже изменился (например, заказ отменён): не повторяем,
+                                // но подтягиваем актуальное состояние, чтобы кассир не работал по старому.
+                                Log.w(TAG, "preorder_paid_invalid_transition order=$orderId attempt=$attempt")
+                                refreshActiveOrders(silent = true)
+                                return@thread
+                            }
+                            if (r.error == "benefit_conflict") {
+                                // Бонус гостя занят другим чеком: повтор не поможет, нужен администратор.
+                                Log.w(TAG, "preorder_paid_conflict order=$orderId attempt=$attempt")
+                                PreorderPullSession.clear()
+                                SaleConfirmStore.clear(this)
+                                runOnUiThread {
+                                    if (isFinishing || isDestroyed) return@runOnUiThread
+                                    notice = PreorderQueue.errorText(r.error)
+                                    noticeKind = Kind.WARN
+                                    safeRender()
+                                }
+                                refreshActiveOrders(silent = true)
+                                return@thread
+                            }
+                            val retry = PreorderPaid.retryable(r.error) && attempt < PreorderPaid.MAX_ATTEMPTS
+                            Log.w(
+                                TAG,
+                                "preorder_paid_failed order=$orderId err=${r.error} attempt=$attempt " +
+                                    "retry=$retry msg=${r.message}",
+                            )
+                            if (!retry) return@thread
+                            try {
+                                Thread.sleep(PreorderPaid.delayMs(attempt))
+                            } catch (_: InterruptedException) {
+                                return@thread
+                            }
+                            attempt++
                         }
-                        val retry = PreorderPaid.retryable(r.error) && attempt < PreorderPaid.MAX_ATTEMPTS
-                        Log.w(
-                            TAG,
-                            "preorder_paid_failed order=$orderId err=${r.error} attempt=$attempt " +
-                                "retry=$retry msg=${r.message}",
-                        )
-                        if (!retry) return@thread
-                        try {
-                            Thread.sleep(PreorderPaid.delayMs(attempt))
-                        } catch (_: InterruptedException) {
-                            return@thread
-                        }
-                        attempt++
                     }
                 }
+            } finally {
+                paidInFlight.remove(orderId)
             }
         }
     }
