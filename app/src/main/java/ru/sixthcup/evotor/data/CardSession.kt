@@ -240,22 +240,30 @@ object CardSession {
         if (effectiveKind(info) == "token") info.code.trim()
         else info.cardCode.ifBlank { info.code }.trim()
 
+    /** Гость найден на кассе по телефону — это самостоятельный способ списания кэшбэка. */
+    fun isPhoneCard(info: CardInfo): Boolean =
+        info.identifiedBy.equals("PHONE", ignoreCase = true)
+
     /**
-     * Безопасный proof: подписанный QR либо телефонная бонусная карта, подтверждённая сервером.
+     * Безопасный proof для QR/кода: подписанный QR либо телефонная бонусная карта.
      * Голый числовой код карты не даёт списаний даже при ошибочно выданном reservationId.
      */
     fun hasSecureProof(info: CardInfo): Boolean =
         effectiveKind(info) == "token" ||
             info.identifiedBy.equals("QR", ignoreCase = true) ||
-            info.identifiedBy.equals("PHONE", ignoreCase = true)
+            isPhoneCard(info)
 
     /**
-     * Кэшбэк: QR требует hold (reserved), phone-bonus — только серверный canRedeem.
-     * Числовой код карты не списывает кэшбэк ни при каких условиях.
+     * Кэшбэк:
+     *  • PHONE — только серверный `canRedeem`, без QR/резерва/действий клиента;
+     *  • QR — `canRedeem` + живой резерв;
+     *  • числовой код карты — всегда false.
      */
-    fun cashbackRedeemable(info: CardInfo, reserved: Boolean): Boolean =
-        info.canRedeem && hasSecureProof(info) &&
-            (reserved || info.identifiedBy.equals("PHONE", ignoreCase = true))
+    fun cashbackRedeemable(info: CardInfo, reserved: Boolean): Boolean = when {
+        !info.canRedeem -> false
+        isPhoneCard(info) -> true
+        else -> reserved && hasSecureProof(info)
+    }
 
     /** Серверный kind, иначе — форма кода: подписанный QR содержит точку, короткий код — только цифры. */
     fun effectiveKind(info: CardInfo): String =

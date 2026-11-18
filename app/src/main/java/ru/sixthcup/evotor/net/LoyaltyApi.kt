@@ -15,13 +15,43 @@ import java.net.URL
  * Blocking: call from a background thread only.
  */
 object LoyaltyApi {
+    /** QR-токен или числовой код карты: для ручного кода списание по-прежнему запрещено на кассе. */
     fun resolve(code: String): CardInfo {
         val isToken = code.contains('.')
+        return postResolve(
+            body = JSONObject().put("code", code),
+            credential = code,
+            isToken = isToken,
+            identifiedBy = null,
+            logLabel = "resolve",
+        )
+    }
+
+    /**
+     * Телефонный сценарий кассы: backend сам находит/создаёт карту по номеру.
+     * Это не числовой код карты и не device-proof: phone передаётся отдельным полем,
+     * а `canRedeem` из ответа — единственное разрешение на списание.
+     */
+    fun resolveByPhone(phone: String): CardInfo = postResolve(
+        body = JSONObject().put("phone", phone),
+        credential = "",
+        isToken = false,
+        identifiedBy = "PHONE",
+        logLabel = "resolve_phone",
+    )
+
+    private fun postResolve(
+        body: JSONObject,
+        credential: String,
+        isToken: Boolean,
+        identifiedBy: String?,
+        logLabel: String,
+    ): CardInfo {
         val startedAt = System.currentTimeMillis()
         if (DeviceAuthPolicy.blockedError(DeviceHeaders.storeUuid()) != null) {
-            Log.w("LoyaltyApi", "resolve blocked missing_store")
+            Log.w("LoyaltyApi", "$logLabel blocked missing_store")
             return offline(
-                code = code,
+                code = credential,
                 isToken = isToken,
                 note = DeviceAuthPolicy.missingStoreMessage(),
                 drop = true,
@@ -36,27 +66,27 @@ object LoyaltyApi {
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             DeviceHeaders.apply(conn)
-            conn.outputStream.use { it.write(JSONObject().put("code", code).toString().toByteArray(Charsets.UTF_8)) }
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
             val status = conn.responseCode
-            val body = (if (status in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+            val text = (if (status in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
             conn.disconnect()
-            val o = try { JSONObject(body) } catch (_: Throwable) { JSONObject() }
+            val o = try { JSONObject(text) } catch (_: Throwable) { JSONObject() }
             if (status == 200 && o.optBoolean("ok")) {
-                parseResolve(o, code)
+                parseResolve(o, credential, identifiedBy)
             } else {
                 // Серверная ошибка нашего API (не проблема карты) — отдельное событие в журнале.
                 if (status >= 500 || status == 401 || status == 403) {
                     Log.e(
                         "LoyaltyApi",
-                        "http_error POST /api/devices/loyalty/resolve code=$status ms=${System.currentTimeMillis() - startedAt}",
+                        "http_error POST /api/devices/loyalty/resolve $logLabel code=$status ms=${System.currentTimeMillis() - startedAt}",
                     )
                 }
                 val reason = o.optString("error").ifBlank { o.optString("code") }.ifBlank { null }
                 // Unknown/invalid card: do not attach it to the receipt at all.
-                offline(code, isToken, resolveErrorText(status, reason), drop = resolveDrop(status), errorCode = reason)
+                offline(credential, isToken, resolveErrorText(status, reason), drop = resolveDrop(status), errorCode = reason)
             }
         } catch (e: Throwable) {
-            offline(code, isToken, if (e is java.net.SocketTimeoutException) "Сервер не ответил вовремя." else "Нет связи с сервером.", drop = false)
+            offline(credential, isToken, if (e is java.net.SocketTimeoutException) "Сервер не ответил вовремя." else "Нет связи с сервером.", drop = false)
         }
     }
 
@@ -65,11 +95,14 @@ object LoyaltyApi {
      * поля (`paid_total` → `paidCups`), а ручной код отдаёт остаток цикла — без `paidTotal`
      * прогресс не восстановить.
      */
-    internal fun parseResolve(o: JSONObject, code: String): CardInfo {
+    internal fun parseResolve(o: JSONObject, code: String, identifiedBy: String? = null): CardInfo {
+        val cardCode = o.optString("cardCode")
+        // Для phone-запроса credential пустой: личность карты приходит в cardCode.
+        val actualCode = code.trim().ifBlank { cardCode.trim() }
         val kind = o.optString("kind").trim().takeIf { it == "token" || it == "code" }
-            ?: if (code.contains('.')) "token" else "code"
+            ?: if (actualCode.contains('.')) "token" else "code"
         return CardInfo(
-        code = code,
+        code = actualCode,
         cardCode = o.optString("cardCode"),
         paidCups = intOf(o, "paidCups", "cups", "cupsTowardFree", "paid") ?: 0,
         cupsForFree = intOf(o, "cupsForFree", "cups_for_free", "goal")?.takeIf { it > 0 } ?: 5,
@@ -83,7 +116,7 @@ object LoyaltyApi {
         // Старый backend без поля: QR-токен считаем правомочным, код — нет.
         canRedeem = o.optBoolean("canRedeem", kind != "code"),
         kind = kind,
-        identifiedBy = if (kind == "token") "QR" else "CODE",
+        identifiedBy = identifiedBy ?: if (kind == "token") "QR" else "CODE",
         effectiveEarnPercent = intOf(o, "effectiveEarnPercent", "effective_earn_percent", "earnPercent", "percent"),
         phoneMasked = o.optString("phoneMasked", o.optString("phone_masked")).trim().takeIf { it.isNotEmpty() },
         // Сервер пока не присылает seq; поле читается на будущее и не влияет на чек.

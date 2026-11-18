@@ -847,7 +847,9 @@ class MainActivity : AppCompatActivity() {
                 result.addView(banner("Проверяем карту…", Kind.INFO, 11f),
                     LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
                 thread(name = "phone-card-bind") {
-                    val resolved = LoyaltyApi.resolve(cardCode)
+                    // Телефон — отдельный путь resolve: backend сам подтверждает карту
+                    // и возвращает canRedeem. Никаких QR/device-proof от клиента не требуется.
+                    val resolved = LoyaltyApi.resolveByPhone(digits)
                     runOnUiThread {
                         busy = false
                         if (isFinishing || isDestroyed) return@runOnUiThread
@@ -1421,17 +1423,20 @@ class MainActivity : AppCompatActivity() {
     private fun loyaltyHint(card: CardInfo, progress: CardProgress): String? {
         val reserved = DiscountCalc.reserved(card, System.currentTimeMillis() / 1000)
         val eligible = Cart.all().any { it.freeEligible }
+        val phone = CardSession.isPhoneCard(card)
         return when {
             card.freeStatus == "ALREADY_RESERVED" ->
                 "Подарок уже зарезервирован на другой кассе. Завершите там чек или подождите."
             card.freeStatus == "OFFLINE" ->
                 "Нет связи: подарок и кэшбэк недоступны, чашки начислятся после чека."
-            progress.giftAvailable && !reserved && progress.kind == "code" ->
+            progress.giftAvailable && !reserved && progress.kind == "code" && !phone ->
                 "Для списания подарка нужен QR клиента: по номеру карты подарок не списывается."
             progress.giftAvailable && reserved && !eligible ->
                 "Нет подходящего напитка в чеке для подарка."
             progress.giftAvailable && reserved && eligible ->
                 "Подарок доступен — примените в листе «Лояльность»."
+            progress.cashbackKnown && progress.cashbackKopecks > 0L && !reserved && phone ->
+                "Бонусы можно списать на кассе."
             progress.cashbackKnown && progress.cashbackKopecks > 0L && !reserved ->
                 "Кэшбэк спишется только по QR клиента."
             else -> null
