@@ -3,6 +3,7 @@ package ru.sixthcup.evotor
 import android.app.Application
 import android.os.StrictMode
 import ru.sixthcup.evotor.data.Cart
+import ru.sixthcup.evotor.data.KitchenCheckout
 import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.ui.ThumbLoader
 
@@ -15,6 +16,8 @@ class SixthCupApp : Application() {
         Cart.attach(this)
         // Связь «подтянутый предзаказ → чек»: нужна и в сервисе после перезапуска процесса.
         PreorderPullSession.attach(this)
+        // clientOrderId kitchen-заказа переживает перезапуск процесса на экране оплаты.
+        KitchenCheckout.attach(this)
         ThumbLoader.init(this)
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build())

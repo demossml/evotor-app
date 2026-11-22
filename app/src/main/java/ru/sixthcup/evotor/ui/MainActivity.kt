@@ -104,6 +104,10 @@ import ru.sixthcup.evotor.data.PreorderPaid
 import ru.sixthcup.evotor.data.PreorderPullSession
 import ru.sixthcup.evotor.data.PreorderPuller
 import ru.sixthcup.evotor.data.PreorderQueue
+import ru.sixthcup.evotor.data.KitchenCheckout
+import ru.sixthcup.evotor.data.KitchenItems
+import ru.sixthcup.evotor.data.KitchenQueue
+import ru.sixthcup.evotor.net.KitchenApi
 import ru.sixthcup.evotor.net.OrderApi
 import ru.sixthcup.evotor.data.ReceiptIssue
 import ru.sixthcup.evotor.data.ReceiptValidator
@@ -414,6 +418,8 @@ class MainActivity : AppCompatActivity() {
     private var catalogLoadedAt = 0L
     /** Идёт фоновый перезапрос карты — второй параллельный не запускаем. */
     private var cardRefreshing = false
+    /** Один запрос статуса kitchen-заказа в полёте: опрос не должен наслаиваться. */
+    private var kitchenStatusInFlight = false
     /** Сколько ждём номер очереди перед открытием чека (спека: 1.0–1.5 с). */
     private val QUEUE_NUMBER_WAIT_MS = 1_500L
     /** Идёт фоновый опрос карты (C04). */
@@ -4809,7 +4815,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val lines = Cart.all()
             if (lines.isEmpty()) return
-            OrderQueueStore.addPending(
+            val pending = OrderQueueStore.addPending(
                 this,
                 lines.map { l ->
                     val q = l.quantity.stripTrailingZeros().toPlainString()
@@ -4817,6 +4823,9 @@ class MainActivity : AppCompatActivity() {
                 },
                 cartTotalRub(),
             )
+            // clientOrderId привязывается к попытке оформления: повтор create (retry) идёт с тем же
+            // id, а новый заказ после clear корзины — с новым (см. KitchenCheckout).
+            KitchenCheckout.bind(pending.id)
         } catch (t: Throwable) {
             Log.e(TAG, "queue pending", t)
         }
@@ -4836,11 +4845,111 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Kitchen-очередь: создать заказ для бариста после подтверждённой оплаты.
+     *
+     * Продажа уже прошла — ошибка API её не откатывает: пишем лог, одна повторная попытка,
+     * кассиру короткий toast. `clientOrderId` тот же на retry (idempotency на backend).
+     */
+    private fun createKitchenOrderAsync(
+        pendingId: String,
+        lines: List<KitchenItems.Line>,
+        totalRub: BigDecimal,
+    ) {
+        val store = DeviceHeaders.storeUuid(this)
+        if (store.isNullOrBlank()) {
+            Log.w(TAG, "kitchen_skipped missing_store")
+            return
+        }
+        val clientId = KitchenCheckout.current(pendingId)
+            ?: KitchenCheckout.bind(pendingId, java.util.UUID.randomUUID().toString())
+        val queueOrderId = kitchenQueueOrderId()
+        val totalKopecks = totalRub.movePointRight(2).setScale(0, RoundingMode.HALF_UP).toLong()
+        val apiLines = lines.map { KitchenApi.Line(it.name, it.qty, it.mods, it.note) }
+        thread(name = "kitchen-create") {
+            val created = try {
+                KitchenQueue.createWithRetry(
+                    clientOrderId = clientId,
+                    storeUuid = store,
+                    lines = apiLines,
+                    totalKopecks = totalKopecks,
+                    queueOrderId = queueOrderId,
+                ) { message -> Log.w(TAG, message) }
+            } catch (t: Throwable) {
+                Log.w(TAG, "kitchen_create_failed", t)
+                null
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (created != null) {
+                    KitchenCheckout.forget()
+                    Log.i(TAG, "kitchen_ready number=${created.queueNumber}")
+                    if (screen == Screen.POSTPAY) safeRender()
+                } else {
+                    Toast.makeText(this, "Очередь не создана — повторите заказ вручную", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    /** `orderId` выданного номера: связывает kitchen-заказ с номером на чеке. */
+    private fun kitchenQueueOrderId(): String? =
+        try {
+            QueueNumberStore.peek(this)?.orderId
+        } catch (_: Throwable) {
+            null
+        }
+
+    private val kitchenPoll = object : Runnable {
+        override fun run() {
+            refreshKitchenStatus()
+            handler.postDelayed(this, KITCHEN_POLL_MS)
+        }
+    }
+
+    private fun startKitchenPoll() {
+        handler.removeCallbacks(kitchenPoll)
+        handler.postDelayed(kitchenPoll, KITCHEN_POLL_MS)
+    }
+
+    private fun stopKitchenPoll() {
+        handler.removeCallbacks(kitchenPoll)
+    }
+
+    /**
+     * Статус kitchen-заказа: бариста отмечает «исполнен» в своём приложении.
+     * Ошибка сети игнорируется — статус не влияет на продажу.
+     */
+    private fun refreshKitchenStatus() {
+        val current = KitchenQueue.last() ?: return
+        if (current.done) return
+        val store = DeviceHeaders.storeUuid(this) ?: return
+        if (kitchenStatusInFlight) return
+        kitchenStatusInFlight = true
+        thread(name = "kitchen-status") {
+            val result = try {
+                KitchenApi.statuses(listOf(current.orderId), store)
+            } catch (t: Throwable) {
+                KitchenApi.Result.Err(t.message ?: "network")
+            }
+            runOnUiThread {
+                kitchenStatusInFlight = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (result is KitchenApi.Result.Ok) {
+                    val update = result.value.firstOrNull { it.id == current.orderId }
+                    if (update != null && update.status != current.status) {
+                        KitchenQueue.applyStatus(update)
+                        if (screen == Screen.POSTPAY || screen == Screen.QUEUE) safeRender()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Перезапросить карту в фоне. После продажи backend видит новые чашки только после poll,
      * поэтому обновление идёт и сразу, и по таймеру (C04).
      */
-    private fun refreshCardAsync(notifyOnChange: Boolean = false) {
-        val current = CardSession.get(this)?.takeIf { it.code.isNotEmpty() } ?: return
+    private fun refreshCardAsync(notifyOnChange: Boolean = false) {        val current = CardSession.get(this)?.takeIf { it.code.isNotEmpty() } ?: return
         if (cardRefreshing) return
         val epoch = cardEpoch
         cardRefreshing = true
@@ -5898,6 +6007,9 @@ class MainActivity : AppCompatActivity() {
         topBar.removeAllViews()
         topBar.setPadding(dp(12), dp(10), dp(12), dp(8))
         val order = postPayOrder
+        // Номер очереди выдаёт сервер при создании kitchen-заказа; до ответа — номер локальной очереди.
+        val kitchen = KitchenQueue.last()
+        val queueNumber = kitchen?.queueNumber ?: order?.label
         root.addView(TextView(this).apply {
             text = "ЧЕК ЗАКРЫТ"
             textSize = 10f
@@ -5906,7 +6018,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(UiKit.MUTED)
         })
         root.addView(TextView(this).apply {
-            text = order?.let { "Заказ № ${it.label}" } ?: "Заказ принят"
+            text = queueNumber?.let { "Заказ № $it" } ?: "Заказ принят"
             textSize = 32f
             weight(Fonts.STRONG)
             letterSpacing = -0.02f
@@ -5926,6 +6038,15 @@ class MainActivity : AppCompatActivity() {
                 textSize = 10.5f
                 setTextColor(UiKit.MUTED)
                 setPadding(0, dp(4), 0, 0)
+            })
+        }
+        if (kitchen != null) {
+            root.addView(TextView(this).apply {
+                text = if (kitchen.done) "Готово — можно забирать" else "Готовится у бариста"
+                textSize = 11f
+                weight(Fonts.SEMIBOLD)
+                setTextColor(if (kitchen.done) UiKit.SUCCESS else UiKit.MUTED)
+                setPadding(0, dp(6), 0, 0)
             })
         }
 
@@ -5999,6 +6120,18 @@ class MainActivity : AppCompatActivity() {
             text = "Очередь"; textSize = 16f; weight(Fonts.STRONG); setTextColor(INK)
         })
         topBar.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        // Последний kitchen-заказ: статус приходит от бариста (poll), а не с этого терминала.
+        KitchenQueue.last()?.let { k ->
+            root.addView(TextView(this).apply {
+                val state = if (k.done) "готов" else "в работе у бариста"
+                text = "Заказ № ${k.queueNumber} · $state"
+                textSize = 11f
+                weight(Fonts.SEMIBOLD)
+                setTextColor(if (k.done) UiKit.SUCCESS else UiKit.MUTED)
+                setPadding(dp(2), dp(8), 0, 0)
+            })
+        }
 
         fun section(title: String, count: Int) {
             root.addView(TextView(this).apply {
@@ -6174,6 +6307,8 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {}
         // Очередь предзаказов: первый запрос сразу, дальше раз в 10 с до onPause.
         startOrdersPoll()
+        // Статус kitchen-заказа (бариста отмечает «исполнен») — реже, раз в 20 с.
+        startKitchenPoll()
         // Корзину могли пополнить на экране предзаказа — полоса и суммы должны обновиться.
         if (::root.isInitialized) onCartChanged()
         // Сбой скидки не теряем: причина уже в логе сервиса, кассиру — понятное сообщение.
@@ -6199,6 +6334,12 @@ class MainActivity : AppCompatActivity() {
                     val pulledOrder = PreorderPullSession.orderId()
                     val pulledInCart = pulledOrder != null &&
                         Cart.all().any { it.cartKey.startsWith("pre:$pulledOrder:") }
+                    // Kitchen-заказ создаётся в ЕДИНОЙ точке: оплата подтверждена (SELL закрыт).
+                    // Состав фиксирован, продажа уже состоялась — сеть не может её откатить.
+                    // Предзаказ, подтянутый в чек, в очереди уже есть: второй раз не создаём.
+                    val pendingId = OrderQueueStore.pendingId(this)
+                    val kitchenItems = if (pulledInCart) emptyList() else KitchenItems.fromCart(Cart.all())
+                    val kitchenTotal = cartTotalRub()
                     val done = confirmPendingOrder()
                     if (pulledInCart && pulledOrder != null) {
                         // paid — только если чек реально напечатан: аннул/отмена печати не дают.
@@ -6228,6 +6369,10 @@ class MainActivity : AppCompatActivity() {
                     screen = if (done != null) Screen.POSTPAY else Screen.QUEUE
                     // Без post-pay экрана карта больше не нужна: следующий гость начинает с чистого листа.
                     if (done == null) forgetCard()
+                    // Kitchen: бариста должен увидеть заказ. Ошибка API продажу не откатывает.
+                    if (pendingId != null && kitchenItems.isNotEmpty()) {
+                        createKitchenOrderAsync(pendingId, kitchenItems, kitchenTotal)
+                    }
                     // Чашки появятся у гостя только после poll на backend — тянем свежие данные.
                     refreshCardAsync()
                     safeRender()
@@ -6257,6 +6402,7 @@ class MainActivity : AppCompatActivity() {
         // Экран не виден — сервер больше не опрашиваем (опрос возобновится в onResume).
         stopCardPoll()
         stopOrdersPoll()
+        stopKitchenPoll()
         try { unregisterReceiver(scanReceiver) } catch (_: Exception) {}
         super.onPause()
     }
@@ -6291,6 +6437,8 @@ class MainActivity : AppCompatActivity() {
         const val REPEAT_INTERRUPT_DELAY_MS = 300L
         /** Опрос очереди предзаказов на главном экране (промпт 2.1: каждые 10 с). */
         const val ORDERS_POLL_MS = 10_000L
+        /** Опрос статуса kitchen-заказа (бариста отмечает «исполнен» в своём приложении). */
+        const val KITCHEN_POLL_MS = 20_000L
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         val BRAND = UiKit.BRAND
