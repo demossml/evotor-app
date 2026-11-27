@@ -123,4 +123,31 @@ class ToppingRulesTest {
         val message = ToppingRules.blockers(listOf("Молоко" to noGoods), emptySet()).first()
         assertTrue(message.contains("нет доступных опций"))
     }
+
+    @Test
+    fun `free milk is preselected even without isDefault flag`() {
+        val milk = listOf(
+            ToppingRules.ruleOf(topping(1, "0", uuid = null, zero = true, group = "milk")),
+            ToppingRules.ruleOf(topping(2, "80", group = "milk")),
+        )
+        assertEquals("t:1", ToppingRules.defaultOf(milk)?.key)
+    }
+
+    @Test
+    fun `paid milk is never preselected`() {
+        val milk = listOf(
+            ToppingRules.ruleOf(topping(1, "80", group = "milk")),
+            ToppingRules.ruleOf(topping(2, "90", group = "milk")),
+        )
+        assertEquals(null, ToppingRules.defaultOf(milk))
+    }
+
+    @Test
+    fun `explicit isDefault still wins over free option`() {
+        val milk = listOf(
+            ToppingRules.ruleOf(topping(1, "0", uuid = null, zero = true, group = "milk")),
+            ToppingRules.ruleOf(topping(2, "80", isDefault = true, group = "milk")),
+        )
+        assertEquals("t:2", ToppingRules.defaultOf(milk)?.key)
+    }
 }

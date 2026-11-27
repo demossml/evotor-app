@@ -112,6 +112,14 @@ class OptionPicker(context: Context) : LinearLayout(context) {
     private var defSyrup: Opt? = null
     private var defSugar: Opt? = null
 
+    /**
+     * Блок «Молоко» сверху не рисуется, если в группе есть бесплатное «Обычное».
+     * Альтернативное молоко живёт в «Добавках» и заменяет обычное (zero-option в чек не идёт).
+     * Иначе кассир видит вверху недоступные/устаревшие опции («овсяное») и ловит запрет
+     * продажи в POS.
+     */
+    private var milkHidden = false
+
     companion object {
         /** Опции из номенклатуры Эвотор: «можно несколько» без схемного maxCount. */
         private const val UNLIMITED = 99
@@ -154,8 +162,11 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         defMilk = pickDefault(opts.milk)
         defSyrup = pickDefault(opts.syrup)
         defSugar = pickDefault(opts.sugar)
+        milkHidden = opts.milk.any { it.zeroOption && it.sellable }
         // При редактировании восстанавливаем отмеченные ранее опции (в корзине они лежат отдельными строками).
-        milk = opts.milk.firstOrNull { it.key in preselect && it.sellable } ?: defMilk
+        // Скрытый блок «Молоко» всегда возвращается к бесплатному дефолту — альтернативы в «Добавках».
+        milk = if (milkHidden) defMilk
+        else opts.milk.firstOrNull { it.key in preselect && it.sellable } ?: defMilk
         syrup = opts.syrup.firstOrNull { it.key in preselect && it.sellable } ?: defSyrup
         sugar = opts.sugar.firstOrNull { it.key in preselect && it.sellable } ?: defSugar
         extras.clear()
@@ -206,7 +217,9 @@ class OptionPicker(context: Context) : LinearLayout(context) {
         defMilk = pickDefault(newOpts.milk)
         defSyrup = pickDefault(newOpts.syrup)
         defSugar = pickDefault(newOpts.sugar)
-        milk = newOpts.milk.firstOrNull { it.key == milk?.key && it.sellable } ?: defMilk
+        milkHidden = newOpts.milk.any { it.zeroOption && it.sellable }
+        milk = if (milkHidden) defMilk
+        else newOpts.milk.firstOrNull { it.key == milk?.key && it.sellable } ?: defMilk
         syrup = newOpts.syrup.firstOrNull { it.key == syrup?.key && it.sellable } ?: defSyrup
         sugar = newOpts.sugar.firstOrNull { it.key == sugar?.key && it.sellable } ?: defSugar
         val kept = LinkedHashMap<String, Opt>()
@@ -317,7 +330,7 @@ class OptionPicker(context: Context) : LinearLayout(context) {
             sugarCount = opts.sugar.size,
             extraCount = opts.extra.size,
             choiceCount = if (choiceScheme != null) 1 else 0,
-        )
+        ).filterNot { milkHidden && it == SheetSections.MILK }
 
         if (SheetSections.VOLUME in sections) {
             header("Объём", "обязательно")

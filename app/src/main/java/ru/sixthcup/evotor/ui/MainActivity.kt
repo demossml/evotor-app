@@ -81,6 +81,7 @@ import ru.sixthcup.evotor.data.RepeatInterrupt
 import ru.sixthcup.evotor.data.RepeatSession
 import ru.sixthcup.evotor.data.ProductConfig
 import ru.sixthcup.evotor.data.ProductConfigCache
+import ru.sixthcup.evotor.data.ProductConfigPrefetcher
 import ru.sixthcup.evotor.data.ProductConfigGuard
 import ru.sixthcup.evotor.data.ServerCatalog
 import ru.sixthcup.evotor.data.CartLine
@@ -612,6 +613,13 @@ class MainActivity : AppCompatActivity() {
             }
             val withTop = merged.count { it.toppings.isNotEmpty() }
             val withSellable = merged.count { it.toppings.any { top -> !top.evotorUuid.isNullOrBlank() } }
+            // Предзагрузка конфигураций в фоне (только товары с опциями): лист по тапу
+            // открывается сразу из кэша, без «пустого» рендера и последующей пересборки.
+            val prefetchIds = merged.asSequence()
+                .filter { it.supportsMods || it.toppings.isNotEmpty() || it.isCombo }
+                .mapNotNull { enrich.byUuid[it.uuid]?.productId }
+                .toList()
+            ProductConfigPrefetcher.start(ctx, storeUuid ?: enrich.storeUuid ?: "", prefetchIds)
             runOnUiThread {
                 if (isFinishing || isDestroyed || gen != catalogGen) return@runOnUiThread
                 swipeRefresh?.isRefreshing = false
@@ -1581,9 +1589,32 @@ class MainActivity : AppCompatActivity() {
             requested = true,
             terminalUuid = p.uuid,
         )
+        // Предзагрузка: если конфигурация уже в кэше, лист откроется сразу с ней —
+        // без первого «пустого» рендера и без пересборки после ответа (меньше «дёрганья»).
+        val cachedBefore: ProductConfig? = ProductConfigCache.load(this, storeUuid, backendId)?.first
+        if (cachedBefore != null) {
+            pendingConfig = cachedBefore
+            silentAddByUuid[p.uuid] = !cachedBefore.hasChoices
+            sheetDebug = sheetDebug.copy(
+                phase = ConfigSheetDebug.Phase.DONE,
+                fromCache = true,
+                configPresent = true,
+                volumes = cachedBefore.volumes.size,
+                milkOptions = cachedBefore.milk?.byProductId?.values?.sumOf { it.options.size },
+                additionOptions = cachedBefore.additions?.byProductId?.values?.sumOf { it.options.size },
+                configErrors = cachedBefore.configErrors,
+            )
+            Log.i(TAG, "config_cache_preloaded product=$backendId volumes=${cachedBefore.volumes.size}")
+        }
         // Лист, который откроется в любом случае (есть выбор объёма/опций), показываем сразу:
         // иначе «тихо ждём» и на кассе выглядит как «ничего не происходит».
-        if (variantModel.hasChoice(p)) openProductLegacy(p, "config_loading", allowDirectAdd = false)
+        if (variantModel.hasChoice(p)) {
+            openProductLegacy(
+                p,
+                if (cachedBefore != null) "config_cache_hit" else "config_loading",
+                allowDirectAdd = false,
+            )
+        }
         configLoadingUuid = p.uuid
         productsLoadingSheet = true
         val gen = ++configGen
@@ -1620,14 +1651,16 @@ class MainActivity : AppCompatActivity() {
                 // ранний refresh успевал прочитать picker прошлого листа — парадокс строк 6 vs 8.
                 val sheetOpen = sheetProductUuid == p.uuid && sheetApplyConfig != null
                 val sheetWasClosed = sheetClosedForUuid == p.uuid
-                fun deliver(why: String, allowDirectAdd: Boolean) {
+                fun deliver(why: String, allowDirectAdd: Boolean, sameAsCached: Boolean = false) {
                     when {
-                        // Лист уже открыт (показан до запроса): пересобираем его целиком.
-                        // Патч на месте (rebind) не гарантировал секции: picker мог остаться
-                        // с опциями, которых на экране не было (скрин 155: opts 2/7/10, видно только объём).
-                        sheetOpen -> {
-                            logSheetRecall(p, why)
-                            rebuildItemSheet(p)
+                        // Лист уже открыт (показан до запроса): пересобираем контент ВНУТРИ него.
+                        // Если сервер вернул то же, что уже показано из кэша — пересборка не нужна.
+                        sheetOpen -> when {
+                            sameAsCached -> Log.i(TAG, "config_unchanged product=${p.uuid}")
+                            else -> {
+                                logSheetRecall(p, why)
+                                rebuildItemSheet(p)
+                            }
                         }
                         // Кассир закрыл карточку раньше, чем пришёл ответ — не всплываем повторно.
                         sheetWasClosed -> Log.i(TAG, "product_open ${p.uuid} $why sheet=closed_by_user")
@@ -1656,6 +1689,7 @@ class MainActivity : AppCompatActivity() {
                         deliver(
                             "config_ok volumes=${cfg.volumes.size} milk=${cfg.milk != null} additions=${cfg.additions != null}",
                             allowDirectAdd = !cfg.hasChoices,
+                            sameAsCached = cfg == cachedBefore,
                         )
                     }
                     res.unsupported -> {
@@ -1937,7 +1971,10 @@ class MainActivity : AppCompatActivity() {
      */
     /**
      * Пересобрать открытый лист с уже полученной конфигурацией.
-     * Дешевле и надёжнее, чем точечно обновлять picker: разметка строится из финального состояния.
+     *
+     * Важно: диалог **не закрываем и не открываем заново** — у открытого
+     * `BottomSheetDialog` меняем только `contentView`. Раньше здесь был dismiss + show,
+     * из-за чего лист визуально «открывался дважды» и дёргался.
      */
     private fun rebuildItemSheet(p: CatalogProduct) {
         val dialog = itemSheetDialog
@@ -1945,16 +1982,20 @@ class MainActivity : AppCompatActivity() {
             openProductLegacy(p, "config_rebuilt reason=no_sheet", allowDirectAdd = false)
             return
         }
-        // Снимаем ссылку ДО закрытия: dismiss-листенер по идентичности поймёт, что это наша инициатива.
-        itemSheetDialog = null
-        // Старая лямбда читала прошлый picker: до новой привязки она не должна пережить пересборку.
-        sheetPickerDebug = null
+        Log.i(TAG, "sheet_rebuild_inplace product=${p.uuid}")
         try {
-            dialog.dismiss()
+            showItemSheet(p, existing = dialog)
         } catch (t: Throwable) {
-            Log.w(TAG, "sheet_rebuild_dismiss", t)
+            // Страховка: если подмена контента упала — старый путь (закрыть и открыть).
+            Log.w(TAG, "sheet_rebuild_inplace_failed", t)
+            itemSheetDialog = null
+            sheetPickerDebug = null
+            try {
+                dialog.dismiss()
+            } catch (_: Throwable) {
+            }
+            showItemSheet(p)
         }
-        showItemSheet(p)
     }
 
     /** Лист уже открыт: пишем в лог то же, что раньше писал openProductLegacy. */
@@ -2061,7 +2102,7 @@ class MainActivity : AppCompatActivity() {
      * item-sheet 1:1 index: hero → название+цена → описание → теги → «в чеке уже N» →
      * опции → qty + «В чек · сумма».
      */
-    private fun showItemSheet(p: CatalogProduct) {
+    private fun showItemSheet(p: CatalogProduct, existing: BottomSheetDialog? = null) {
         dismissSheets()
         val own = variantModel.variantsOf(p)
         // Карточка объёмов — одна сущность: схема добавок общая для всех размеров.
@@ -2098,7 +2139,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        val dialog = BottomSheetDialog(this)
+        val dialog = existing ?: BottomSheetDialog(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(WHITE)
@@ -2412,7 +2453,12 @@ class MainActivity : AppCompatActivity() {
             scheduleRepeatInterrupt()
         }
         catalogSheetOpen = true
-        dialog.show()
+        if (existing == null) {
+            dialog.show()
+        } else {
+            // Лист уже на экране: контент подменён, повторный dismiss/show даёт две анимации.
+            Log.i(TAG, "sheet_content_swapped product=${p.uuid}")
+        }
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
     }
@@ -4613,7 +4659,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Один mark-paid на заказ: onResume и повторный возврат не должны дублировать запрос. */
     private val paidInFlight: MutableSet<String> =
-        java.util.concurrent.ConcurrentHashMap.newKeySet()
+        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     /**
      * Финальная проверка корзины по последнему каталогу и передача позиций Эвотору.
